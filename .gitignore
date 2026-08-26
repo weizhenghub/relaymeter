@@ -55,3 +55,7 @@ upstreams.json.tmp
 # Relay runtime
 .relay-logs/
 scratch/
+
+# Electron (src/relay/electron_app) — never commit the runtime
+node_modules/
+

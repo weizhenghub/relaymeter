@@ -72,6 +72,16 @@ python -m pip install -e .
 
 推薦 Python 3.11+。Windows / macOS / Linux 都跑得起來，桌面 GUI 需 pywebview 支援的系統 WebView 後端（Windows 自帶 WebView2、macOS 自帶 WKWebView、Linux 裝 `webkit2gtk-4.1`）。
 
+> **懸浮球 / 即時流側欄視窗（Electron）** —— 懸浮球和即時流側欄是 Electron 渲染視窗，不是 WebView。要啟用它們，clone 後需安裝 Electron 執行環境：
+
+```bash
+cd src/relay/electron_app
+npm ci          # 或 npm install；把 Electron 二進位下載到 node_modules
+cd ../..
+```
+
+沒有這一步，主儀表板仍能正常用，但懸浮球和即時流側欄視窗不會出現（中繼日誌會報 `electron.exe not found`）。
+
 ### 2. 啟動
 
 任選其一：

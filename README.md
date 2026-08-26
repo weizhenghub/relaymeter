@@ -72,6 +72,16 @@ python -m pip install -e .
 
 Python 3.11+ recommended. Runs on Windows / macOS / Linux. The desktop GUI needs a pywebview-supported system WebView backend (Windows ships WebView2, macOS ships WKWebView, Linux needs `webkit2gtk-4.1`).
 
+> **Floating-ball / live-panel window (Electron)** — the floating sidebar ball and the live-panel window are Electron renderers, not WebView. To enable them, install the Electron runtime after cloning:
+
+```bash
+cd src/relay/electron_app
+npm ci          # or npm install; downloads the Electron binary into node_modules
+cd ../..
+```
+
+Without this step the main dashboard still works, but the floating ball and live-panel window won't appear (the relay logs `electron.exe not found`).
+
 ### 2. Launch
 
 Pick one:

@@ -72,6 +72,16 @@ python -m pip install -e .
 
 Python 3.11+ 推奨。Windows / macOS / Linux いずれでも動作します。デスクトップ GUI には pywebview 対応のシステム WebView バックエンドが必要です（Windows は WebView2 標準搭載、macOS は WKWebView 標準搭載、Linux は `webkit2gtk-4.1` をインストール）。
 
+> **フローティングボール / リアルタイムストリームサイドバー（Electron）** —— フローティングボールとリアルタイムストリームサイドバーは WebView ではなく Electron レンダラーです。有効にするには、clone 後に Electron ランタイムをインストールします：
+
+```bash
+cd src/relay/electron_app
+npm ci          # または npm install；Electron バイナリを node_modules に取得
+cd ../..
+```
+
+この手順がない場合、メインダッシュボードは動作しますが、フローティングボールとリアルタイムストリームサイドバーは表示されません（リレーログに `electron.exe not found` と出ます）。
+
 ### 2. 起動
 
 どちらかをお選びください：

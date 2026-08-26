@@ -69,6 +69,17 @@ git clone https://github.com/weizhenghub/relaymeter.git
 cd relaymeter
 python -m pip install -e .
 ```
+
+> **悬浮球 / 实时流侧栏窗口（Electron）** —— 悬浮球和实时流侧栏是 Electron 渲染窗口，不是 WebView。要启用它们，clone 后需安装 Electron 运行时：
+
+```bash
+cd src/relay/electron_app
+npm ci          # 或 npm install；把 Electron 二进制下载到 node_modules
+cd ../..
+```
+
+没有这一步，主仪表盘仍能正常用，但悬浮球和实时流侧栏窗口不会出现（中继日志会报 `electron.exe not found`）。
+
 ### 2. 启动
 
 任选其一：

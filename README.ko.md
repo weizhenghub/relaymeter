@@ -72,6 +72,16 @@ python -m pip install -e .
 
 Python 3.11+ 권장. Windows / macOS / Linux 모두 실행됩니다. 데스크톱 GUI는 pywebview가 지원하는 시스템 WebView 백엔드가 필요합니다(Windows는 WebView2 기본 내장, macOS는 WKWebView 기본 내장, Linux는 `webkit2gtk-4.1` 설치).
 
+> **플로팅 볼 / 실시간 스트림 사이드바(Electron)** —— 플로팅 볼과 실시간 스트림 사이드바는 WebView가 아닌 Electron 렌더러입니다. 활성화하려면 clone 후 Electron 런타임을 설치합니다:
+
+```bash
+cd src/relay/electron_app
+npm ci          # 또는 npm install; Electron 바이너리를 node_modules에 다운로드
+cd ../..
+```
+
+이 단계가 없으면 메인 대시보드는 작동하지만 플로팅 볼과 실시간 스트림 사이드바는 나타나지 않습니다(릴레이 로그에 `electron.exe not found`가 표시됨).
+
 ### 2. 실행
 
 둘 중 하나를 선택하세요:
