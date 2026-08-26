@@ -3114,13 +3114,13 @@ body.card-resizing-both * {
 .settings-view {
   display: flex;
   flex-direction: column;
-  /* v0.193：设置页整体放大 1.2×。非标准的 zoom 属性在 Chromium / WebView2
-   * 上等价于整页 layout 缩放（与 transform: scale 不同 —— zoom 参与
-   * 布局计算，父容器 .main 的 overflow-y:auto 会自然接管滚动，1.2×
-   * 后的内容不会撑爆窗口；只放大字会到处漏 padding/gap/控件大小，
-   * 用户要的是"所有元素整体调大"，zoom 一行解决。 仅作用于 .settings-view
-   * 根容器，不影响其它视图。 */
-  zoom: 1.2;
+  /* v0.193：设置页整体缩放，v0.194 缩小 10%（1.2× → 1.08×）。
+   * 非标准的 zoom 属性在 Chromium / WebView2 上等价于整页 layout 缩放
+   * （与 transform: scale 不同 —— zoom 参与布局计算，父容器 .main 的
+   * overflow-y:auto 会自然接管滚动，缩放后的内容不会撑爆窗口；只改字号
+   * 会到处漏 padding/gap/控件大小，用户要的是"所有元素整体缩放"，zoom
+   * 一行解决）。仅作用于 .settings-view 根容器，不影响其它视图。 */
+  zoom: 1.08;
 }
 .settings-section {
   padding: var(--spacing-lg) 0;
@@ -5613,6 +5613,10 @@ body.overview-no-frame .view[data-view="overview"] .glass-card::before {
   max-width: 760px;
   margin: 8px auto 32px auto;
   padding: 0 24px;
+  /* v0.194：配置页整体缩小 10%。与 .settings-view 同用 zoom（Chromium /
+   * WebView2 上等价整页 layout 缩放），仅作用于 .config-page 根容器，
+   * 不影响其它视图。 */
+  zoom: 0.9;
 }
 .config-page .cfg-help { line-height: 1.7; font-size: 13.5px; color: var(--text-primary); }
 /* —— 段落 —— */
