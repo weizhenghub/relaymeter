@@ -52,6 +52,13 @@ def _find_electron_exe() -> Optional[str]:
 
 
 def _find_app_root() -> str:
+    # v0.195：便携附件包（frozen onefile + 旁置 relay_assets/）场景下，可
+    # 用 RELAY_ELECTRON_APP_ROOT 显式指定 electron_app 目录；未设时退回
+    # 源码树内的 electron_app（与 _find_electron_exe 的 RELAY_ELECTRON_EXE
+    # 对齐，便于附件包/单 exe 两种形态复用同一套 ball 渲染资产）。
+    env = os.environ.get("RELAY_ELECTRON_APP_ROOT")
+    if env and os.path.isdir(env):
+        return env
     return os.path.join(os.path.dirname(__file__), "electron_app")
 
 
