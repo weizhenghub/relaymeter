@@ -4813,6 +4813,33 @@ def _force_replace_stale_gui() -> bool:
     return False
 
 
+def _bootstrap_portable_assets() -> None:
+    """v0.195：便携附件包（frozen onefile + 旁置 relay_assets/）自动发现。
+
+    PyInstaller onefile 解开后 ``__file__`` 指向临时解包目录，Electron 运行时
+    （electron.exe，约 244MB）与 ball/panel 渲染资产无法冻结进 exe，必须落在
+    exe 同目录的 ``relay_assets/``（由 build_release.py 组装）。启动时检测到
+    relay_assets 就把 RELAY_ELECTRON_EXE / RELAY_ELECTRON_APP_ROOT 指过去，
+    使悬浮球 + 实时面板在便携形态下可用；源码态（非 frozen）无旁置目录，
+    完全不影响原有逻辑。
+    """
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+    except Exception:
+        return
+    assets = exe_dir / "relay_assets"
+    if not assets.is_dir():
+        return
+    elec_exe = assets / "electron" / "electron.exe"
+    if elec_exe.is_file():
+        os.environ["RELAY_ELECTRON_EXE"] = str(elec_exe)
+        _logger.info("portable: RELAY_ELECTRON_EXE=%s", elec_exe)
+    app_root = assets / "electron_app"
+    if app_root.is_dir():
+        os.environ["RELAY_ELECTRON_APP_ROOT"] = str(app_root)
+        _logger.info("portable: RELAY_ELECTRON_APP_ROOT=%s", app_root)
+
+
 def run() -> None:
     """Console-script entry point: ``relay-gui``."""
     import argparse
@@ -4835,6 +4862,16 @@ def run() -> None:
     # v0.107: 每次启动都在 stderr 打进度（PyCharm 控制台可见，无需 --diag），
     # 用来定位启动变慢 —— 尤其单实例接管 / force-replace 的耗时。
     _boot_tick("run() entered")
+
+    # v0.195: 便携附件包（frozen onefile + 旁置 relay_assets/）自动发现。
+    # PyInstaller onefile 解开后 __file__ 指向临时解包目录，web 资产可从
+    # _MEIPASS/relay/web 取；但 Electron 运行时（electron.exe 244MB）和
+    # ball/panel 渲染资产无法冻结进 exe，必须落在 exe 旁的 relay_assets/。
+    # 启动时检测 exe 同目录若有 relay_assets，就指向它（设 RELAY_ELECTRON_EXE
+    # / RELAY_ELECTRON_APP_ROOT），使悬浮球 + 实时面板在便携形态下可用。
+    # 源码态（非 frozen）无旁置目录，完全不影响原有逻辑。
+    if getattr(sys, "frozen", False):
+        _bootstrap_portable_assets()
 
     # Diagnostic logging is opt-in (--diag). A frozen bridge in a
     # PyCharm-launched ``python main.py`` run can still be diagnosed by
