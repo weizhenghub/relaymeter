@@ -37,22 +37,22 @@
 ## RelayMeter 能做什麼
 
 **• 點點滑鼠直接切換到想用的模型：**
-<img src="img_1.png" alt="" style="width: 60%;margin-left: 5%;" />  
+<img src="img_1.png" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" /> />  
 
 **• 查看不同平台的流量統計：**  
-<img src="img_13.png" alt="" style="width: 60%;margin-left: 5%;" />
+<img src="img_13.png" alt="" style="display:block;width:420px;max-width:100%;margin:12px auto;" /> />
 
 **• 在歷史中直接查看訊息原文**
-<img src="output2.gif" alt="" style="width: 70%;margin-left: 5%;" />  
+<img src="output2.gif" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" /> />  
 
 **• 豐富的統計圖表：**  
-<img src="output3.gif" alt="" style="width: 60%;margin-left: 5%;" />  
+<img src="output3.gif" alt="" style="display:block;width:640px;max-width:100%;margin:12px auto;" /> />  
 
 **• 流狀態指示動畫**  
-<img src="output4.gif" alt="" style="width: 60%;margin-left: 5%;" />  
+<img src="output4.gif" alt="" style="display:block;width:560px;max-width:100%;margin:12px auto;" /> />  
 
 **• 開啟即時流側欄，即時查看流式內容以及工具呼叫資訊**  
-<img src="output.gif" alt="" style="width: 40%;margin-left: 5%;" />    
+<img src="output.gif" alt="" style="display:block;width:320px;max-width:100%;margin:12px auto;" /> />    
 
 **• 以及側欄控制懸浮球、透傳模式、跨協定轉換、流平台識別等更多豐富實用的功能**
 <br><br>
@@ -95,7 +95,7 @@ curl http://127.0.0.1:8088/live      # 正在進行的請求
 ```
 ### 4. 在中繼裡連結模型供應商  
 **上游 -> 新建上游：**  
-<img src="img_15.png" alt="" style="width: 60%;margin-left: 5%;" />    
+<img src="img_15.png" alt="" style="display:block;width:440px;max-width:100%;margin:12px auto;" /> />    
 可以建立多個模型，輸入完畢後請按 Enter 確認。
 
 進階功能（計費 / 倍率 / 限額 / 協定配接器，摺疊區）：
@@ -190,9 +190,9 @@ model                    = 實際模型
 
 ### 6. 開始使用
 選擇一個模型：  
-<img src="img_16.png" alt="" style="width: 60%;margin-left: 5%;" />    
+<img src="img_16.png" alt="" style="display:block;width:520px;max-width:100%;margin:12px auto;" /> />    
 開始使用：  
-<img src="img_17.png" alt="" style="width: 60%;margin-left: 5%;" />    
+<img src="img_17.png" alt="" style="display:block;width:720px;max-width:100%;margin:12px auto;" /> />    
 
 
 ```mermaid

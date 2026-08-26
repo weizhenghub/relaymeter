@@ -37,22 +37,22 @@
 ## RelayMeter가 할 수 있는 일
 
 **• 클릭 한 번으로 원하는 모델로 전환:**
-<img src="img_1.png" alt="" style="width: 60%;margin-left: 5%;" />  
+<img src="img_1.png" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" /> />  
 
 **• 플랫폼별 트래픽 통계 확인:**  
-<img src="img_13.png" alt="" style="width: 60%;margin-left: 5%;" />
+<img src="img_13.png" alt="" style="display:block;width:420px;max-width:100%;margin:12px auto;" /> />
 
 **• 기록에서 메시지 원문을 바로 확인**
-<img src="output2.gif" alt="" style="width: 70%;margin-left: 5%;" />  
+<img src="output2.gif" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" /> />  
 
 **• 풍부한 통계 차트:**  
-<img src="output3.gif" alt="" style="width: 60%;margin-left: 5%;" />  
+<img src="output3.gif" alt="" style="display:block;width:640px;max-width:100%;margin:12px auto;" /> />  
 
 **• 스트림 상태 표시 애니메이션**  
-<img src="output4.gif" alt="" style="width: 60%;margin-left: 5%;" />  
+<img src="output4.gif" alt="" style="display:block;width:560px;max-width:100%;margin:12px auto;" /> />  
 
 **• 실시간 스트림 사이드바를 열어 스트리밍 내용과 도구 호출 정보를 실시간으로 확인**  
-<img src="output.gif" alt="" style="width: 40%;margin-left: 5%;" />    
+<img src="output.gif" alt="" style="display:block;width:320px;max-width:100%;margin:12px auto;" /> />    
 
 **• 그 밖에도 사이드바 컨트롤용 플로팅 볼, 패스스루 모드, 크로스 프로토콜 변환, 스트림 플랫폼 식별 등 다양하고 실용적인 기능을 갖췄습니다.**
 <br><br>
@@ -95,7 +95,7 @@ curl http://127.0.0.1:8088/live      # 진행 중인 요청
 ```
 ### 4. 릴레이에 모델 제공자 연결  
 **업스트림 -> 새 업스트림:**  
-<img src="img_15.png" alt="" style="width: 60%;margin-left: 5%;" />    
+<img src="img_15.png" alt="" style="display:block;width:440px;max-width:100%;margin:12px auto;" /> />    
 여러 모델을 만들 수 있으며, 입력 후 Enter로 확정합니다.
 
 고급 기능(과금 / 배율 / 한도 / 프로토콜 어댑터, 접힘 영역):
@@ -190,9 +190,9 @@ model                    = 실제 모델
 
 ### 6. 사용 시작
 모델 선택:  
-<img src="img_16.png" alt="" style="width: 60%;margin-left: 5%;" />    
+<img src="img_16.png" alt="" style="display:block;width:520px;max-width:100%;margin:12px auto;" /> />    
 사용 시작:  
-<img src="img_17.png" alt="" style="width: 60%;margin-left: 5%;" />    
+<img src="img_17.png" alt="" style="display:block;width:720px;max-width:100%;margin:12px auto;" /> />    
 
 
 ```mermaid
