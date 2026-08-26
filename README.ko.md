@@ -7,7 +7,7 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 &nbsp;&nbsp;
-<b>모든 AI 코딩 에이전트를 위한 로컬 릴레이. Anthropic / OpenAI 간 프로토콜을 상호 변환하고, 모든 요청·플랫폼·업스트림의 토큰 사용량을 집계합니다.</b>
+<b>모든 AI 코딩 에이전트를 위한 로컬 릴레이. Anthropic Messages / OpenAI Chat Completions / OpenAI Responses 세 프로토콜 간을 상호 변환하고, 모든 요청·플랫폼·업스트림의 토큰 사용량을 집계합니다.</b>
 
 
 **1. 토큰 집계:**
