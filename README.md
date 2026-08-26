@@ -4,19 +4,19 @@
 
 <p align="center">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
-  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">  
-</p>  
-&nbsp;&nbsp; 
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
+</p>
+&nbsp;&nbsp;
 <b>A local relay for all AI coding agents. Translates between Anthropic / OpenAI protocols and meters token usage across every request, platform, and upstream.</b>
 
 
-**1. Token metering**  
+**1. Token metering**
 &nbsp;&nbsp;Meters the token usage of every request packet passing through the relay. Break down consumption by platform, model, or upstream,
-and optionally save raw message bodies to a local database.  
-**2. Protocol conversion**  
+and optionally save raw message bodies to a local database.
+**2. Protocol conversion**
 &nbsp;&nbsp;Converts between incompatible client and upstream protocols
-(Anthropic Messages, OpenAI Chat Completions, OpenAI Responses — any-to-any).  
-**3. Live streams**  
+(Anthropic Messages, OpenAI Chat Completions, OpenAI Responses — any-to-any).
+**3. Live streams**
 &nbsp;&nbsp;Watch the in-flight thinking and output text streams in the live-stream sidebar.
 
 
@@ -28,31 +28,31 @@ and optionally save raw message bodies to a local database.
 ## Why you need it
 **1. You run several agents (Claude Code, Codex, OpenClaw…) against several model providers (Anthropic, MiniMax, DeepSeek, ollama…).
 &nbsp;&nbsp;Their protocols differ — some speak Anthropic, some speak OpenAI. On an Anthropic-only client you can't use an OpenAI-only upstream:
-the provider rejects the payload, and the client can't parse the response either.  
-2. You have multiple upstreams and models, and you want to switch model or upstream per task — without editing config files on a pile of platforms.  
-3. You use one upstream provider across several platforms and want to know how many tokens it consumed in total. But no tool except the provider's own web page gives you a unified view of total token consumption.  
-4. Many coding-agent platforms are a black box while coding — they don't expose the thinking stream, sometimes not even the text stream. You can't see what's being produced, or whether it's still running or already hung.  
-5. You just want to admire how many tokens you can burn.**  
+the provider rejects the payload, and the client can't parse the response either.
+2. You have multiple upstreams and models, and you want to switch model or upstream per task — without editing config files on a pile of platforms.
+3. You use one upstream provider across several platforms and want to know how many tokens it consumed in total. But no tool except the provider's own web page gives you a unified view of total token consumption.
+4. Many coding-agent platforms are a black box while coding — they don't expose the thinking stream, sometimes not even the text stream. You can't see what's being produced, or whether it's still running or already hung.
+5. You just want to admire how many tokens you can burn.**
 
 ## What RelayMeter can do
 
 **• Click to switch to the model you want:**
-<p align="center"><img src="img_1.png" alt="" width="480"></p>
+<p style="margin-left:10%"><img src="img_1.png" alt="" width="480"></p>
 
-**• View traffic stats across platforms:**  
-<p align="center"><img src="img_13.png" alt="" width="420"></p>
+**• View traffic stats across platforms:**
+<p style="margin-left:10%"><img src="img_13.png" alt="" width="420"></p>
 
 **• Inspect raw message bodies right in history**
-<p align="center"><img src="output2.gif" alt="" width="480"></p>
+<p style="margin-left:10%"><img src="output2.gif" alt="" width="480"></p>
 
-**• Rich charts:**  
-<p align="center"><img src="output3.gif" alt="" width="640"></p>
+**• Rich charts:**
+<p style="margin-left:10%"><img src="output3.gif" alt="" width="640"></p>
 
-**• Stream-status indicator animations**  
-<p align="center"><img src="output4.gif" alt="" width="560"></p>
+**• Stream-status indicator animations**
+<p style="margin-left:10%"><img src="output4.gif" alt="" width="560"></p>
 
-**• Open the live-stream sidebar to watch streaming content and tool calls in real time**  
-<p align="center"><img src="output.gif" alt="" width="320"></p>
+**• Open the live-stream sidebar to watch streaming content and tool calls in real time**
+<p style="margin-left:10%"><img src="output.gif" alt="" width="320"></p>
 
 **• Plus a floating-ball sidebar control, passthrough mode, cross-protocol conversion, stream-platform detection, and more.**
 <br><br>
@@ -93,9 +93,9 @@ curl http://127.0.0.1:8088/healthz   # → {"ok": true}
 curl http://127.0.0.1:8088/stats     # total tokens per platform
 curl http://127.0.0.1:8088/live      # in-flight requests
 ```
-### 4. Link a model provider in the relay  
-**Upstreams -> New upstream:**  
-<p align="center"><img src="img_15.png" alt="" width="440"></p>    
+### 4. Link a model provider in the relay
+**Upstreams -> New upstream:**
+<p style="margin-left:10%"><img src="img_15.png" alt="" width="440"></p>
 You can create multiple models; press Enter to confirm each one.
 
 Advanced options (billing / multipliers / quotas / protocol adapter, collapsible):
@@ -113,7 +113,7 @@ Note: optional; shown at the bottom of the upstream detail card. The "Test" and 
 ### 5. Point your agents at the relay
 The relay offers two modes:
 
-**Conversion mode**  
+**Conversion mode**
 In conversion mode, model and upstream selection are fully controlled by the relay. All requests from coding clients land at the relay first; the relay takes over and forwards them to the upstream selected inside it. On the client side you only need to point the URL at the relay and set api-key and model to the `auto` placeholder.
 
 ```
@@ -189,10 +189,10 @@ The request rewritten through the relay:
 
 
 ### 6. Start using
-Pick a model:  
-<p align="center"><img src="img_16.png" alt="" width="520"></p>    
-Start using:  
-<p align="center"><img src="img_17.png" alt="" width="720"></p>    
+Pick a model:
+<p style="margin-left:10%"><img src="img_16.png" alt="" width="520"></p>
+Start using:
+<p style="margin-left:10%"><img src="img_17.png" alt="" width="720"></p>
 
 
 ```mermaid

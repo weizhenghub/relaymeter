@@ -4,19 +4,19 @@
 
 <p align="center">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
-  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">  
-</p>  
-&nbsp;&nbsp; 
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
+</p>
+&nbsp;&nbsp;
 <b>面向所有AI 编程智能体的本地中继，在 Anthropic / OpenAI 之间互转协议，统计所有请求、平台和上游的 token 用量。</b>
 
 
-**1、token统计：**  
+**1、token统计：**
 &nbsp;&nbsp;统计所有平台过中继的请求包的token用量。可按平台、模型、上游统计消耗。
-并可将消息原文保存到本地数据库  
-**2、协议转换**：  
+并可将消息原文保存到本地数据库
+**2、协议转换**：
 &nbsp;&nbsp;在不兼容的平台和上游提供商接受协议之间，进行协议转换
-（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之间互转）  
-**3、实时流**  
+（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之间互转）
+**3、实时流**
 &nbsp;&nbsp;在实时流侧栏查看当前正在进行的的思考和输出文本流
 
 
@@ -28,31 +28,31 @@
 ## 为什么需要它
 **1、你有好几个智能体（Claude Code、Codex、OpenClaw……），还有好几个模型提供商（Anthropic、MiniMax、DeepSeek、ollama……）。
 &nbsp;&nbsp;它们支持的协议各不相同，有些支持anthropic，有些支持openai。在只支持anthropic的平台上，无法使用只支持openai的上游提供商，
-提供商不接受这个包，平台也没法解析结果  
-2、你有多个上游提供商和多个模型，需要根据不同任务切换到不同的模型或上游，但你不想在一堆平台上改配置文件，很是麻烦    
-3、你在多个平台用了一个上游提供商，想统计它总共消耗了多少token，可是除了上游提供的网页，没有任何一个工具能给你一个统一的视图，统计总的 token消耗数量  
-4、很多智能体平台在coding时就是个黑箱，思考流、甚至正文流都不放出来，你看不到具体输出了什么，到底是仍在跑还是已经卡死了  
-5、单纯想鉴赏一下自己有多能烧token**  
+提供商不接受这个包，平台也没法解析结果
+2、你有多个上游提供商和多个模型，需要根据不同任务切换到不同的模型或上游，但你不想在一堆平台上改配置文件，很是麻烦
+3、你在多个平台用了一个上游提供商，想统计它总共消耗了多少token，可是除了上游提供的网页，没有任何一个工具能给你一个统一的视图，统计总的 token消耗数量
+4、很多智能体平台在coding时就是个黑箱，思考流、甚至正文流都不放出来，你看不到具体输出了什么，到底是仍在跑还是已经卡死了
+5、单纯想鉴赏一下自己有多能烧token**
 
 ## RelayMeter 能做什么
 
 **• 点点鼠标，直接切换想用的模型：**
-<p align="center"><img src="img_1.png" alt="" width="480"></p> /> />  
+<p style="margin-left:10%"><img src="img_1.png" alt="" width="480"></p>
 
-**• 查看不同平台的流量统计：**  
-<p align="center"><img src="img_13.png" alt="" width="420"></p> /> />
+**• 查看不同平台的流量统计：**
+<p style="margin-left:10%"><img src="img_13.png" alt="" width="420"></p>
 
 **• 在历史中直接查看消息原文**
-<p align="center"><img src="output2.gif" alt="" width="480"></p> /> />  
+<p style="margin-left:10%"><img src="output2.gif" alt="" width="480"></p>
 
-**• 丰富的统计图表：**  
-<p align="center"><img src="output3.gif" alt="" width="640"></p> /> />  
+**• 丰富的统计图表：**
+<p style="margin-left:10%"><img src="output3.gif" alt="" width="640"></p>
 
-**•  流状态指示动画**  
-<p align="center"><img src="output4.gif" alt="" width="560"></p> /> />  
+**•  流状态指示动画**
+<p style="margin-left:10%"><img src="output4.gif" alt="" width="560"></p>
 
-**• 开启实时流侧栏，实时查看流式内容以及工具调用信息**  
-<p align="center"><img src="output.gif" alt="" width="320"></p> /> />    
+**• 开启实时流侧栏，实时查看流式内容以及工具调用信息**
+<p style="margin-left:10%"><img src="output.gif" alt="" width="320"></p>
 
 **•  以及侧栏控制悬浮球，透传模式，跨协议转换，流平台识别等更多丰富实用的功能**
 <br><br>
@@ -90,9 +90,9 @@ curl http://127.0.0.1:8088/healthz   # → {"ok": true}
 curl http://127.0.0.1:8088/stats     # 各平台 token 总量
 curl http://127.0.0.1:8088/live      # 正在进行的请求
 ```
-### 4. 在中继里链接模型提供商  
-**上游 -> 新建上游：**  
-<p align="center"><img src="img_15.png" alt="" width="440"></p> /> />    
+### 4. 在中继里链接模型提供商
+**上游 -> 新建上游：**
+<p style="margin-left:10%"><img src="img_15.png" alt="" width="440"></p>
 可以创建多个模型，输入完毕后请回车确认。
 
 高级功能（计费 / 倍率 / 限额 / 协议适配，折叠区）：
@@ -110,7 +110,7 @@ curl http://127.0.0.1:8088/live      # 正在进行的请求
 ### 5. 把智能体请求地址指向中继
 中继提供两种模式：
 
-**转换模式**  
+**转换模式**
 转换模式下，模型、上游的选择完全由中继控制，来自 coding 客户端的所有请求，由中继接管并向中继里选择的上游发送。客户端配置只需要将 URL 地址指向中继，然后将 api-key 和模型配置为 `auto` 占位符即可。
 
 ```
@@ -186,10 +186,10 @@ model                    = 实际模型
 
 
 ### 6.开始使用
-选择一个模型：  
-<p align="center"><img src="img_16.png" alt="" width="520"></p> /> />    
-开始使用：  
-<p align="center"><img src="img_17.png" alt="" width="720"></p> /> />    
+选择一个模型：
+<p style="margin-left:10%"><img src="img_16.png" alt="" width="520"></p>
+开始使用：
+<p style="margin-left:10%"><img src="img_17.png" alt="" width="720"></p>
 
 
 ```mermaid
