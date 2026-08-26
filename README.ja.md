@@ -7,7 +7,7 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 &nbsp;&nbsp;
-<b>すべての AI コーディングエージェントのためのローカル中継。Anthropic Messages / OpenAI Chat Completions / OpenAI Responses の 3 つのプロトコル間を相互変換し、すべてのリクエスト・プラットフォーム・アップストリームのトークン使用量を集計します。</b>
+<b>すべての AI コーディングエージェントのためのローカル中継。Anthropic / OpenAI 間のプロトコルを相互変換し、すべてのリクエスト・プラットフォーム・アップストリームのトークン使用量を集計します。</b>
 
 
 **1、トークン集計：**

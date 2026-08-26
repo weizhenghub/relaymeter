@@ -7,7 +7,7 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 &nbsp;&nbsp;
-<b>面向所有 AI 程式設計智能體的本機中繼，在 Anthropic Messages / OpenAI Chat Completions / OpenAI Responses 三種協定之間互轉，統計所有請求、平台和上游的 token 用量。</b>
+<b>面向所有 AI 程式設計智能體的本機中繼，在 Anthropic / OpenAI 之間互轉協定，統計所有請求、平台和上游的 token 用量。</b>
 
 
 **1、token 統計：**
