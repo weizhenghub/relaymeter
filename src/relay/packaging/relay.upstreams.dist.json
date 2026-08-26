@@ -1,0 +1,14 @@
+{
+  "_comment": "RelayMeter 发布默认 upstreams.json 模板（v0.177）。wheel/exe 首启 seed 到 %LOCALAPPDATA%\\Relay\\upstreams.json，**所有 api_key / url 均为占位**，必须在首次启动前补全（或在 GUI '上游管理'页新建）。active 字段为空 = 未选默认上游，请求会按 URL 路径分发。",
+  "_comment2": "如需多平台分组（anthropic / openai），按下面两个对象写入；非空 active 字段决定该平台请求走哪个上游。",
+  "active": "",
+  "upstreams": [],
+  "anthropic": {
+    "active": "",
+    "upstreams": []
+  },
+  "openai": {
+    "active": "",
+    "upstreams": []
+  }
+}

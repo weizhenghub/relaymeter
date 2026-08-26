@@ -1,0 +1,848 @@
+/* live_panel.css — v0.89 实时流侧栏专用样式
+ *
+ * 主题色全部复用主窗 styles-20260817.css 的 CSS 自定义属性（[data-theme]
+ * 切换时本文件零修改即可重画），本文件只定义布局与侧栏特有装饰。
+ */
+
+/* v0.146：全部隐藏滚动条（保留滚动功能）—— overflow 规则不动，只不显示
+ * 视觉滚动条。WebKit 用 display:none，Firefox/标准用 scrollbar-width:none。 */
+* { scrollbar-width: none; -ms-overflow-style: none; }
+*::-webkit-scrollbar { display: none; width: 0; height: 0; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: transparent; }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+.live-panel-body {
+  margin: 0;
+  /* v0.101：罗小黑「正常选择」光标，与主窗同款（cursors/罗小黑-正常选择.png）。
+   * v0.197：禁用该自定义光标（出版 Git 版，去掉第三方素材）；文件保留，改回取消下行注释即可。 */
+  /* cursor: url("cursors/罗小黑-正常选择.png") 2 28, auto; */
+  /* v0.95 收尾：transparent 让 html 的 --root-bg 当底色，两块 .bg-glow
+     模糊光晕（z-index:-1）才能透出来 —— 与主窗同款背景质感。 */
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: ui-sans-serif, -apple-system, "Segoe UI", "Microsoft YaHei",
+    system-ui, sans-serif;
+  /* v0.130：单窗口 = 列行容器（.live-panel-main）横向铺满，padding 在
+     各区内部（.lp-col）。 */
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  height: 100vh;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* v0.138：实时流窗口内关闭按钮 —— 裸悬浮（无背景 / 无边框 / 无阴影）。
+   hover 时只给按钮自身 X 染色，浮层完全透明。 */
+.live-panel-body .window-controls {
+  top: 3px;
+  right: 6px;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+/* v0.183：Electron 拖拽区 —— 顶栏全宽（X 按钮可点，其余 mousedown 走
+   panelDrag.start() 主进程拖动）。cursor grab 提示可拖。 */
+.live-panel-body #panel-drag-region {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.live-panel-body #panel-drag-region:active { cursor: grabbing; }
+.live-panel-body #panel-drag-region .win-ctrl-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+}
+
+/* v0.137：dock 贴右时光晕跨缝连续 —— 侧栏与主窗是两个独立 OS 窗口，各自
+   用 window 相对坐标画 .bg-glow（.bg-glow-1 左上、.bg-glow-2 右下），缝处
+   亮度不连续 → 「色层分裂」。JS 轮询 get_main_geometry 拿到主窗宽高
+   （--glow-mw / --glow-mh）+ dock 状态；docked 时加 .glow-docked，把光晕
+   圆心对齐到主窗同款屏幕坐标（侧栏左缘=主窗右缘，缝两侧的模糊圈本是一
+   个），跨缝平滑过渡。浮动时无 .glow-docked，回落到窗口相对默认。 */
+.live-panel-body.glow-docked .bg-glow-1 {
+  /* 主窗 .bg-glow-1 圆心在主窗视口 (90,90) → 侧栏视口 = (90 - mainW, 90)。
+     原点（左上角）= 圆心减半径 350 → left: -260 - mainW；top: -260。 */
+  top: -260px;
+  left: calc(-260px - var(--glow-mw, 0px));
+}
+.live-panel-body.glow-docked .bg-glow-2 {
+  /* 主窗 .bg-glow-2 圆心在主窗视口 (mainW-150, mainH-110) → 侧栏视口
+     = (-150, mainH-110)。原点 = left: -150-450 = -600；top: mainH-110-450
+     = mainH-560。bottom/right 复位成 auto（原规则是 bottom/right 定位）。 */
+  left: -600px;
+  top: calc(var(--glow-mh, 0px) - 560px);
+  bottom: auto;
+  right: auto;
+}
+
+/* v0.130：列行容器 —— 由「单列（flex column）」改「列行（flex row）」。
+   宽度 100% 跟随窗口（Python 按列数把窗口拉到 nCols×panel_width）；
+   .lp-col 列各自纵排容器。宽高稳态 = 列数 × 400px，瞬时（窗口加宽前）
+   列溢出时横向可滚，不裁内容。 */
+.live-panel-main {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  /* v0.113：卡片间距 4px → 3px（极窄边距）；v0.131：3px → 1px（并发容器更紧凑）。 */
+  gap: 1px;
+  width: 100%;
+  height: 100vh;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* v0.130：JS 管理的列容器。宽恒为 panel_width（400px，与 PanelPool 一致）；
+   列内超高纵向滚动。v0.136：不再为关闭按钮预留 32px 顶栏带（按钮 fixed
+   悬浮，见 .live-panel-body .window-controls）。 */
+.lp-col {
+  display: flex;
+  flex-direction: column;
+  /* v0.131：列内并发容器间距 3px → 1px（更紧凑贴合）。 */
+  gap: 1px;
+  flex: 0 0 auto;
+  width: 400px;
+  height: 100vh;
+  box-sizing: border-box;
+  /* v0.132b：左右内边距 12px → 4px，收紧列内左右留白（上下 32 顶栏/底 12 保留）。
+     v0.136：顶部 32px → 4px —— 关闭按钮不再挤占容器空间（按钮是 fixed 浮层，
+     列不再为它预留 32px 顶栏带）；底部 12 保留。 */
+  padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-md);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* v0.130：per-rid 容器头 —— 序号 + 平台·模型 + 状态徽标。 */
+.live-panel-rid-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px dashed var(--hairline);
+  padding-bottom: 3px;
+  margin-bottom: 2px;
+}
+.lp-rid-index {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.lp-rid-meta {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-panel-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* v0.113：极窄边框（0.5px）+ 边距用 em 相对文字：左右 1 个文字大小、
+     上下 0.8 个文字大小（13px 字号 = 13px / 10.4px）+ 圆角缩到 radius-md。 */
+  padding: 0.8em 1em;
+  background: var(--panel-bg);
+  border: 0.5px solid var(--card-border);
+  border-radius: var(--radius-md);
+}
+
+.live-panel-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.live-panel-upstream {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.live-panel-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--panel-alt);
+  color: var(--text-secondary);
+  border: 1px solid var(--card-border);
+}
+.live-panel-badge[data-phase="uploading"] {
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--platform-anthropic);
+  border-color: var(--platform-anthropic);
+}
+.live-panel-badge[data-phase="calling"],
+.live-panel-badge[data-phase="streaming"] {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--seg-input);
+  border-color: var(--seg-input);
+}
+.live-panel-badge[data-phase="done"] {
+  background: rgba(34, 170, 34, 0.12);
+  color: var(--text-success);
+  border-color: var(--text-success);
+}
+.live-panel-badge[data-phase="error"] {
+  background: rgba(204, 51, 51, 0.12);
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+.live-panel-header-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.live-panel-meta-sep {
+  color: var(--text-muted);
+}
+
+.live-panel-card {
+  background: var(--panel-bg);
+  /* v0.113：极窄边框（0.5px）+ 边距用 em 相对文字：左右 1 个文字大小、
+     上下 0.8 个文字大小（13px 字号 = 13px / 10.4px）+ 圆角缩到 radius-md。 */
+  border: 0.5px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 0.8em 1em;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-shadow: var(--card-shadow);
+  position: relative;
+  overflow: hidden;
+  /* v0.95+：除正文流外所有卡片禁止被纵向压缩 —— 缓存区显示窗口在任何
+     窗口高度下都保持完整高度，多余空间全部交给正文流 / 页面滚动。 */
+  flex: 0 0 auto;
+  /* v0.139：主题切换时卡片背景 / 边框 / 阴影沿共用 --theme-trans 插值 */
+  transition: var(--theme-trans);
+}
+
+.live-panel-card::before {
+  /* Subtle inner highlight — 与主窗 .glass-card::before 同款。 */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--text-primary) 6%, transparent) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+/* v0.120：端点数据容器 —— 合并 header（上游/平台/模型/phase）+ 端点卡（入出向/api-key）
+ * 共享一张玻璃卡视觉。原两块之间 3px gap + 一个 box-shadow 边界视觉断开，
+ * 现合并到一张卡里，5 字段同源显示。 */
+.live-panel-endpoint {
+  background: var(--panel-bg);
+  border: 0.5px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 0.8em 1em;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-shadow: var(--card-shadow);
+  position: relative;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.live-panel-endpoint::before {
+  /* 同 .live-panel-card::before —— 顶部 1px 内高光 */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--text-primary) 6%, transparent) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+/* 行 1：上游名 + phase 徽标（横排 space-between） */
+.live-panel-endpoint-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+.live-panel-endpoint-upstream {
+  /* v0.120：上游名是端点容器的主角 —— 实时栏第一眼要知道"这个请求在走谁"，
+     字号提到 16px 突出，其余平台/模型/wire/key 保持 12-13px 小字。 */
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+/* 行 2：平台 · 模型 */
+.live-panel-endpoint-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.live-panel-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: 13px;
+}
+
+.live-panel-row-key {
+  align-items: flex-start;
+}
+
+.live-panel-label {
+  color: var(--text-secondary);
+}
+
+.live-panel-wire {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.live-panel-key {
+  font-family: ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 11px;
+  background: var(--panel-alt);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  word-break: break-all;
+  user-select: text;
+  cursor: text;
+  color: var(--text-primary);
+  max-width: 60%;
+  text-align: left;
+}
+
+/* v0.132：端点并发请求列表 —— 每个并发请求一行（平台·模型 + phase + 入出向），
+   超高 30vh 内滚动；顶部全局徽标 + 底部 api-key 不受影响。 */
+.lp-ep-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 30vh;
+  overflow-y: auto;
+  border-top: 1px dashed var(--hairline);
+  padding-top: 3px;
+  margin-top: 3px;
+  /* v0.135：列表字号档位 —— 默认 medium，按 body.data-list-font 切档。
+     small/medium/large 分别对应 11/12/13。 */
+  font-size: 12px;
+}
+/* v0.135：列表字号档位（写 body.data-list-font 触发）。 */
+.live-panel-body[data-list-font="small"]  .lp-ep-list,
+.live-panel-body[data-list-font="small"]  .lp-ep-meta  { font-size: 11px; }
+.live-panel-body[data-list-font="medium"] .lp-ep-list,
+.live-panel-body[data-list-font="medium"] .lp-ep-meta  { font-size: 12px; }
+.live-panel-body[data-list-font="large"]  .lp-ep-list,
+.live-panel-body[data-list-font="large"]  .lp-ep-meta  { font-size: 13px; }
+.lp-ep-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--panel-alt);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+}
+.lp-ep-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.lp-ep-meta {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lp-ep-badge {
+  flex-shrink: 0;
+}
+.lp-ep-item-sub {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.lp-ep-wire {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 输入/输出统计 —— v0.95+：4 个 token 一行排开（输入/输出/缓存读取/缓存创建），
+   标签改中文。命中率单独一行（紧凑）。v0.121：并入内容容器组件，网格挂到
+   .live-panel-stats（不再独立成卡）。 */
+.live-panel-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+.live-panel-token {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+.live-panel-token-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.live-panel-token-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  transition: color 120ms var(--ease-out);
+}
+.live-panel-token-value.bump {
+  color: var(--seg-input);
+}
+.live-panel-cache-rate {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-top: 1px dashed var(--hairline);
+  padding-top: 3px;
+  margin-top: 2px;
+}
+.live-panel-cache-rate span {
+  font-weight: 600;
+  color: var(--text-success);
+  font-variant-numeric: tabular-nums;
+  margin-left: 4px;
+}
+
+/* v0.132b：全局工具容器 —— 不再 CSS 封顶 20vh（旧 v0.130 行为）。
+   JS layout 把工具容器实高喂入「水填」：底部有空位时优先撑到完整内容高，
+   无空位时收回到内容实测高（仍可内部滚动）。此处只留 overflow 兜底。 */
+#lp-tools-wrap {
+  overflow: auto;
+}
+
+/* details / 折叠块 */
+.live-panel-details > .live-panel-summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  list-style: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.live-panel-details > .live-panel-summary::-webkit-details-marker {
+  display: none;
+}
+.live-panel-details > .live-panel-summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform 120ms var(--ease-out);
+}
+.live-panel-details[open] > .live-panel-summary::before {
+  transform: rotate(90deg);
+}
+
+.live-panel-pre {
+  margin: 2px 0 0;
+  padding: 4px 6px;
+  background: var(--panel-alt);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  font-family: ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+  color: var(--text-primary);
+}
+.live-panel-thinking {
+  /* v0.96：去掉左侧黄色指示条（--accent / --platform-anthropic 3px 实线），
+     与正文流保持一致的干净左侧。 */
+  opacity: 0.92;
+}
+.live-panel-count {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: normal;
+}
+/* v0.97：思考/正文流字数左侧的流式速度（xx t/s）。默认 hidden 避免
+   flex 留缝，有速率时 applySpeed 移除 hidden。 */
+.live-panel-speed {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.live-panel-speed[hidden] {
+  display: none;
+}
+
+/* v0.124/v0.130：纯正文容器 —— 由 live_panel.js 按 rid 动态创建
+   （buildContainer(puretext)）。完整玻璃卡（与 thinkstream 同款视觉，卡内
+   统计网格 + 正文流连成一体）。
+   自然高 = 侧栏高度的 33.333%（`33.333vh`，JS 布局再按 ±10% 水填覆盖
+   inline height）。统计网格固定占上部，正文流 flex:1 吸收剩余高度。 */
+.live-panel-puretext {
+  display: flex;
+  flex-direction: column;
+  /* v0.113：卡内 gap 与 .live-panel-card 一致（紧凑）。 */
+  gap: 3px;
+  flex: 0 0 auto;
+  height: 33.333vh;            /* = 侧栏高度（100vh）的 1/3 */
+  min-height: 0;
+  background: var(--panel-bg);
+  border: 0.5px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 0.8em 1em;
+  box-shadow: var(--card-shadow);
+  position: relative;
+  overflow: hidden;
+}
+.live-panel-puretext::before {
+  /* 顶部 1px 内高光 —— 与 .live-panel-card::before 同款 */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--text-primary) 6%, transparent) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+/* 统计区：内容高（4 字段 + 命中率） */
+.live-panel-puretext > .live-panel-stats {
+  flex: 0 0 auto;
+}
+/* 正文流区：撑满剩余，顶部虚线区隔（覆盖 .live-panel-stream-wrap 的
+   600px 封顶 / 140px 下限，以及 .live-panel-stream 的 min-height:120px） */
+.live-panel-puretext > .live-panel-stream-wrap {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
+  border-top: 1px dashed var(--hairline);
+  padding-top: 4px;
+}
+.live-panel-puretext .live-panel-stream {
+  flex: 1;
+  min-height: 0;
+}
+
+/* v0.125：带思考流容器 —— 输入输出统计 + 思考流（非折叠）+ 正文流同卡。
+   高度分配（相对侧栏高 100vh）：统计+思考流区 = 30%，正文流区 = 20%，
+   容器总高 = 50vh。stats 固定内容高，思考流区 flex:1 撑满 30% 剩余，
+   正文流区固定 20vh。思考从折叠改为常显，随时可见中间推理过程。 */
+.live-panel-thinkstream {
+  /* v0.127：**完整玻璃卡容器** —— 统计 / 思考流 / 正文流三区在同一张卡片内
+     连成一体，每区保留自身 section 包裹结构。卡片视觉由本条提供
+     （.live-panel-card 的边框/投影/内高光），子区不再各自成卡。 */
+  display: flex;
+  flex-direction: column;
+  /* v0.113：卡内 gap 与 .live-panel-card 一致（紧凑）。 */
+  gap: 3px;
+  flex: 0 0 auto;
+  height: 50vh;                 /* = 30% + 20% */
+  min-height: 0;
+  background: var(--panel-bg);
+  border: 0.5px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 0.8em 1em;
+  box-shadow: var(--card-shadow);
+  position: relative;
+  overflow: hidden;
+}
+.live-panel-thinkstream::before {
+  /* 顶部 1px 内高光 —— 与 .live-panel-card::before 同款 */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--text-primary) 6%, transparent) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+/* 统计区：内容高（4 字段 + 命中率） */
+.live-panel-thinkstream > .live-panel-stats {
+  flex: 0 0 auto;
+}
+/* 思考流区：撑满剩余（50vh − 20vh 正文流 − 统计区高 ≈ 30%）；
+   顶部虚线区隔，与统计区连成一体但有分区感。 */
+.live-panel-thinkstream > .live-panel-think-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  border-top: 1px dashed var(--hairline);
+  padding-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.live-panel-thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.live-panel-thinking-title {
+  font-weight: 500;
+}
+/* 思考 pre：撑满思考区剩余，超高内部滚动（覆盖 .live-panel-pre 的 max-height:160px） */
+.live-panel-thinkstream .live-panel-think-card .live-panel-pre {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+/* 正文流区：固定 20%，顶部虚线区隔（覆盖 .live-panel-stream-wrap 的
+   600px 封顶 / 140px 下限，以及 .live-panel-stream 的 min-height:120px） */
+.live-panel-thinkstream > .live-panel-stream-wrap {
+  flex: 0 0 20vh;
+  max-height: none;
+  min-height: 0;
+  border-top: 1px dashed var(--hairline);
+  padding-top: 4px;
+}
+.live-panel-thinkstream .live-panel-stream {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 正文流 —— 主体，可能很长。v0.130：动态容器（thinkstream/puretext）里的
+   正文区高度由容器布局内部分配（flex:1 吸收剩余，超高内部滚动）。
+   .live-panel-stream-wrap 基础规则保留；容器专属分配在各自类下覆盖。 */
+.live-panel-stream-wrap {
+  display: flex;
+  flex-direction: column;
+  /* v0.113：卡内 gap 与 .live-panel-card 一致（紧凑）。 */
+  gap: 3px;
+  flex: 0 1 auto;
+  max-height: 600px;            /* = 宽(400px) × 1.5 */
+  min-height: 140px;
+}
+.live-panel-stream-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+.live-panel-stream-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.live-panel-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.live-panel-stream {
+  font-family: ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel-alt);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  flex: 1;
+  overflow: auto;
+  color: var(--text-primary);
+  min-height: 120px;
+  scroll-behavior: smooth;
+}
+
+/* tool_use 列表 */
+/* v0.139：tool 卡片容器改用正文容器样式 —— `.live-panel-stream` 同款
+   视觉（panel-alt + hairline + radius-sm + 等宽 padding 6 8）。容器
+   包成 `<details>` 可折叠：summary 是名字+时间戳（点击折叠 / 展开），
+   body 是 args。整卡最多 20vh 高度，args 超出滚动查看。
+   列打包时如果某列空间紧张，用户可点 summary 折叠腾出空间；新卡到达
+   默认展开（与 .live-panel-stream 常显同语义）。 */
+.live-panel-tool {
+  margin-top: 4px;
+  background: var(--panel-alt);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  overflow: hidden;
+  /* v0.139：主题切换时随全局走 */
+  transition: var(--theme-trans);
+}
+.live-panel-tool > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  /* 默认 marker 隐藏（Chromium / WebView2 给 <details> 画三角小箭头） */
+}
+.live-panel-tool > summary::-webkit-details-marker { display: none; }
+.live-panel-tool > summary::marker { display: none; content: ""; }
+.live-panel-tool[open] > summary {
+  /* 展开时 summary 底加分隔线，与 body 视觉断开 */
+  border-bottom: 1px dashed var(--hairline);
+}
+.live-panel-tool-name {
+  font-weight: 600;
+  color: var(--seg-output);
+  font-family: ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* v0.103：工具调用右侧「xx 秒前」时间戳（tickToolsAge 每 1s 刷）。 */
+.live-panel-tool-age {
+  margin-left: 0;
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  flex: 0 0 auto;
+}
+/* 折叠 / 展开小箭头 —— summary 末尾，与正文容器视感一致 */
+.live-panel-tool > summary::after {
+  content: "▾";
+  font-size: 9px;
+  color: var(--text-tertiary, var(--text-secondary));
+  margin-left: 0;
+  transition: transform .18s var(--ease-out, ease-out);
+}
+.live-panel-tool:not([open]) > summary::after {
+  transform: rotate(-90deg);
+}
+.live-panel-tool-args {
+  /* v0.139：args 区固定最多 20vh - summary 高（≈24px）；超出向下滚动
+     （保持「多余内容向下滚动可查看」语义）。 */
+  font-family: ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 6px 8px;
+  margin: 0;
+  max-height: calc(20vh - 24px);
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+/* v0.95 收尾：自定义细滚动条 —— 替代原生默认（Windows WebView2 的粗
+   白/灰矩形，太丑）。与主窗 styles-20260817.css 同款：细 6px + thumb
+   用 --hairline 极淡边框色 + 圆角；track 透明。覆盖正文流 / 思考 / tool
+   args 三个可滚动容器。 */
+.live-panel-stream,
+.live-panel-pre,
+.live-panel-tool-args {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.live-panel-stream::-webkit-scrollbar,
+.live-panel-pre::-webkit-scrollbar,
+.live-panel-tool-args::-webkit-scrollbar {
+  display: none;
+  width: 0;
+}
+.live-panel-stream::-webkit-scrollbar-track,
+.live-panel-pre::-webkit-scrollbar-track,
+.live-panel-tool-args::-webkit-scrollbar-track {
+  background: transparent;
+}
+.live-panel-stream::-webkit-scrollbar-thumb,
+.live-panel-pre::-webkit-scrollbar-thumb,
+.live-panel-tool-args::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.live-panel-stream::-webkit-scrollbar-thumb:hover,
+.live-panel-pre::-webkit-scrollbar-thumb:hover,
+.live-panel-tool-args::-webkit-scrollbar-thumb:hover {
+  background: transparent;
+}
+
+/* =====================================================================
+   v0.113c：侧边栏无边框 —— body.panel-no-frame（Python 经桥 evaluate_js
+   setPanelFrameless 切换）时所有卡片去掉玻璃容器（背景/边框/阴影/内高
+   光），文字直接浮在窗口底背景上，与主窗「无边框」同款裸底。
+   内层内容框（pre/stream/tool/key）保留 hairline —— 它们是卡片内容，
+   无边框下仍需可读分隔。
+   v0.130：动态容器（thinkstream/puretext）自己的 ::before 高光也一并隐藏。
+   ===================================================================== */
+body.panel-no-frame .live-panel-card,
+body.panel-no-frame .live-panel-header,
+body.panel-no-frame .live-panel-endpoint {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+body.panel-no-frame .live-panel-card::before,
+body.panel-no-frame .live-panel-header::before,
+body.panel-no-frame .live-panel-endpoint::before,
+body.panel-no-frame .live-panel-thinkstream::before,
+body.panel-no-frame .live-panel-puretext::before {
+  display: none;
+}
+
+/* v0.138：删去「等待」背景水印（之前 v0.120a 引入的 .lp-watermark 与
+   body.watermark-away toggle）—— 样式清干净。HTML 里 #lp-watermark 也
+   一并去掉（live_panel.html），live_panel.js 的 classList toggle 也已
+   移除。 */

@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>悬浮球</title>
+    <!-- v0.180：悬浮球 + 实时侧栏合并成单窗口的渲染层。
+         单一 pywebview 透明窗口同时承载「球帽 + 实时面板」两种形态：
+           * 收起态 = 纯球（窗口 = ball_size 方），面板隐藏，球区真透桌面。
+           * 展开态 = 球方留在左上 + 右侧实时面板（窗口向右+上下延展成整高面板）。
+        布局：body 是 flex.row（复用 live_panel.html 的 .live-panel-body 结构），
+        左 #ghost-cap（固定 ball_size 方，透明 SVG 幽灵），右 #ghost-panel-surface
+        （实底，防键控孔洞）。
+        透明：html/body background transparent + 窗体 BackColor=TransparencyKey=
+        #010203（BallLayer2 在 events.loaded + sleep(2) 后设）→ 球区露出窗体键控色
+        被键空 → 真透；面板区实底（--root-bg，非键控色）→ 不透明无孔洞。 -->
+    <script>
+      try {
+        var m = location.hash.match(/[#&]theme=([^&]+)/);
+        if (m) document.documentElement.setAttribute("data-theme", decodeURIComponent(m[1]));
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="styles-20260817.css?v=20260824-05" />
+    <link rel="stylesheet" href="live_panel.css?v=20260823-59" />
+    <style>
+      /* v0.180：单窗布局覆盖。html 保持透明（球区要键空），只在面板 surface 实底。 */
+      html {
+        background: transparent !important;
+      }
+      /* v0.196：展开侧栏时，去掉 surface 上两块 .bg-glow 光晕（左上/右下
+         radial 大圆 + blur），换成纯色 --root-bg —— 否则球帽与面板交界处
+         会残留一条由深到浅的渐变透明条。侧栏本体背景不变，仍为 --root-bg。 */
+      #ghost-panel-surface .bg-glow { display: none; }
+      #ghost-root {
+        display: flex;
+        flex-direction: row;
+        align-items: stretch;
+        width: 100%;
+        height: 100vh;
+      }
+      /* 球帽方区：恒 ball_size 方，透明（无底色，露出窗体 #010203 键空）。 */
+      #ghost-cap {
+        flex: 0 0 var(--ball-size, 56px);
+        width: var(--ball-size, 56px);
+        height: var(--ball-size, 56px);
+        position: relative;
+        background: transparent;
+        flex-shrink: 0;
+      }
+      #cap-ball {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+      }
+      /* 面板 surface：右侧实底，防键控孔洞（键控色 #010203 会键空任何等于它的像素）。 */
+      #ghost-panel-surface {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 100vh;
+        background: var(--root-bg);
+        position: relative;
+      }
+      /* 收起态：面板隐藏，球帽占满整窗（窗口 = ball_size 方）。 */
+      body.collapsed #ghost-panel-surface { display: none; }
+      body.collapsed #ghost-cap { flex: 0 0 100%; width: 100%; height: 100%; }
+      body.collapsed #ghost-root { height: 100%; }
+      /* 展开态：球帽方留在左上，面板占满剩余（右侧 + 整高）。 */
+      body:not(.collapsed) #ghost-cap { align-self: flex-start; }
+
+      /* v0.184：展开态顶栏拖拽区 —— 侧栏 surface 顶部 32px，拖动整个容器窗口。 */
+      #panel-drag-region {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 32px;
+        cursor: grab;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #panel-drag-region:active { cursor: grabbing; }
+      #panel-drag-region .win-ctrl-close { position: absolute; top: 4px; right: 6px; }
+      /* v0.184：磁吸模式（关球）—— 球帽隐藏，side surface 自动占满整窗。 */
+      body.no-ball #ghost-cap { display: none; }
+
+      /* 幽灵状态 class（复刻 ghost_ball.html / GDI）。
+         v0.184.2：S2（ghost-done）整球帽 180° 翻转——halo + body + ring +
+         heart 全部一起反向。基点 50% 50%（viewBox 中心），加 400ms 过渡让
+         翻转过程平滑；子元素的 keyframe 动画用各自 transform 组合（旋转
+         嵌套在父元素里 = 父 transform * 子 transform，互不打架）。 */
+      #cap-ball {
+        transform-origin: 50% 50%;
+        transition: transform 0.4s cubic-bezier(.4, .0, .2, 1);
+      }
+      #cap-ball.ghost-flow { animation: gp-bob 2.6s ease-in-out infinite; }
+      @keyframes gp-bob {
+        0%, 100% { transform: translateY(0); }
+        50%      { transform: translateY(-2.2%); }
+      }
+      #ghost-halo { opacity: 0; transform-origin: 50% 50%; }
+      #cap-ball.ghost-flow #ghost-halo { opacity: 1; animation: gp-halo 2.2s ease-in-out infinite; }
+      #cap-ball.ghost-done #ghost-halo { opacity: 1; animation: gp-halo 2.2s ease-in-out infinite; }
+      @keyframes gp-halo {
+        0%, 100% { transform: scale(1);   opacity: .55; }
+        50%      { transform: scale(1.13); opacity: .9; }
+      }
+      /* v0.184.2：S2 整球帽旋转 180°（halo + body + ring + heart 一起反向）。
+         父元素 transform 会嵌套到子元素 keyframe 里的 transform 上，所以
+         halo/ring/heart 的 scale 仍然各自走自己的 keyframe，但视觉上是
+         在已翻转 180° 的坐标系内继续缩放——观感正常。 */
+      #cap-ball.ghost-done { transform: rotate(180deg); }
+      #ghost-ring { opacity: 0; transform-origin: 50% 50%; }
+      #cap-ball.ghost-done #ghost-ring { opacity: 1; animation: gp-ring 2.2s ease-in-out infinite; }
+      @keyframes gp-ring {
+        0%, 100% { transform: scale(.96); opacity: .6; }
+        50%      { transform: scale(1.04); opacity: 1; }
+      }
+      #ghost-heart { opacity: 0; transform-box: fill-box; transform-origin: center; }
+      #cap-ball.ghost-done #ghost-heart { opacity: 1; animation: gp-heart 1.4s ease-in-out infinite; }
+      @keyframes gp-heart {
+        0%, 100% { transform: scale(1); }
+        50%      { transform: scale(1.15); }
+      }
+    </style>
+  </head>
+  <body class="live-panel-body collapsed" data-state="idle">
+    <div id="ghost-root">
+      <!-- 球帽（左上固定方区，透明 SVG 幽灵） -->
+      <div id="ghost-cap">
+        <svg id="cap-ball" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <radialGradient id="gp-haloGrad" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#D29678" stop-opacity="0.5"/>
+              <stop offset="100%" stop-color="#D29678" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <circle id="ghost-halo" cx="50" cy="50" r="46" fill="url(#gp-haloGrad)" />
+          <g id="ghost-body">
+            <rect x="6" y="47" width="13" height="13" fill="#D27C63" />
+            <rect x="81" y="47" width="13" height="13" fill="#D27C63" />
+            <rect x="13" y="22" width="74" height="58" rx="7" fill="#D27C63" />
+            <circle cx="20.2" cy="80" r="5.5" fill="#D27C63" />
+            <circle cx="36.4" cy="80" r="5.5" fill="#D27C63" />
+            <circle cx="63.6" cy="80" r="5.5" fill="#D27C63" />
+            <circle cx="79.8" cy="80" r="5.5" fill="#D27C63" />
+            <rect x="34" y="35" width="6" height="17" rx="1" fill="#6C402E" />
+            <rect x="60" y="35" width="6" height="17" rx="1" fill="#6C402E" />
+          </g>
+          <circle id="ghost-ring" cx="50" cy="50" r="47" fill="none" stroke="#D8605C"
+                  stroke-width="3" stroke-opacity="0.5" />
+          <g id="ghost-heart">
+            <circle cx="72" cy="28" r="7.5" fill="#ffffff" />
+            <path d="M72 30.5 C70.8 28.6 67.4 27.4 66.2 29.2 C65 31 65.4 33.6 67.6 35 C68.9 35.9 71.2 35.9 72 34.9 C72.8 35.9 75.1 35.9 76.4 35 C78.6 33.6 79 31 77.8 29.2 C76.6 27.4 73.2 28.6 72 30.5 Z"
+                  fill="#FF4848" />
+          </g>
+        </svg>
+      </div>
+
+      <!-- 面板 surface（右侧实底） —— 复用 live_panel.html 的列行容器结构 -->
+      <div id="ghost-panel-surface">
+        <div class="bg-glow bg-glow-1" aria-hidden="true"></div>
+        <div class="bg-glow bg-glow-2" aria-hidden="true"></div>
+        <!-- v0.184：展开态顶栏拖拽区 —— 拖动整个容器窗口；X 按钮=收起。
+             仅侧栏 surface 上方（球帽左边区域不属此 surface），mousedown 排除
+             X 按钮后走 ballDrag("panel")，主进程轮询光标移动窗口。 -->
+        <div class="window-controls" id="panel-drag-region">
+          <button class="win-ctrl win-ctrl-close" id="panel-btn-close" title="收起" aria-label="收起">
+            <svg width="10" height="10" viewBox="0 0 10 10">
+              <path d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5" stroke="currentColor" stroke-width="1" fill="none"/>
+            </svg>
+          </button>
+        </div>
+        <div class="live-panel-main">
+          <div class="lp-col" id="lp-col-1">
+            <section class="live-panel-endpoint">
+              <div class="live-panel-endpoint-row">
+                <span class="live-panel-endpoint-upstream" id="lp-upstream">—</span>
+                <span class="live-panel-badge" id="lp-badge" data-phase="idle">空闲</span>
+              </div>
+              <div class="lp-ep-list" id="lp-ep-list"></div>
+              <div class="live-panel-row live-panel-row-key">
+                <span class="live-panel-label">api-key</span>
+                <code class="live-panel-key" id="lp-key">（明文待加载）</code>
+              </div>
+            </section>
+            <details class="live-panel-card live-panel-details" id="lp-tools-wrap">
+              <summary class="live-panel-summary">工具调用 <span class="live-panel-count" id="lp-tools-count"></span></summary>
+              <div id="lp-tools"></div>
+            </details>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // ---- 后端桥（v0.180）----
+      // 状态驱动：idle/flow/s2 → CSS class（ghost-idle / ghost-flow / ghost-done）。
+      const GP_CLS = { idle: "ghost-idle", flow: "ghost-flow", s2: "ghost-done", done: "ghost-done" };
+      const capBall = document.getElementById("cap-ball");
+
+      window.ghostSetState = function (state) {
+        capBall.setAttribute("class", GP_CLS[state] || GP_CLS.idle);
+      };
+      // 收起 / 展开面板。展开时右侧面板 surface 出现（窗口尺寸由 Python 侧 MoveWindow 拉大）。
+      window.ghostSetExpanded = function (on) {
+        document.body.classList.toggle("collapsed", !on);
+      };
+      // 设球帽边长（ball_size，供 CSS 变量决定 #ghost-cap 尺寸）。
+      window.ghostSetBallSize = function (px) {
+        document.documentElement.style.setProperty("--ball-size", px + "px");
+      };
+      // 点击球帽 → 生产桥（gui.Api.ballClicked → pool.ball_clicked → 收起/展开）。
+      window.ghostClicked = function () {
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.ballClicked) {
+          window.pywebview.api.ballClicked();
+        }
+      };
+      // 兼容旧桥名（BallLayer2.set_state 走 ghostSetState；ball_layer2 曾用 ballSetState）。
+      window.ballSetState = window.ghostSetState;
+      window.ballClicked = window.ghostClicked;
+
+      // ---- v0.184：球帽拖拽/点击 —— mousedown(球内圆命中) → ballDrag.start()；
+      // mouseup → end()。主进程 drag-end 无位移 → clicked（展开/收起切换），
+      // 有位移 → dragend（拖动容器）。来源传 "cap" 与顶栏拖拽区分（顶栏点击
+      // 不算切换，只有拖动）。----
+      window.ballDrag = window.ballDrag || { start: function () {}, end: function () {} };
+      var _capDragCx = 0, _capDragCy = 0;
+      var _capDragR2 = Math.pow(50 * 0.48, 2); // viewBox 100 单位，球内圆半径
+      document.getElementById("cap-ball").addEventListener("mousedown", function (e) {
+        var rect = e.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        var px = (e.clientX - rect.left) / rect.width * 100;
+        var py = (e.clientY - rect.top) / rect.height * 100;
+        var dx = px - 50, dy = py - 50;
+        if (dx * dx + dy * dy > _capDragR2) return; // 透明四角不触发拖拽
+        _capDragCx = e.clientX; _capDragCy = e.clientY;
+        window.ballDrag.start("cap");
+      });
+      document.addEventListener("mouseup", function () {
+        if (_capDragCx === 0 && _capDragCy === 0) return;
+        _capDragCx = 0; _capDragCy = 0;
+        window.ballDrag.end();
+      });
+      document.addEventListener("mouseleave", function () {
+        if (_capDragCx === 0 && _capDragCy === 0) return;
+        _capDragCx = 0; _capDragCy = 0;
+        window.ballDrag.end();
+      });
+
+      // ---- v0.184：展开态顶栏拖拽区 —— 拖整个容器窗口；X 按钮不触发。----
+      (function () {
+        var region = document.getElementById("panel-drag-region");
+        if (!region) return;
+        var dragging = false;
+        region.addEventListener("mousedown", function (e) {
+          if (e.target && e.target.id === "panel-btn-close") return; // X 不拖
+          dragging = true;
+          window.ballDrag.start("panel");
+        });
+        document.addEventListener("mouseup", function () {
+          if (!dragging) return;
+          dragging = false;
+          window.ballDrag.end();
+        });
+        document.addEventListener("mouseleave", function () {
+          if (!dragging) return;
+          dragging = false;
+          window.ballDrag.end();
+        });
+      })();
+
+      // ---- v0.184：X 按钮 → 收起容器（uplink → Api.panel_close → pool 收起/隐藏）。----
+      (function () {
+        var btn = document.getElementById("panel-btn-close");
+        if (!btn) return;
+        btn.addEventListener("click", function () {
+          if (window.pywebview && window.pywebview.api && window.pywebview.api.panel_close) {
+            window.pywebview.api.panel_close();
+          }
+        });
+      })();
+
+      // ---- v0.184：磁吸模式（关球）隐藏球帽，side surface 占满；球模式恢复。----
+      window.ghostSetBallVisible = function (on) {
+        document.body.classList.toggle("no-ball", !on);
+      };
+    </script>
+    <script src="live_panel.js?v=20260825-01"></script>
+  </body>
+</html>

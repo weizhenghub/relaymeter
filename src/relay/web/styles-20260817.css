@@ -1,0 +1,6142 @@
+/* Token Manager — static Claude-style design.
+ *
+ * v0.41：v0.23–v0.40 的液体玻璃 + canvas 动效整段下线。WebView2 上
+ * backdrop-filter:blur 即使降到 12px 仍会拖慢所有毛玻璃卡片（9 张
+ * glass-card + sidebar），所以：
+ *   - 背景：纯色 --root-bg，无 canvas、无 rAF、无伪元素 blob
+ *   - 卡片：纯色 --panel-bg + 1px 描边 + soft box-shadow
+ *   - 透明 + backdrop-filter 全部从 tokens 拿掉
+ * Tokens keyed off [data-theme] so a single attr swap repaints.
+ */
+
+:root {
+  /* ----- surfaces ----- */
+  --root-bg: #f5f5f7;
+  --panel-bg: #ffffff;
+  --panel-alt: #fbfbfd;
+  --hairline: #e5e5ea;
+
+  /* ----- text ----- */
+  /* v0.79：灰阶整体加深一档 —— 旧值 (#6e6e73 / #aeaeb2) 的 muted 在白底
+   * 只有 ~2.4:1 对比度，9–10px 小标签（窗口标签/提示）基本糊掉。新值
+   * secondary ≈6.5:1、muted ≈4:1，层级保留但可读。 */
+  --text-primary: #0a0a0a;
+  --text-secondary: #5d5d63;
+  --text-muted: #85858b;
+  --text-success: #22aa22;
+  --text-error: #cc3333;
+
+  /* ----- chrome ----- */
+  --button-primary: #0a0a0a;
+  --button-primary-fg: #ffffff;
+  --button-ghost-bg: transparent;
+
+  /* v0.92：nav"实时"波纹专用色 —— 不能复用 --button-primary（暗夜黑
+   * 主题里它被压成 #3a3a3c，深灰扫过 #2c2c2e 面板几乎不可见）。本主题
+   * 取原值保持不变，dark 主题单独提亮。 */
+  --nav-ripple: #0a0a0a;
+
+  /* ----- status dots ----- */
+  --dot-running: #22aa22;
+  --dot-stopped: #cc3333;
+  --dot-restarting: #d97706;
+
+  /* ----- platform brand ----- */
+  --platform-anthropic: #d97706;
+  --platform-openai: #10a37f;
+
+  /* ----- token-segment colors (input / output / cache) -----
+   * Same colour cues as Claude Code's own TUI: input reads blue,
+   * output reads magenta/violet, cache reads neutral grey. Used by
+   * the top-model spotlight stacked bar. */
+  --seg-input:  #2563eb;
+  --seg-output: #c026d3;
+  --seg-cache:  #10b981;
+
+  /* ----- radii ----- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+  --radius-pill: 22px;
+
+  /* ----- spacing ----- */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 32px;
+
+  /* ----- v0.41 静态卡片样式 -----
+   * 干掉 backdrop-filter / 玻璃透明面。卡片用纯色 + 1px 描边 + soft
+   * shadow 撑出层级，body 用纯色 --root-bg。Claude 风格的极简静态
+   * 布局，零 GPU 合成层重算。
+   * 关键：--card-bg 用 var(--panel-bg)，这样切主题时只要 --panel-bg
+   * 改了，card 颜色就跟着改，不用每个主题都重复定义。 */
+  --card-bg: var(--panel-bg);
+  --card-border: #e5e5ea;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --card-shadow-hover: 0 2px 6px rgba(0, 0, 0, 0.06);
+  /* 旧 --glass-* token 仍被部分 .glass-card / .nav-item:hover 等规则引用，
+   * 保留定义但改成纯色 + alpha 极低的 hairline 替代品，避免重写所有规则。*/
+  --glass-border: var(--card-border);
+  --glass-shadow: var(--card-shadow);
+  --glass-shadow-hover: var(--card-shadow-hover);
+  --glass-blur: none;
+  --glass-surface: var(--panel-bg);
+  --glass-surface-strong: var(--panel-bg);
+  --glass-surface-soft: var(--panel-alt);
+
+  /* v0.112l：统一 select 下拉箭头 —— 主题色 data-URI SVG（向下 chevron）。
+   * 背景箭头替代原生 UA 箭头（appearance:none 后自绘），颜色取各主题
+   * --text-muted，随主题切换。 */
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%2385858b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+  /* ----- v0.42 成块光晕 -----
+   * 角落两块静态模糊块，色相互补。filter:blur 是一次性合成层（不
+   * 进 rAF），WebView2 首帧算一次后缓存，跟动效脱钩。色相随主题
+   * 切换：light 偏冷暖撞色，day 全暖色，dark 冷色为主。 */
+  --glow-1: rgba(186, 196, 230, 0.55);  /* cool blue-purple, top-left */
+  --glow-2: rgba(255, 184, 140, 0.50);  /* warm orange, bottom-right */
+
+  /* ----- motion ----- */
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+
+  /* v0.139：主题切换动效 —— 把 background / 文本 / 边框 / 阴影 沿一条
+   * 共用曲线 / 时长插值，避免各元素自己 transition 时长参差。统一在
+   * html/body 上挂一次，主题切换瞬间全局联动手感一致。
+   * v0.140：时长统一拉到 .7s（用户要求），color 与其余项同步。 */
+  --theme-trans: background-color .7s var(--ease-out),
+                color .7s var(--ease-out),
+                border-color .7s var(--ease-out),
+                box-shadow .7s var(--ease-out),
+                fill .7s var(--ease-out),
+                stroke .7s var(--ease-out);
+
+  /* v0.11.17 闪烁自定义（高级闪烁功能）：缓动 + 颜色/粗细/宽度。
+   * 这些变量由设置页的 cubic-bezier 编辑器 / 渐变编辑器写入。
+   * v0.96：--flash-width 语义从「峰在背景图里的位置」改为「波总宽」——
+   * 峰固定在背景图中心 50%，半宽 = flash-width/4。原因：原语义下峰在
+   * 背景 88% + background-size:200%，动画 -100%→100% 滑动时波峰几乎
+   * 不进入可见窗口（窗口只显示左翼渐深段，看起来「左浅右深」）。改后
+   * 对称波（浅-深-浅）完整滑过窗口。默认 88% → 波宽 44%，窗口（=50%
+   * 背景）可完整容纳。 */
+  --flash-ease: cubic-bezier(0.615, -0.003, 0.325, 0.986);
+  --flash-blur: 3px;                 /* 粗细 */
+  --flash-width: 88%;               /* 波总宽（半宽 = /4），峰在背景中心 */
+  --flash-color-bump: var(--button-primary);
+  --flash-color-decrease: var(--text-success);
+  --gold-sheen: #ffcf4d;
+
+  /* ----- v0.19 quota / utilization ----- */
+  /* Warning levels follow the snapshot's ``warning_level`` field. The
+   * same four names (``ok`` / ``warn`` / ``critical`` / ``exhausted``)
+   * are used as `data-level` attribute on .quota-bar so CSS picks the
+   * correct hue without a per-cell class list. */
+  --quota-ok:       #22c55e;
+  --quota-warn:     #eab308;
+  --quota-critical: #f97316;
+  --quota-exhausted:#dc2626;
+}
+
+/* "日间" — warm cream light mode, distinct from the cool-grey "light"
+ * preset. Same structural palette tokens, warmer hues. */
+[data-theme="day"] {
+  --root-bg: #fdf6ec;
+  --panel-bg: #ffffff;
+  --panel-alt: #fffaf0;
+  --hairline: #f0e3cf;
+
+  --text-primary: #1a1410;
+  /* v0.79：同浅色主题 —— 暖灰加深一档提可读性 */
+  --text-secondary: #6f604d;
+  --text-muted: #97866e;
+
+  --button-primary: #c2410c;
+  --button-primary-fg: #ffffff;
+
+  --nav-ripple: #c2410c;
+
+  --dot-running: #16a34a;
+  --dot-stopped: #dc2626;
+  --dot-restarting: #d97706;
+
+  --platform-anthropic: #ea580c;
+  --platform-openai: #0d9488;
+
+  --glass-border: var(--card-border);
+  --glass-shadow: var(--card-shadow);
+  --glass-shadow-hover: var(--card-shadow-hover);
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%2397866e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --card-border: #f0e3cf;
+  --card-shadow: 0 1px 2px rgba(180, 100, 40, 0.05);
+  --card-shadow-hover: 0 2px 6px rgba(180, 100, 40, 0.07);
+
+  --seg-input:  #2563eb;
+  --seg-output: #c026d3;
+  --seg-cache:  #10b981;
+
+  /* day 全暖光晕：amber + 软桃 */
+  --glow-1: rgba(255, 210, 160, 0.60);
+  --glow-2: rgba(255, 170, 130, 0.55);
+
+  /* Warm-shifted quota hues so the bar doesn't read as a foreign
+   * traffic-light dropped onto the cream palette. */
+  --quota-ok:       #16a34a;
+  --quota-warn:     #d97706;
+  --quota-critical: #ea580c;
+  --quota-exhausted:#dc2626;
+}
+
+[data-theme="dark"] {
+  --root-bg: #0a0a0a;
+  --panel-bg: #1d1d1f;
+  --panel-alt: #2c2c2e;
+  --hairline: #2c2c2e;
+
+  --text-primary: #f5f5f7;
+  /* v0.79：深色主题 muted 提亮一档（#6e6e73 → #9a9aa0，面板上 ≈5:1） */
+  --text-secondary: #aeaeb2;
+  --text-muted: #9a9aa0;
+  --text-success: #4ade80;
+  --text-error: #ff6b6b;
+
+  /* v0.12：深色主题主按钮不再用白底（白底突兀），改深灰玻璃面 */
+  --button-primary: #3a3a3c;
+  --button-primary-fg: #f5f5f7;
+  --button-ghost-bg: transparent;
+
+  /* v0.92：nav"实时"波纹在暗夜黑下用亮白（≈11:1 对比），不再复用
+   * --button-primary 的深灰。 */
+  --nav-ripple: #f5f5f7;
+
+  --dot-running: #4ade80;
+  --dot-stopped: #ff6b6b;
+  --dot-restarting: #fbbf24;
+
+  --platform-anthropic: #fbbf24;
+  --platform-openai: #34d399;
+  --seg-input:  #60a5fa;
+  --seg-output: #e879f9;
+  --seg-cache:  #34d399;
+
+  --glass-border: var(--card-border);
+  --glass-shadow: var(--card-shadow);
+  --glass-shadow-hover: var(--card-shadow-hover);
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%239a9aa0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --card-border: #2c2c2e;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --card-shadow-hover: 0 2px 6px rgba(0, 0, 0, 0.5);
+
+  /* dark 冷调光晕：紫蓝 + 暗琥珀 */
+  --glow-1: rgba(96, 132, 200, 0.32);
+  --glow-2: rgba(220, 110, 90, 0.28);
+
+  /* Lifted for contrast against the near-black root — the light-mode
+   * hues sit too dark to read as a fill on a dark translucent track. */
+  --quota-ok:       #4ade80;
+  --quota-warn:     #facc15;
+  --quota-critical: #fb923c;
+  --quota-exhausted:#f87171;
+}
+
+* { box-sizing: border-box; }
+
+/* v0.41：纯色背景，无 canvas / 无伪元素 blob。
+ * v0.42：body 重新 transparent —— html 撑底色（--root-bg），
+ * z-index:-1 的 .bg-glow 浮在 html 之上、body 内容之下。
+ * 这是为了让 filter:blur 的两块光晕能透过来。 */
+html {
+  background: var(--root-bg);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* v0.139：主题切换时 html/body 的背景 / 文字 / 边框沿 --theme-trans
+   * 插值。卡片 / 控件自己挂 hover transition 不动（仅 hover 触发），
+   * 这里只管 data-theme 切那一帧的全局配色过渡。 */
+  transition: var(--theme-trans);
+}
+
+body {
+  background: transparent;
+  color: var(--text-primary);
+  font-family: "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: auto;
+  text-rendering: optimizeLegibility;
+  /* v0.101：罗小黑「正常选择」光标 —— 从桌面光标主题的 正常选择.ani 静态帧
+   * 转换而来（cursors/罗小黑-正常选择.png，128×128，热点在箭头尖 2,28）。
+   * 只设默认，各元素自身的 cursor:pointer/text/grab 等语义保持不变。
+   * 图片光标如果加载失败（文件缺失/加载失败）退回系统箭头。
+   * v0.197：禁用该自定义光标（出版 Git 版，去掉第三方素材）；文件保留，改回取消下行注释即可。 */
+  /* cursor: url("cursors/罗小黑-正常选择.png") 2 28, auto; */
+}
+
+/* Frameless mode — the OS chrome is gone, so we still need the body to
+ * fill the viewport and the titlebar to claim its own strip at the top.
+ * Drag is delegated to pywebview's ``easy_drag`` (set on the window);
+ * no CSS ``-webkit-app-region`` is used so we don't fight that. */
+body {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* v0.64：边缘拖动调整窗口大小。
+ * 1. body.resizing —— 鼠标按住边缘进入 resize 模式时锁 user-select，
+ *    防止拖到文字上"框选"出蓝底。
+ * 2. body.resizing * —— 把整个 DOM 树的光标都强行设为 inherit（覆盖
+ *    .btn / .nav-item / .card 等各自的 cursor），保持 resize 形光标
+ *    一致。pointer-events 不动 —— 某些按钮的 hover 视觉仍需要更新。
+ * 3. body.is-maximized —— 最大化时禁用 resize。JS 在最大化按钮点击
+ *    时同步设这个类，wireEdgeResize 在 mousedown 时检查。 */
+body.resizing {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: inherit;
+}
+body.resizing * {
+  cursor: inherit !important;
+}
+
+#app {
+  display: flex;
+  flex: 1;
+  /* v0.113d：100vw → 100%。body 在 zoom>1 时被 JS 压到 calc(100vw/Z)，
+   * 这里若仍用 100vw 会无视补偿把 #app 撑回 1× 视口宽再被放大 Z 倍，
+   * 超宽被 body{overflow:hidden} 裁掉。100% 跟随 body 补偿后的宽度。 */
+  width: 100%;
+  min-height: 0;
+}
+
+/* -------------------------------------------------------------------------
+ * v0.41 背景：纯色 + 极简描边
+ *
+ * 整段背景动效（焦点 / 涟漪 / 拖尾 / 点击圈）下线。无 canvas、无
+ * 伪元素 blob、无 rAF。body 直接用 --root-bg 纯色，零 GPU 合成层
+ * 重算。这是 v0.13 静态版的回归。
+ *
+ * v0.42：加两块 .bg-glow 静态模糊块（filter:blur），跟动效脱钩
+ * ——blur 是合成层属性，首帧 paint 时算一次后缓存，零 per-frame
+ * 开销。body 重新 transparent，让 html 的 --root-bg 当底色，glow
+ * divs 在 z-index:-1 浮在 html 之上、body 内容之下。
+ * ------------------------------------------------------------------------- */
+.bg-glow {
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 50%;
+  will-change: transform;            /* 暗示合成层，blur 走 GPU */
+}
+
+.bg-glow-1 {
+  top: -260px;
+  left: -260px;
+  width: 700px;
+  height: 700px;
+  background: var(--glow-1);
+  filter: blur(80px);
+}
+
+.bg-glow-2 {
+  bottom: -340px;
+  right: -300px;
+  width: 900px;
+  height: 900px;
+  background: var(--glow-2);
+  filter: blur(100px);
+}
+/* -------------------------------------------------------------------------
+ * Window controls (frameless mode — replaces the OS chrome)
+ *
+ * Three min/max/close buttons that FLOAT over the page corner instead
+ * of owning a strip. The chrome itself has zero height and zero
+ * background; only the three buttons exist, pinned to the top-right
+ * with absolute positioning. The result: the top of the page is the
+ * app — sidebar + topbar + hero all start at y=0 and read as one
+ * continuous surface. The buttons are invisible until the user hovers,
+ * at which point they pick up a soft glass-surface fill so the user
+ * can see them as affordances.
+ *
+ * z-index keeps them above the in-page topbar buttons ("主题" etc.) so
+ * hovering them doesn't fall through to the buttons underneath.
+ * ------------------------------------------------------------------------- */
+
+.window-controls {
+  position: fixed;
+  top: 6px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  z-index: 1000;
+  user-select: none;
+  /* v0.120：磨砂玻璃 + 边缘渐变淡出 */
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.18) 0%,
+    rgba(255, 255, 255, 0.11) 30%,
+    rgba(255, 255, 255, 0.05) 60%,
+    transparent 100%
+  );
+  backdrop-filter: blur(23px) saturate(112%);
+  -webkit-backdrop-filter: blur(23px) saturate(112%);
+  border: 1px solid rgba(255, 255, 255, 0);
+  border-radius: 11px;
+  padding: 2px;
+}
+
+[data-theme="dark"] .window-controls {
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.18) 0%,
+    rgba(255, 255, 255, 0.11) 30%,
+    rgba(255, 255, 255, 0.05) 60%,
+    transparent 100%
+  );
+}
+
+[data-theme="day"] .window-controls {
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.22) 0%,
+    rgba(255, 255, 255, 0.14) 30%,
+    rgba(255, 255, 255, 0.06) 60%,
+    transparent 100%
+  );
+}
+
+.win-ctrl {
+  width: 26px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity .15s var(--ease-out), background-color .15s var(--ease-out), color .15s var(--ease-out);
+}
+
+.window-controls:hover .win-ctrl {
+  opacity: 1;
+}
+
+.win-ctrl:hover {
+  background: var(--glass-surface-strong);
+  color: var(--text-primary);
+}
+
+.win-ctrl-close:hover {
+  background: #e11d48;
+  color: #ffffff;
+}
+
+/* -------------------------------------------------------------------------
+ * Sidebar — glass panel
+ * ------------------------------------------------------------------------- */
+
+.sidebar {
+  /* v0.43：sidebar 不再是独立 panel —— 去掉 background / border-right
+   * / backdrop-filter，让它跟右侧主体共享同一张底色（html --root-bg），
+   * 视觉上是一整块连续画布。内容用 logo / nav / status-card 自身撑
+   * 出层次，不需要再用一个"框"把 sidebar 框起来。 */
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  /* v0.58：左侧 padding 从 spacing-xl (32px) 收到 spacing-lg (16px)，
+   * 跟 top/bottom 对齐。原来 32px 显得菜单栏"漂"在 sidebar 中间，
+   * 整体太宽。 */
+  padding: var(--spacing-lg) var(--spacing-md) var(--spacing-lg) var(--spacing-lg);
+  gap: var(--spacing-lg);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  position: sticky;
+  top: 0;
+  /* v0.118：sidebar 是 position:sticky → 自成 stacking context，把内部
+   * .upstream-menu 的 z-index:500 关在侧栏层里，而 .main 在 DOM 里排后面、
+   * 卡片 hover 又 z-index:5，于是菜单总被总览/统计卡片盖住。给 sidebar 也
+   * 升到 500，让整个侧栏层浮到 .main 之上，菜单才能真正盖住卡片。 */
+  z-index: 500;
+  /* v0.113d：100vh → 100%。body 在 zoom>1 时被 JS 压到 calc(100vh/Z)，
+   * 若仍用 100vh 会让侧栏比视口高 Z 倍，底部的上游选择器/状态卡被裁掉。
+   * 100% 跟随 #app 高度（#app flex:1 填满 body 补偿后的高度）。 */
+  height: 100%;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  /* Frameless mode: there's no OS titlebar to drag from anymore. The
+   * sidebar logo is the natural "title" of the window, so it picks up
+   * the classic title-bar drag affordance — grab cursor at rest,
+   * grabbing while pressed, and a subtle hover ring so the user knows
+   * this is a drag handle. pywebview's easy_drag already wires up the
+   * actual mouse-down → native-move handler on this region; the CSS
+   * here is the visible half of the contract. */
+  cursor: grab;
+  padding: var(--spacing-xs);
+  margin: calc(-1 * var(--spacing-xs));
+  border-radius: var(--radius-md);
+  transition: background-color .15s var(--ease-out);
+  user-select: none;
+}
+
+.logo:hover {
+  background: var(--glass-surface-soft);
+}
+
+.logo:active {
+  cursor: grabbing;
+  background: var(--glass-surface-strong);
+}
+
+.logo-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: var(--button-primary);
+  color: var(--button-primary-fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.logo-title { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+.logo-subtitle { font-size: 11px; color: var(--text-secondary); }
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background-color .18s var(--ease-out), color .18s var(--ease-out);
+  position: relative;
+}
+
+.nav-item:hover {
+  background: var(--glass-surface-strong);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: var(--glass-surface-strong);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* v0.11.17：#12 设置页左侧子菜单（大项条目）。仅在设置视图时显示，
+ * 由 JS 给 body 挂 .is-settings 控制。 */
+.nav-sub {
+  display: none;
+  flex-direction: column;
+  margin: 2px 0 6px;
+  /* v0.12：子菜单左移 —— 缩进从 18px+12px 收到 ~2 字符宽，贴近设置区左缘 */
+  padding-left: 10px;
+  border-left: 2px solid var(--hairline);
+  margin-left: 6px;
+}
+body.is-settings .nav-sub { display: flex; }
+.nav-sub-item {
+  padding: 4px var(--spacing-md);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+.nav-sub-item:hover { background: var(--glass-surface-strong); color: var(--text-primary); }
+.nav-sub-item.active { color: var(--button-primary); font-weight: 600; }
+
+/* v0.11.17：#8 开启全页闪烁后，"闪烁"开关变灰且禁用，hover 出现禁用提示 */
+.prefs-flash.locked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.prefs-flash.locked .switch-track { cursor: not-allowed; }
+.disabled-tip {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  background: rgba(20, 20, 24, 0.92);
+  color: #fff;
+  font-size: 12px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.disabled-tip.show { opacity: 1; }
+
+/* ----- "实时" 侧栏项：实时流在飞时的左→右波纹 -----
+ * 与 .nav-item::before 的 active 指示并存(同一元素两个伪元素,层叠无冲突)。
+ *
+ * 一周期 = 1.5s 走 + 0.3s 等 = 1.8s。83% = 1.5/1.8,是"走完"的临界点;
+ * 之后 background-position 保持 100% 不动,亮带停在屏幕外,留出 0.3s
+ * 让用户的眼睛能从上一道波纹的余韵里回过神。
+ *
+ * 方向:从左到右 —— background-position 从 -100% → 100%,亮带穿过
+ * nav-item 整体往右走。background-size: 200% 让亮带只占 nav-item 宽度
+ * 的一半,两侧各 25% 透明渐隐,所以"进入"和"退出"都是软的。
+ *
+ * 缓动:整段 1.8s 写 linear,真正决定"走"的曲线通过 0% 关键帧里的
+ * animation-timing-function 局部生效 —— 只对 0% → 83% 这一段
+ * 应用 cubic-bezier(0.615, -0.003125..., 0.325, 0.986875),等的那 0.3s
+ * 不再有自己的缓动(因为位置不变)。 */
+.nav-item[data-view="live"] {
+  overflow: hidden;
+}
+
+.nav-item[data-view="live"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 25%,
+    var(--nav-ripple) 50%,
+    transparent 75%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-position: -100% 0;
+  opacity: 0;
+  transition: opacity 0.35s var(--ease-out);
+}
+
+.nav-item[data-view="live"].has-stream::after {
+  opacity: 1;
+  /* v0.11.19：nav"实时"用写死的经典曲线，不跟高级闪烁编辑器（--flash-ease）
+   * 走 —— 否则用户把编辑器拖成直线/非法值时，nav 波纹会退化成直线扫过。 */
+  animation: live-ripple 1.8s cubic-bezier(0.615, -0.0031250000000000444, 0.325, 0.986875) infinite;
+}
+
+@keyframes live-ripple {
+  0% {
+    background-position: -100% 0;
+    /* 只对"走"的 1.5s 生效。0.3s 等待不另设,因为位置不变、动画无视觉。 */
+    animation-timing-function: cubic-bezier(0.615, -0.0031250000000000444, 0.325, 0.986875);
+  }
+  83% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 100% 0;
+  }
+}
+
+/* 尊重系统"减少动效"设置:移除波纹但保留语义(颜色淡入) */
+@media (prefers-reduced-motion: reduce) {
+  .nav-item[data-view="live"].has-stream::after {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+.sidebar-upstream {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin-top: auto;
+}
+
+/* v0.69 sidebar "快捷切换"按钮组 —— 紧贴 .sidebar-upstream 下方,
+ * 内容由 renderQuickSwitch() 从 snapshot.quick_switch 渲染;没配
+ * 时整个 div hidden,不占空间。button 复用主题色变量。 */
+.sidebar-quick-switch {
+  padding: 4px 0 8px;
+  border-top: 1px solid var(--hairline);
+  margin-top: 4px;
+}
+.sidebar-quick-switch-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 6px 0 6px;
+  font-weight: 600;
+}
+/* v0.12.1：单池上游选择器的分组标签（原 anthropic / openai 两段合并） */
+.sidebar-upstream-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 0 0 6px;
+  font-weight: 600;
+}
+.sidebar-quick-switch-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.quick-switch-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--panel-alt);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color .15s var(--ease-out),
+              border-color .15s var(--ease-out);
+  font-family: inherit;
+}
+.quick-switch-btn:hover {
+  border-color: var(--button-primary);
+  background: color-mix(in srgb, var(--button-primary) 12%, transparent);
+}
+.quick-switch-btn:focus {
+  outline: 2px solid var(--button-primary);
+  outline-offset: -2px;
+}
+.quick-switch-btn-disabled {
+  opacity: .4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* v0.11.21：内外转换显示 —— topbar 状态条内紧凑条：对内(客户端→中继)
+ * 模型 → 对外(中继→上游) 模型。只显示最新一条，请求结束 30s 后清理。 */
+.topbar-io-map {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: var(--spacing-sm);
+  padding-left: var(--spacing-sm);
+  border-left: 1px solid var(--hairline);
+  max-width: 340px;
+  min-width: 0;
+}
+.topbar-io-map .io-map-chip {
+  font-family: var(--font-mono, Consolas, monospace);
+  background: var(--glass-surface-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+  max-width: 120px;
+}
+.topbar-io-map .io-map-chip-out {
+  color: var(--button-primary);
+}
+.topbar-io-map .io-map-arrow {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 10px;
+  padding: 0 2px;
+}
+.topbar-io-map .io-map-time {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.upstream-select-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.upstream-select-platform {
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+
+/* v0.113d/e：侧栏上游选择器 —— 自绘下拉的触发按钮。v0.114：纯色胶囊
+ * （不用玻璃 token），背景与展开菜单 .upstream-menu 同为 --panel-bg，
+ * 描边 --hairline，跟 v0.41 下线的液态玻璃风格彻底解耦。v0.113e 起从
+ * 原生 <select> 改为 <button>，展开列表由 .upstream-menu 自绘。 */
+.upstream-picker {
+  position: relative;
+}
+
+.upstream-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background-color: var(--panel-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  padding: 6px 9px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color .18s var(--ease-out);
+  text-align: left;
+}
+
+.upstream-select-current {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upstream-select-arrow {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.upstream-select:hover { border-color: var(--text-muted); }
+.upstream-select:focus { outline: 2px solid var(--button-primary); outline-offset: -2px; }
+
+/* 展开后的自绘菜单 —— 玻璃面板，贴合卡片风格；侧栏底部打开，向上展开。
+ * v0.113g：加展开/收起动效 —— 初始态透明 + 向下 6px + 微缩放，加 .open
+ * 后过渡到原位；隐藏由 JS 两段式控制（.open class 过渡，hidden 最终显隐）。
+ * 向上展开（bottom:calc(100%+6px)）配向下位移，视觉上是"从底缘滑入"。
+ * v0.114：两列并排 —— 每平台一组 .upstream-menu-group，grid 排成两列。
+ * 菜单改 position:fixed（left/bottom 由 JS 按 picker 视口坐标设置），
+ * 宽度加到 sidebar 之外，避免被 sidebar 的 overflow-y:auto 横向裁剪；
+ * 超出部分作为浮层盖在右侧 main 上方（z-index 500）。 */
+.upstream-menu {
+  position: fixed;
+  z-index: 500;
+  min-width: 280px;
+  /* v0.120a：grid（max-content max-content）改 flex —— 两列可由 JS 统一
+     设为相同宽度（向较短列对齐），长列文字允许溢出边界（overflow 可见），
+     不再各自按内容最宽撑开。 */
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  padding: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
+  opacity: 0;
+  transform: translateY(6px) scale(.98);
+  pointer-events: none;
+  transition: opacity .15s var(--ease-out), transform .15s var(--ease-out);
+}
+
+.upstream-menu.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+/* v0.114：一列平台分组 —— grid item，内部竖排组标题 + 选项。
+ * v0.115：滚动下放到每个 group（max-height + overflow-y:auto），
+ * 左右两栏各自独立滚动；整菜单不再限高，由两栏自然高度决定，
+ * 避免共用一个滚动条时任意一栏先溢出就挤压另一栏。 */
+.upstream-menu-group {
+  min-width: 0;
+  /* v0.120a：flex 下 flex: 0 0 auto —— 宽由 JS 打开菜单时统一设为
+     较短列宽；长列文字超出边界时可见（overflow 默认 visible），
+     overflow-y:auto 只管纵向滚动，不影响横向溢出。 */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+}
+/* v0.119：左列（anthropic）滚动条放左侧 —— 用 direction:rtl 让 WebKit/Firefox
+ * 滚动条自然贴左；子项 label/button 重置 direction: ltr 保持原排版。右侧
+ * 列（openai）保留默认 direction。 */
+.upstream-menu-group:first-child {
+  direction: rtl;
+  scrollbar-gutter: stable;
+}
+.upstream-menu-group:first-child > * {
+  direction: ltr;
+}
+
+.upstream-menu-group + .upstream-menu-group {
+  border-left: 1px solid var(--hairline);
+}
+
+.upstream-menu-group-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 600;
+  padding: 6px 8px 4px;
+  flex-shrink: 0;
+}
+
+.upstream-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* v0.118：group 是 flex-column，item 默认 flex-shrink:1 会被 240px
+   * max-height 压扁挤成一坨而不是溢出滚动。这里禁止收缩，让条目保持
+   * 自然高度溢出 → 触发 group 的 overflow-y:auto 滚动条。 */
+  flex-shrink: 0;
+}
+
+.upstream-menu-item:hover {
+  background: var(--glass-surface-soft);
+  color: var(--text-primary);
+}
+
+.upstream-menu-item.active {
+  color: var(--button-primary);
+  font-weight: 600;
+}
+
+.status-card {
+  /* v0.43：sidebar 不再是独立 panel，status-card 跟着软化——
+   * 去掉 border / background / backdrop-filter，只留内容本身。 */
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--spacing-sm) 0;
+}
+
+.status-card-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-weight: 500;
+}
+
+.status-card-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* -------------------------------------------------------------------------
+ * Status dot (Apple-style colored ring)
+ * ------------------------------------------------------------------------- */
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background-color .25s var(--ease-out), box-shadow .25s var(--ease-out);
+}
+
+.status-dot.dot-running {
+  background: var(--dot-running);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot-running) 25%, transparent);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-dot.dot-stopped {
+  background: var(--dot-stopped);
+}
+
+/* v0.67: "重启中…" 过渡态 —— kill 旧进程到新 PID 就绪之间有秒级空
+ * 窗，之前这段时间顶栏没有任何反馈，用户只看到绿灯一直亮着，看不
+ * 出中间发生过什么。黄点 + 稍快的 pulse 给这段时间一个明确信号。 */
+.status-dot.dot-restarting {
+  background: var(--dot-restarting);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot-restarting) 25%, transparent);
+  animation: pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+/* -------------------------------------------------------------------------
+ * Main + topbar
+ * ------------------------------------------------------------------------- */
+
+.main {
+  flex: 1;
+  overflow-y: auto;
+  /* v0.193：设置页用 zoom:1.2 整体放大后，子元素的视觉宽度可能 1.2×
+   * 超出其布局 box。横向内容在 .main 边内仍要裁掉（默认 visible
+   * 会画到主区外、盖住 padding），纵向保持 .main 自然滚动。 */
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: var(--spacing-lg) var(--spacing-xl);
+  /* v0.50：隐藏右侧滚动位置条，不影响和谐。内容超长时仍可滚
+   * (滚轮 / 触摸板 / 键盘 PgUp/PgDn / 触屏滑动都还能用)，仅不可
+   * 见。三套属性分别对应 Firefox / IE/Edge legacy / WebKit。 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.main::-webkit-scrollbar { display: none; }
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-md) var(--spacing-lg);
+  /* v0.11.3: 右侧留出浮动窗口控制按钮 (最小化/最大化/关闭) 的宽度，
+   * 否则 topbar 的按钮组会跟它重叠。 */
+  padding-right: 112px;
+  margin-bottom: var(--spacing-lg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-surface);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.topbar-status {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.topbar-meta {
+  color: var(--text-secondary);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  align-items: center;
+}
+
+/* -------------------------------------------------------------------------
+ * Buttons (Apple-style pill)
+ * ------------------------------------------------------------------------- */
+
+.btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--glass-border);
+  /* v0.12：大白底按钮 → 柔和渐变玻璃面，契合卡片风格 */
+  background: linear-gradient(
+    180deg,
+    var(--glass-surface-strong) 0%,
+    var(--glass-surface-soft) 100%
+  );
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  transition:
+    background-color .18s var(--ease-out),
+    border-color .18s var(--ease-out),
+    transform .12s var(--ease-out),
+    box-shadow .18s var(--ease-out);
+}
+
+.btn:hover {
+  background: color-mix(in srgb, var(--panel-bg) 88%, transparent);
+  border-color: var(--text-muted);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.btn:active { transform: translateY(0) scale(0.98); }
+
+.btn-primary {
+  background: var(--button-primary);
+  color: var(--button-primary-fg);
+  border-color: var(--button-primary);
+}
+
+.btn-primary:hover {
+  background: var(--button-primary);
+  filter: brightness(1.08);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
+
+.btn-ghost {
+  background: var(--glass-surface-soft);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.btn-ghost:hover {
+  background: color-mix(in srgb, var(--panel-bg) 70%, transparent);
+  border-color: var(--hairline);
+  color: var(--text-primary);
+}
+
+/* v0.11.21：菜单栏"内外转换"开关开启态 —— 高亮表示 topbar 状态条
+ * 正在实时显示 对内/对外 模型映射。 */
+.btn-active {
+  background: var(--button-primary) !important;
+  border-color: transparent !important;
+  color: var(--text-on-primary, #fff) !important;
+  filter: brightness(1.08);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
+
+/* v0.12：分发告警卡片（混合态 / 未知 key）——右上角固定容器，
+ * 配置类错误不自动消失，点 × 关闭。 */
+#dispatch-alerts {
+  position: fixed;
+  top: 48px;
+  right: 12px;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+}
+.dispatch-alert {
+  position: relative;
+  padding: 10px 28px 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(217, 119, 6, 0.5);
+  background: var(--bg-elevated, rgba(30, 30, 30, 0.95));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.dispatch-alert-mixed {
+  border-color: rgba(217, 119, 6, 0.55);
+}
+.dispatch-alert-unknown {
+  border-color: rgba(220, 38, 38, 0.55);
+}
+.dispatch-alert-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.dispatch-alert-mixed .dispatch-alert-title { color: #d97706; }
+.dispatch-alert-unknown .dispatch-alert-title { color: #dc2626; }
+.dispatch-alert-detail {
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+.dispatch-alert-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 18px;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.dispatch-alert-close:hover {
+  background: rgba(128, 128, 128, 0.2);
+  color: var(--text-primary, inherit);
+}
+
+/* v0.70：用在 settings 卡片每行的"编辑 / 删除"小按钮上,继承 .btn
+ * 的所有视觉（玻璃面、边框、hover）但字号 / 内边距更紧凑。 */
+.btn-small {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+/* v0.71：用在 confirmModal / alertModal 危险操作按钮（删除确认）。
+ * 复用主题已有的 --quota-exhausted 红色变量，避免再开一组。 */
+.btn-danger {
+  background: var(--quota-exhausted);
+  border-color: var(--quota-exhausted);
+  color: #fff;
+}
+.btn-danger:hover {
+  filter: brightness(1.08);
+}
+
+/* -------------------------------------------------------------------------
+ * Hero
+ * ------------------------------------------------------------------------- */
+
+.hero {
+  /* v0.120a：上 padding 从 md (12px) 提到 xl (32px)，远离顶部 topbar，
+     36px 大字不再压迫；左右也从 lg (16px) 提到 24px，离左侧更远。
+     v0.62：下不变：保留 hero 到 grid 的呼吸。
+     v0.113i：左右补 --spacing-lg，与顶栏对齐、离窗口边缘有距离。 */
+  padding: var(--spacing-xl) calc(var(--spacing-xl) - 8px) var(--spacing-xl);
+}
+
+.hero-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: var(--spacing-xs);
+}
+
+.hero-title {
+  font-size: 36px;
+  font-weight: 700;
+  margin: 0 0 var(--spacing-xs);
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+/* -------------------------------------------------------------------------
+ * Grid + glass cards
+ * ------------------------------------------------------------------------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+/* v0.59：24h chart 不再全宽，改为跟"上游状态"并排（chart 占 2 列、
+ * upstream 占 1 列）。原来 chart 单独占全宽最底一行的布局太吃垂
+ * 直空间，现在 6 4 个小卡片可以分两行放下。
+ *
+ * .glass-card-wide 仍保留供其它视图（live / history / upstreams /
+ * settings）的全宽卡使用；本视图的 chart 用 .card-chart-row。 */
+.glass-card-wide {
+  grid-column: 1 / -1;
+  min-height: 280px;
+}
+
+/* Chart 行内跟 .glass-card 同高的"宽列"成员 —— 自然列跨度为 2。
+ * v0.x：这条规则原来写 `grid-column: span 2`。现在总览布局换成了
+ * flex（见下面 .view[data-view="overview"] > .grid 注释，Grid 的 span
+ * 只接整数做不了 fine-grained），grid-column 在 flex 下是 no-op。
+ * 默认 2 列由 JS 的 naturalSpan() 决定（classList 包含 card-chart-row
+ * → naturalSpan = 2 → applyCardSize 写 --ov-span: 2）。这里留 class
+ * 本身做语义标记，不再写 grid-column。 */
+.card-chart-row {
+  /* 默认宽度由 --ov-span 走 width: calc() 控制；不再写 grid-column。 */
+}
+
+/* -------------------------------------------------------------------------
+ * Top-model spotlight — hero strip above the 6-card grid.
+ *
+ * Carries the heaviest model in the window with a three-colour
+ * stacked bar (input / output / cache), the same vocabulary Claude
+ * Code's own TUI uses for per-model breakdown. Sits above the grid
+ * in the overview view only — hidden via [hidden] when no data.
+ * ------------------------------------------------------------------------- */
+.top-model-spotlight {
+  margin-bottom: var(--spacing-lg);
+  padding: var(--spacing-lg) var(--spacing-xl);
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.tms-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-xl);
+  flex-wrap: wrap;
+}
+
+.tms-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.tms-name {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.tms-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-xl);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* In the new layout the right-most stat ("请求数") is the last child of
+ * .tms-header, so push it to the far right by claiming all the free
+ * space before it. Keeps "总计" glued to the model name on the left. */
+.tms-stat.tms-stat-total:last-of-type { margin-left: auto; }
+
+.tms-stat {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.tms-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.tms-stat-value {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* "总计" reads as the headline number — bump it well past the
+ * "请求数" stat so the user's eye lands on total tokens first. */
+.tms-stat.tms-stat-total .tms-stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--spacing-xs);
+}
+
+.tms-stat.tms-stat-total .tms-stat-label {
+  margin-bottom: 2px;
+}
+
+/* v0.10：总计数字可点击，在 全模型合计 / 用量最大模型 间切换。 */
+#tms-total {
+  cursor: pointer;
+}
+#tms-total:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* "总计" 上方的财务大写中文（壹贰叁...），小字、灰色、低对比。
+   视觉份量刻意压低，避免和下面的 26px 数字抢戏。 */
+.tms-stat-cn {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.18em;
+  font-variant-numeric: normal;
+  font-feature-settings: "halt" off;
+  /* 防止数字 fallback 时被 tabular-nums 拉成等宽，反而盖住汉字字面宽。 */
+  font-family: var(--font-sans);
+  min-height: 1em;
+}
+
+/* "总计" 的头一行：财务大写中文 + "总计" 标签并排，cn 在 label 左边。
+   baseline 对齐让两者字底齐平；gap 给汉字和拉丁字符留呼吸。 */
+.tms-stat-head {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.tms-stat-unit {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* v0.102：spotlight 数字宽度自适应 —— 数字右对齐 + 单位固定右缘。
+   切档/切换口径时数字长度变化（如 4,417 ↔ 80,000），单位"tokens"、
+   "req" 和右侧元素不再被数字宽度推着来回位移；数字从右往左增长。
+   min-width 由 JS 在渲染时按当前数字字符数更新（ch 基于 tabular-nums
+   等宽数字，千分位逗号也占一格）。 */
+#tms-total,
+#tms-requests {
+  display: block;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  min-width: 4ch;
+}
+#tms-input-val,
+#tms-output-val,
+#tms-cache-val {
+  display: inline-block;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  min-width: 4ch;
+}
+.tms-stat:has(#tms-total) .tms-stat-value,
+.tms-stat:has(#tms-requests) .tms-stat-value {
+  position: relative;
+}
+.tms-stat:has(#tms-total) .tms-stat-value { padding-right: 54px; }
+.tms-stat:has(#tms-requests) .tms-stat-value { padding-right: 30px; }
+.tms-stat:has(#tms-total) .tms-stat-unit,
+.tms-stat:has(#tms-requests) .tms-stat-unit {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+}
+
+.tms-bar {
+  display: flex;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--glass-surface-soft);
+  border: 1px solid var(--glass-border);
+}
+
+.tms-bar-seg {
+  height: 100%;
+  transition: width .35s var(--ease-out);
+}
+
+.tms-seg-input  { background: var(--seg-input);  }
+.tms-seg-output { background: var(--seg-output); }
+.tms-seg-cache  { background: var(--seg-cache);  }
+
+.tms-legend {
+  display: flex;
+  gap: var(--spacing-lg);
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.tms-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.tms-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.tms-legend-val {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Multi-view layout. Each `.view` is one of the sidebar-nav tabs;
+ * `.view[hidden]` is collapsed so only one section is on screen at a
+ * time. The grid layout inside each view still works — switching
+ * views just toggles which grid the user sees. */
+.view { display: block; }
+.view[hidden] { display: none; }
+/* v0.140：历史页内容容器填满整页 —— .main 改为 flex column，让
+ * .view[data-view="history"] 可用 flex:1 撑到 .main 高度；其它
+ * 视图默认 flex:0 1 auto 行为不变（内容按内容高度排，不撑满）。
+ * ⚠ :not([hidden]) 必须保留 —— 否则 display:flex 特异性 (0,2,0) 与
+ * .view[hidden] 相同且声明靠后，会覆盖 display:none，切走视图时残留。 */
+.main { display: flex; flex-direction: column; min-height: 0; }
+.view[data-view="history"]:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.view[data-view="history"] > .grid {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 覆盖 .grid 默认 grid 布局 —— history 只有 1 张全宽卡，flex column
+   * 让这张卡自然垂直铺满 .view 剩余高度。 */
+  grid-template-columns: none;
+  align-items: stretch;
+}
+.view[data-view="history"] > .grid > .glass-card {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.view[data-view="history"] > .grid > .glass-card > .card-body {
+  min-height: 0;
+}
+.view[data-view="history"] > .grid > .glass-card > .card-body.card-body-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* v0.153：上游页内容容器也填满整页 —— 内容不撑满时卡下面会留一大片
+ * 空白（4 个上游卡 vs 100vh 视口）。flex 链跟历史页同款，⚠ :not([hidden])
+ * 必须保留（同 1463 行的特异性陷阱）。 */
+.view[data-view="upstreams"]:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.view[data-view="upstreams"] > .grid {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-columns: none;
+  align-items: stretch;
+}
+.view[data-view="upstreams"] > .grid > .glass-card {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.view[data-view="upstreams"] > .grid > .glass-card > .card-body {
+  min-height: 0;
+}
+.view[data-view="upstreams"] > .grid > .glass-card > .card-body.card-body-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* v0.113h：视图切换入场动效 —— hidden 移除（display:none → block）时 CSS
+ * animation 自动播放一次：淡入 + 轻微位移，与上游菜单动效同语言。切走瞬间
+ * 消失、切入淡入移动（克制，不拖沓）。transform 只在合成层，不触发 reflow。
+ * 同视图内的 tick 重渲染改的是 .view 内部容器，.view 本身 display 不变，
+ * 不会重播动画。
+ * v0.120a：方向化 —— body[data-view-dir] 由 setView 按菜单上下位置写入，
+ * 决定内容从哪个方向滑入（往下切从上方进 / 往上切从下方进）。时长 .2s→.28s
+ * 位移 8px→14px，缓出更明显但不拖沓。 */
+@keyframes view-enter {
+  from { opacity: 0; transform: translateY(var(--view-enter-y, -14px)); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.view:not([hidden]) {
+  animation: view-enter .28s var(--ease-out);
+  /* 默认：向下切 → 从上方滑入 */
+  --view-enter-y: -14px;
+}
+/* 向上切（目标页在菜单上方）→ 内容从下方滑入 */
+body[data-view-dir="up"] .view:not([hidden]) {
+  --view-enter-y: 14px;
+}
+
+.glass-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  box-shadow: var(--card-shadow);
+  /* v0.41：去掉 hover translateY，WebView2 上的 transform transition
+   * 也会触发合成层重算，静态设计就不该有任何动效。
+   * v0.102.2：用户要求恢复"鼠标移入上浮"。用 transform 上浮 + 阴影
+   * 增强，transition 只 0.18s 一次（仅 hover 态，非 tick 驱动），
+   * 不再有 v0.41 担心的合成层重算风暴。 */
+  position: relative;
+  overflow: hidden;
+  transition:
+    transform .18s var(--ease-out),
+    box-shadow .18s var(--ease-out),
+    border-color .18s var(--ease-out),
+    /* v0.139：主题切换时背景色一并插值（卡片最显眼）
+     * v0.140：与 --theme-trans 同步到 .7s。 */
+    background-color .7s var(--ease-out);
+}
+.glass-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--card-shadow-hover), 0 10px 24px rgba(0, 0, 0, 0.08);
+  /* v0.116：hover 上浮后要与右侧相邻卡（DOM 更靠后、默认叠在上层）
+   * 争叠放次序 —— 提升 z-index 让抬起的那张卡盖住邻居，而不是被盖到下面。 */
+  z-index: 5;
+}
+
+/* v0.60：总览页 6 张卡可拖拽重排 —— mobile-app 风格。整张卡可拖，
+ * 不是只有标题。光标用 grab/grabbing 提示。拖起的卡半透明 + 浮起一
+ * 点阴影；drop target 卡有 dashed outline 提示。 */
+.view[data-view="overview"] .grid .glass-card {
+  cursor: grab;
+  /* v0.113i：拖入吸附动效时长（原继承 .glass-card 的 .18s）→ 0.02s，更跟手。
+     作用域仅总览卡片，其它视图 hover 上浮节奏不变。 */
+  transition:
+    transform 0.02s var(--ease-out),
+    box-shadow 0.02s var(--ease-out),
+    border-color 0.02s var(--ease-out);
+}
+.view[data-view="overview"] .grid .glass-card:active {
+  cursor: grabbing;
+}
+.view[data-view="overview"] .grid .glass-card.dragging {
+  opacity: 0.35;
+  cursor: grabbing;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+.view[data-view="overview"] .grid .glass-card.drop-target {
+  outline: 2px dashed var(--button-primary);
+  outline-offset: 4px;
+  border-radius: var(--radius-lg);
+}
+
+.glass-card::before {
+  /* Subtle inner highlight — the Apple "soft source from above" cue. */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--text-primary) 6%, transparent) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+.card-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.card-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: var(--spacing-sm);
+  letter-spacing: -0.01em;
+}
+
+.card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+/* Chart canvas fills the card body, capped at a sensible height so it
+ * stays readable on small windows and doesn't push everything below the
+ * fold. The chart.js instance sets its own internal pixel size from
+ * the parent's clientWidth.
+ *
+ * v0.59：从 240px 收到 160px —— chart 现在跟"上游状态"并排（不是
+ * 全宽），240px 显得纵向太胖。160px + 标题 + padding ≈ 220px 整卡
+ * 高度，跟旁边的小卡片视觉权重接近。 */
+.card-body-chart {
+  position: relative;
+  height: 160px;
+  padding: var(--spacing-xs) 0;
+}
+.card-body-chart canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* -------------------------------------------------------------------------
+ * Card body rows
+ * ------------------------------------------------------------------------- */
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.stat-label { color: var(--text-secondary); }
+.stat-value { font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.stat-error { color: var(--text-error); }
+
+.upstream-row {
+  /* v0.12.5：两行布局（flex-wrap，比 grid 更稳）：名字独占一行、
+   * 统计窗口 + 释放时间第二行。之前 name 被硬限 54px、15 个上游全
+   * 挤在一条 ~25px 的线里，每行"又窄又扁"，统计数字被压没。两行后
+   * name 整行可读、行高 ~2 倍，只显示 4–5 行、其余滚动。 */
+  /* v0.12.6：flex:none —— 根因修复。#card-upstream-body 是 flex column
+   * 且 max-height:280px，.upstream-row 作为 flex item 默认 flex-shrink:1，
+   * 15 行自然高度远超 280px 时被整体压缩到每行 ~17px（第二行统计被压没、
+   * 名字截断、行"又窄又扁"）。flex:none 禁止压缩，行保持自然高度，超出
+   * 部分交给 body 的 overflow-y:auto 滚动。这才是"显示 4–5 行可滚动"。 */
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--spacing-sm);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--hairline);
+  /* v0.45：position:relative + overflow:hidden 给 ::after 波纹层撑
+   * 出一个相对定位的容器，不让波纹溢出到 row 外面。 */
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+}
+
+.upstream-row:last-child { border-bottom: none; }
+
+/* v0.11.3: 上游行可拖拽排序。grab/grabbing 提示 + 拖起时半透明，
+ * drop target 行加左侧竖条提示落点。 */
+.upstream-row { cursor: grab; }
+.upstream-row:active { cursor: grabbing; }
+.upstream-row.dragging { opacity: 0.45; }
+.upstream-row.drop-target {
+  outline: 1px dashed var(--button-primary);
+  outline-offset: -1px;
+  border-radius: var(--radius-sm);
+}
+
+/* v0.45：当前激活的上游 — 整行浅底色 + 名字后面跟一个小圆点。
+ * 用 color-mix 把 button-primary 跟 card-bg 调成 12% 浓度：light
+ * 主题下是淡橙底、day 主题下是淡琥珀底、dark 主题下是淡亮底，亮
+ * 度都比 card-bg 高一档，整行能直接看出来是激活的。active 信息
+ * 从 status.active_per_platform.anthropic 读，openai 不进高亮。 */
+.upstream-row-active {
+  background: color-mix(in srgb, var(--button-primary) 12%, var(--card-bg));
+}
+
+.upstream-active-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--button-primary);
+  vertical-align: middle;
+}
+
+/* v0.53：完全照抄侧栏 .nav-item "实时" 的两段式 CSS。
+ *
+ * base 段：所有 .upstream-row 都挂一个 ::after，里面是 25/50/75
+ * 渐变 + 200% 背景 + 起始 background-position:-100% 0 + opacity 0
+ * —— 平时隐形，结构准备好。
+ *
+ * active 段：.upstream-row-bumped::after 只负责把 opacity 切到 1
+ * 并跑 live-ripple one-shot（2s linear，不 infinite，JS 在 2s 后
+ * 摘掉类让下次增长再触发）。参数与 .nav-item "实时".has-stream
+ * 完全一致 —— 同 keyframes / 同时长 / 同缓动 / 同起点 / 同 plateau。
+ *
+ * 上一版（v0.48）把 content/position/gradient 全塞进 active 类，
+ * 每次 .upstream-row 被 innerHTML 重建时 ::after 会重新挂上，CSS
+ * 动画从头跑但只有半程 —— 视觉上就是"中间起、左边终、被截断"。
+ * 这次照 live 拆成 base + active，结构跟 nav-item 完全对称。 */
+.upstream-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  /* v0.11.17：渐变由高级闪烁编辑器驱动 —— 颜色 = --flash-color-bump，
+   * 粗细 = --flash-blur。
+   * v0.96：峰固定在背景图中心 50%（背景总宽 200%，可见窗口 = 50%），
+   * 半宽 = --flash-width/4（默认 88% → 半宽 22%）。原版把峰放在背景
+   * 88% 处，200% 宽的图 + -100%→100% 滑动时峰几乎不进入窗口，窗口只
+   * 显示左翼渐深段 —— 就是"左浅右深"怪相。现在对称波（浅-深-浅）完整
+   * 滑过窗口，两个块拼接的效果才出来。 */
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--flash-color-bump) 46%, transparent) calc(50% - var(--flash-width, 88%) / 4),
+    color-mix(in srgb, var(--flash-color-bump) 88%, transparent) calc(50% - var(--flash-width, 88%) / 8),
+    var(--flash-color-bump) 50%,
+    color-mix(in srgb, var(--flash-color-bump) 88%, transparent) calc(50% + var(--flash-width, 88%) / 8),
+    color-mix(in srgb, var(--flash-color-bump) 46%, transparent) calc(50% + var(--flash-width, 88%) / 4),
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-position: -100% 0;
+  opacity: 0;
+  filter: blur(var(--flash-blur, 3px));
+  transition: opacity 0.35s var(--ease-out);
+}
+
+.upstream-row-bumped::after {
+  opacity: 1;
+  /* v0.102.2：直接复制左侧"实时"导航动画 —— 同 keyframes / 同时长 /
+     同缓动 / infinite 无缝循环。背景 200% 宽下 100% 与 -100% 位置视觉
+     相同，循环无跳变；终点 17% plateau 让波纹扫到右缘后稍作停留再回，
+     不再像旧版 one-shot 那样"滑出 220% 后直接消失"被生硬截断。 */
+  animation: live-ripple 1.8s cubic-bezier(0.615, -0.0031250000000000444, 0.325, 0.986875) infinite;
+}
+/* v0.101：bump 波纹滑出左缘。live-ripple 终点停在 background-position:100%
+ * （峰顶在容器左缘、深→淡尾巴横贯容器），动画结束后 JS 摘类 → 尾巴"直接
+ * 消失"。改为专属 keyframes，终点推到 220%：峰继续滑出左缘、尾巴整体移出
+ * 容器（220% 而非 200% 给 --flash-blur 留余量，保证彻底干净出窗）。侧栏
+ * "实时"导航仍用原 live-ripple（1.8s infinite，plateau 是其停留感），不
+ * 动共享 keyframes。 */
+@keyframes upstream-ripple-out {
+  0% {
+    background-position: -100% 0;
+    animation-timing-function: cubic-bezier(0.615, -0.0031250000000000444, 0.325, 0.986875);
+  }
+  83% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 220% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upstream-row-bumped::after {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* v0.53：count 减少时的反向波纹。
+ *
+ * 跟 bumped 同一思路 —— 复用 .upstream-row::after 的 base 结构
+ * （content / position / 尺寸 / 初始 opacity 0），active 段
+ * .upstream-row-decreased::after 只覆盖 gradient / 起点 / 透明度
+ * / 动画，颜色用 --text-success（绿），起 background-position:100%
+ * 0 让 sweep 从右向左。
+ *
+ * 触发场景：5h / week / month 任一窗口计数下降 —— 最典型的是 5h
+ * 计数到期释放（窗口滚动 +1，count 减 1）。语义是"释放 / 归还"。
+ *
+ * 与 bumped 互斥：JS 保证一个 row 同一时刻只挂其中一个类，cascade
+ * 上 decreased 定义在后、覆盖 bumped，但同一刻只会有一个 active
+ * 类挂上去。
+ *
+ * 用独立的 reverse-live-ripple keyframes 而不是 animation-direction:
+ * reverse，让 cubic-bezier 缓动落在 sweep 的起点（右侧），跟 bumped
+ * 在左侧启动的视觉锚点对称。 */
+.upstream-row-decreased::after {
+  /* v0.57：之前用 background: 简写会重置 background-size 到 auto
+   * auto，把 base 的 200% 100% 抹掉 —— 后果是 gradient 跟容器一样
+   * 大，彩条永远停在容器正中间，background-position 从 100% 走到
+   * -100% 完全不动。改 background-image: 保留 base 的 background-size。
+   * 红色 bumped 没碰 background 所以一直没事。
+   * 顺便注释里 "sweep 的起点（右侧）"是错的：decrease 起点是 100%
+   * 即 LEFT edge，跟 bumped (-100% / right edge) 镜像。 */
+  /* v0.96：与 base 同步改中心峰 —— decrease 波同样 浅-深-浅，峰在背景
+     中心 50%，半宽 = --flash-width/4（保持 background-image 属性名，
+     background 简写会重置 background-size 到 auto，v0.57 踩过）。 */
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--flash-color-decrease) 46%, transparent) calc(50% - var(--flash-width, 88%) / 4),
+    color-mix(in srgb, var(--flash-color-decrease) 88%, transparent) calc(50% - var(--flash-width, 88%) / 8),
+    var(--flash-color-decrease) 50%,
+    color-mix(in srgb, var(--flash-color-decrease) 88%, transparent) calc(50% + var(--flash-width, 88%) / 8),
+    color-mix(in srgb, var(--flash-color-decrease) 46%, transparent) calc(50% + var(--flash-width, 88%) / 4),
+    transparent 100%
+  );
+  background-position: 100% 0;
+  opacity: 1;
+  /* v0.102.2：直接复制左侧"实时"导航动画 —— live-ripple + reverse 方向。
+     正向 live-ripple 从 -100% 走到 100%（从左往右，bump）；reverse 从
+     100% 走到 -100%（从右往左，释放），与"释放/归还"语义一致。对 200%
+     宽背景，100% 与 -100% 视觉同位置，infinite 循环无缝无跳变。起点
+     100% 与 base 的初始 background-position 一致，动画起步不闪。 */
+  animation: live-ripple 1.8s cubic-bezier(0.615, -0.0031250000000000444, 0.325, 0.986875) infinite reverse;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upstream-row-decreased::after {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+@keyframes reverse-live-ripple {
+  /* v0.96.2：释放波纹起点从 100% 改到 200% —— 原 100% 时窗口正好显示
+   * 背景图右半 [50%,100%]，峰（背景图 50%）开局就顶在窗口左缘且静止
+   * 25%，没有「滑入」过渡，看起来峰位置不对。200% 时窗口显示背景图
+   * [200%,300%] 之外 = 空，波完全在窗口右侧外。动画从空开始，峰从窗口
+   * 左缘滑入 → 中心（对称）→ 右缘 → 出窗，跟 bump 镜像但方向相反。 */
+  0% {
+    background-position: 200% 0;
+  }
+  25% {
+    background-position: 200% 0;
+    /* 缓动落在 sweep 起点 (右侧)，跟 live-ripple 在左侧的对称。 */
+    animation-timing-function: var(--flash-ease, cubic-bezier(0.615, -0.0031250000000000444, 0.325, 0.986875));
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.upstream-name {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+/* v0.82：按次数计费上游名称旁的数字 —— 名称可截断（ellipsis），
+ * 数字不收缩（flex:none），名称过长时优先保住数字。 */
+.upstream-name-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upstream-name-tokens {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.upstream-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* v0.22 horizontal compact: name + 3 windows + release countdown all
+ * share one row (~28px). The 3 windows flex to fill whatever space
+ * remains after the name and release pill claim their fixed width.
+ * Per-window label/value still stack vertically (10px label / 12px
+ * value) so the visual hierarchy matches the other overview cards. */
+.upstream-windows {
+  flex: 1;
+  display: flex;
+  gap: var(--spacing-xs);
+  margin-top: 0;
+  min-width: 0;
+}
+.upstream-window {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.upstream-window-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.upstream-window-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.upstream-release {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+.upstream-release-near { color: var(--text-error); font-weight: 600; }
+
+/* Long scrollable lists used by the 实时 / 历史 / 上游 / 设置 views.
+ * The .card-body-list gives the body a sensible max height with a
+ * subtle inner scrollbar so the page itself doesn't grow unbounded. */
+.card-body-list {
+  /* v0.153：去掉 max-height: 70vh —— 旧版 cap 会在历史 / 上游页内容不
+   * 够长时把 body 钉到 70vh，剩下 30vh 留空（看起来就是卡片下面一大片
+   * 空白）。现在让 .card-body 跟内容走：在 .view[data-view="history"]
+   * 这种 flex 链里靠 flex:1 1 auto 撑满 .main 剩余高度（详见 1489
+   * 行专门规则）；在非 flex 链里（如上游页）内容多高 body 就多高，
+   * 整个 .main 滚动。overflow-y: auto 仍保留 —— 万一上游数量特别多
+   * body 撑爆 flex 容器，外面 .main 会接管滚动条。 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--spacing-xs);
+}
+.card-body-list::-webkit-scrollbar { width: 6px; }
+.card-body-list::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 3px; }
+
+/* v0.11.3: 上游状态卡 —— 不把全部 API 摊开，给一个固定高度 + 内部
+ * 滚动，但滚动条隐藏（跟 .main 一样的处理），内容超长时滚轮/触屏
+ * 仍可滚动。
+ * v0.12.4: 上游数到 15 个后"藏滚动条"反而让用户以为没滚动 ——
+ * 改为显示细滚动条（跟 .card-body-list 同款），一眼看出可滚动、
+ * 也能拖。
+ * v0.12.5: `.card-body` 带了 `flex:1`（basis 0 + grow），在
+ * `.grid { align-items: start }` 的内容高度卡片里会把上游行
+ * 全摊开、max-height 失效、卡片被撑高 —— 表现就是"所有标签挤在
+ * 一起、每行被压窄"。这里用 `flex: none` 关掉 flex 拉伸，回到
+ * 固定高度 + 内部滚动；行改两行布局后只显示约 4–5 行，其余滚动。 */
+#card-upstream-body {
+  flex: none;
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline) transparent;
+}
+#card-upstream-body::-webkit-scrollbar { width: 8px; }
+#card-upstream-body::-webkit-scrollbar-track { background: transparent; }
+#card-upstream-body::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 4px;
+}
+/* v0.113f：全局滚动条兜底 —— 统一所有滚动容器为 6px 细条 + hairline
+ * 圆角 thumb，与玻璃 UI 同风格。侧栏 / 自绘上游菜单 / modal 内容区等
+ * 没有专门样式的容器不再露系统默认宽条。刻意隐藏的 .main、以及上面
+ * 已定制的 .card-body-list / #card-upstream-body / live_panel 等局部
+ * 规则 specificity 更高，行为不变（隐藏的仍隐藏、8px 的仍 8px）。 */
+* { scrollbar-width: thin; scrollbar-color: var(--hairline) transparent; }
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 3px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--text-muted, var(--text-secondary)); }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+#card-upstream-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary, var(--text-secondary));
+}
+
+/* v0.77：设置页的列表卡允许滚轮链式滚动 —— 列表滚到底后继续滚页面
+ * (.main)。设置页三张卡纵向堆叠，列表底常落在窗口下缘之外；之前
+ * overscroll-behavior:contain 把滚轮钉死在列表内部，页面永远滚不
+ * 动，展开条目的下半截够不着。live / history / upstreams 保持
+ * contain（列表内滚动时页面不动，行为不变）。 */
+#card-settings-config-body,
+#card-settings-quickswitch-body { overscroll-behavior: auto; }
+
+/* Live request row — phase pill + timing + (truncated) user / assistant
+ * preview. The phase pill is colored to match the request lifecycle
+ * (uploading → calling → streaming → done). */
+.live-row {
+  display: grid;
+  grid-template-columns: 88px 1fr auto;
+  gap: var(--spacing-md);
+  align-items: start;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.live-row:last-child { border-bottom: none; }
+.live-phase {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-weight: 600;
+  text-align: center;
+}
+.live-phase-uploading  { background: rgba(217, 119, 6, .15); color: var(--platform-anthropic); }
+.live-phase-calling    { background: rgba(59, 130, 246, .15); color: #3b82f6; }
+.live-phase-streaming  { background: rgba(16, 163, 127, .15); color: var(--platform-openai); }
+.live-phase-done       { background: rgba(0, 0, 0, .06);      color: var(--text-secondary); }
+/* v0.102.2：STREAMING 光条改成跑马灯 —— 一道半透明白色光带在绿色徽章
+ * 内连续从左往右循环扫过，表示字节正在回流。用 ::after + background-
+ * position 动画（不触发布局、无重排），跑马灯速度 1.6s 一圈。 */
+.live-phase-streaming {
+  position: relative;
+  overflow: hidden;
+  display: inline-block;
+}
+.live-phase-streaming::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.0) 20%,
+    rgba(255, 255, 255, 0.75) 50%,
+    rgba(255, 255, 255, 0.0) 80%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-position: -200% 0;
+  animation: live-marquee 1.6s linear infinite;
+}
+@keyframes live-marquee {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-phase-streaming::after {
+    animation: none;
+    opacity: 0.4;
+  }
+  .live-progress-fill::after {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+.live-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.live-meta-model { color: var(--text-primary); font-weight: 600; }
+.live-preview {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 4px;
+}
+.live-age {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.live-progress {
+  width: 100%;
+  height: 3px;
+  background: var(--hairline);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 4px 0;
+}
+/* v0.104：光条跑马灯 —— fill 自身不再使用静态渐变，改成"半透明白色
+ * 光带在彩色底层上从左往右循环扫过"的跑马灯效果。底层色取平台色
+ * （openai 蓝），光带是半透明白（rgba(255,255,255,.75)）走 live-marquee
+ * keyframes。width 仍由 JS 写入以保留进度信息（bytes_received /
+ * content_length），跑马灯仅作为视觉动效叠加。 */
+.live-progress-fill {
+  height: 100%;
+  position: relative;
+  background: linear-gradient(90deg, var(--platform-openai), var(--platform-anthropic));
+  transition: width .25s ease;
+  overflow: hidden;
+}
+.live-progress-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.0) 25%,
+    rgba(255, 255, 255, 0.75) 50%,
+    rgba(255, 255, 255, 0.0) 75%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-position: 200% 0;
+  animation: live-marquee 1.6s linear infinite;
+}
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* History view — table-like rows with consistent column widths. */
+.history-row {
+  display: grid;
+  grid-template-columns: 80px 80px 1fr 70px 70px 1fr 60px;
+  gap: var(--spacing-md);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 12px;
+  align-items: center;
+}
+.history-row:last-child { border-bottom: none; }
+.history-row-head {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 6px;
+}
+.history-time { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.history-platform .platform-badge { font-size: 10px; padding: 1px 6px; }
+.history-tokens { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.history-error { color: var(--text-error); }
+.history-upstream {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-row .recent-model { font-weight: 500; }
+
+/* v0.99 统计页 —— 表格行 / 工具条 / 配额条 / 进度条 */
+.stats-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+  margin: 0 0 12px 0;
+  padding: 0 0 12px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.stats-toolbar-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-muted);
+}
+/* v0.113t：胶囊容器 —— inline-flex + nowrap 保证「label + 三按钮」一
+   组始终排开、不允许按钮之间换行；超出父容器宽度由 toolbar 整体 wrap。 */
+.stats-toolbar-range,
+.stats-dim-group,
+.stats-mode-group {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  background: var(--hairline);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 0;
+}
+.stats-range-btn,
+.stats-dim-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  cursor: pointer;
+  white-space: nowrap; /* v0.113t：按钮文字「Passthrough only / 近 30 天」必须单行 */
+  transition: background .12s, color .12s;
+}
+.stats-range-btn:hover,
+.stats-dim-btn:hover {
+  color: var(--text-primary);
+}
+.stats-range-btn.active,
+.stats-dim-btn.active {
+  background: var(--glass-card-bg, var(--card-bg, #fff));
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+.stats-toolbar-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+  white-space: nowrap; /* v0.113t：hint 也单行 */
+}
+
+/* v0.102.2：统计页模式按钮动效 —— 与 range/dim 同款胶囊过渡，active
+   用主色填充 + 轻微上浮，切换更跟手。按钮本身是 .btn.btn-ghost，这里
+   覆盖背景/边框为透明（同 range/dim 风格），避免和顶部工具栏的
+   .btn-active 深色填充混为一谈。 */
+.stats-mode-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  cursor: pointer;
+  white-space: nowrap; /* v0.113t：按钮文字「Passthrough only」必须单行 */
+  transition:
+    background-color .18s var(--ease-out),
+    color .18s var(--ease-out),
+    transform .15s var(--ease-out),
+    box-shadow .18s var(--ease-out);
+}
+.stats-mode-btn:hover {
+  color: var(--text-primary);
+}
+.stats-mode-btn.active {
+  background: var(--button-primary);
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.15);
+  transform: translateY(-1px);
+}
+.stats-mode-btn:active {
+  transform: translateY(0) scale(0.96);
+}
+
+/* 统计页图表切换淡入 —— 换模式/时间段/维度时 treemap + pie 一起淡入，
+   不再"清空→重画"生硬跳变。复用总览的 cardFadeIn keyframes。 */
+.stats-chart-fade {
+  animation: cardFadeIn 0.25s ease;
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: 1.4fr 70px 80px 80px 80px 80px 90px 60px;
+  gap: var(--spacing-md, 12px);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 12px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+.stats-row:last-child { border-bottom: none; }
+.stats-row .stats-key {
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stats-row .num {
+  text-align: right;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.stats-row-head {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 6px;
+}
+.stats-row-head .stats-key { color: var(--text-muted); font-weight: 500; }
+.stats-row-total {
+  background: var(--hairline-soft, rgba(0,0,0,0.04));
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-weight: 600;
+  border-bottom: none;
+  margin: 4px 0;
+}
+.stats-row-total .stats-key { color: var(--text-primary); font-weight: 600; }
+.stats-row-empty { opacity: 0.45; font-style: italic; }
+.stats-row .stats-err { color: var(--text-error); }
+
+/* v0.100.1：8 张 D3 图卡片的网格 + SVG 容器。layout 借用 .grid
+ * （重复列），新加 .stats-grid 只覆盖 grid-template-columns 让 SVG
+ * 容器有合理高度；卡片其它样式继承 .glass-card。SVG 在 .stats-chart-host
+ * 里挂载，由 d3Stats 命名空间统一管理 create / destroy。 */
+.stats-grid {
+  grid-template-columns: repeat(4, 1fr);
+  /* 桌面 4 列 / 平板 2 列 / 手机 1 列（继承 .grid 的响应式回退） */
+}
+/* v0.113i：饼图列 1/4 → 2/4。单列在 zoom 补偿下被压到 ~137px 视觉宽，
+   饼图半径被钳到 ~60px（用户反馈"饼图本体被缩小很多"）。span 2 后
+   zoom=1.5 视觉半径 ~126px、随缩放放大（zoom=1 ≈93px）。treemap 整行不变。 */
+.stats-grid .glass-card[data-card="stats-pie"] {
+  grid-column: span 2;
+}
+/* v0.155：30天按平台流量块 —— 与 pie 同宽（span 2），补满 model-daily
+   右侧空位，构成 2×2 网格。 */
+.stats-grid .glass-card[data-card="stats-agent"] {
+  grid-column: span 2;
+}
+
+/* v0.xxx：平台流量 —— 列表 / 竖状图 并行（卡标题「图 / 列表」切换）。
+   竖状图模式 body 固定高度；列表模式自然高度。 */
+.agent-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.agent-view-btn {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.agent-view-btn + .agent-view-btn {
+  border-left: none;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.agent-view-btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.agent-view-btn.active {
+  background: var(--button-primary, var(--accent));
+  color: #fff;
+  border-color: transparent;
+}
+/* 竖状图：body 固定高。 */
+#card-agent-body {
+  position: relative;
+  height: 200px;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* 列表：恢复自然高度（.card-body 默认样式），不走 flex 居中。 */
+.glass-card.agent-view-list #card-agent-body {
+  height: auto;
+  padding: 0;
+  overflow: visible;
+  display: block;
+  align-items: initial;
+  justify-content: initial;
+}
+#card-agent-body svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+#card-agent-body line.ag-grid {
+  stroke: var(--hairline);
+  stroke-width: 1;
+}
+#card-agent-body text.ag-val {
+  fill: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+#card-agent-body text.ag-label {
+  fill: var(--text-secondary);
+  font-size: 10px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+}
+.stats-chart-host {
+  position: relative;
+  min-height: 220px;
+  padding: 0;
+  overflow: hidden;
+  /* v0.113i：flex 让 svg（viewBox 等比，宽 100%、高 auto）在容器内垂直居中，
+     容器高于 svg（如高缩放窄列）时不贴顶留空。 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* v0.xxx：总览统计卡（统计页 4 张图打包成卡片嵌入总览 grid）。
+   .stats-chart-host 已有 min-height:220px；这里再给整卡 + chips 条
+   兜底最小高度，避免拖入/未加载时卡片塌陷成一行窄条。 */
+.view[data-view="overview"] .grid .glass-card[data-card^="stats-"] {
+  min-height: 260px;
+}
+.view[data-view="overview"] .grid .glass-card[data-card="stats-model-daily"] {
+  min-height: 300px;
+}
+/* .stats-chart-host 自带 min-height:220px，这里只确保总览里不被压缩。 */
+.view[data-view="overview"] .grid .glass-card[data-card^="stats-"] .card-body {
+  min-height: 220px;
+  flex: none;
+}
+.stats-chart-host svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* Sankey / stacked area 需要更宽，glass-card-wide 已在 v0.59 定义（span 2） */
+.stats-chart-host .card-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* -------------------------------------------------------------------------
+ * 总览卡片尺寸拖拽（v0.xxx）
+ * -------------------------------------------------------------------------
+ * 三件套（直接挂在 .glass-card 上、贴卡片视觉外边）：
+ *   * .card-edge-bottom —— 底部全宽命中条（8px 高），拖拽高度。
+ *   * .card-edge-right  —— 右侧全高命中条（8px 宽），拖拽列跨度。
+ *   * .card-edge-corner —— 右下角命中区（20px），同时拖高度 + 跨度。
+ * 命中区必须挂在 .glass-card 而不是 .card-body：卡有 padding，把命中
+ * 区放在 body 边缘会让用户以为点"卡片外边"可调尺寸但实际点的是
+ * card padding（命中区在 body 边缘，body 在 padding 里面），拖不出来。
+ * 改挂在卡片本身 → 命中区直接贴视觉外边 → 用户点哪儿都能命中。
+ * 光标：悬停命中区立即变 resize 形（ns / ew / nwse）；整卡其它区域
+ * 仍是 grab（拖卡片重排）。 */
+/* 总览布局：flex + wrap（不是 CSS Grid）。
+ *
+ * 为什么要换 flex：CSS Grid 的 `grid-column: span <integer>` 只接受整数，
+ * 小数 span 会被静默丢弃（Chromium / Firefox / WebView2 都是），所以
+ * 想做 20 档 fine-grained 列跨度（1.0–3.0 步长 0.1）就用不了 Grid 的 span。
+ * flex 容器里卡用 width: calc() 表达任何小数都能落地：width =
+ * (--ov-span / 3) * (100% - 32px)，32px 是 3 列间的总 gap（2 × 16px）。
+ *
+ * flex-wrap + flex: 0 0 auto 让宽卡自然换行，跟原来 Grid 的自动换行行为
+ * 一致；align-items: flex-start 保持 align-items: start 的"行高参差不齐"
+ * 视觉（卡按自身高度取，不被行内最高的兄弟拉高）。
+ *
+ * 注意：.grid 是公共类，history / upstreams / opencode 视图也用它（它们
+ * 自己有 `grid-template-columns: none` + display: flex 的覆盖规则）。
+ * 这里只覆盖 overview 这一条 selector，不影响其他视图。*/
+.view[data-view="overview"] > .grid {
+  display: flex;
+  flex-wrap: wrap;
+  /* v0.187.3：给 grid 建立定位上下文。JS 全链路都把自由模式卡的
+   * left/top 当「相对 .grid 的偏移」（seed: r.left-gr.left；拖动:
+   * startLeft+dx；存槽: grid-relative），但这里从没设 position，卡
+   * position:absolute 后 offsetParent 落到 body，left/top 被解释成
+   * 相对 body，导致所有自由卡系统性右下偏移一个 (sidebar 宽, topbar 高)
+   * 常量 —— 卡落在 grid 左边 = 侧栏区域，视觉「蔓延到侧栏」。加
+   * position:relative 让 offsetParent=.grid，与 JS 坐标语义对齐。
+   * clampFreePos 用的 clientWidth 也正好以 .grid 为基准。 */
+  position: relative;
+  /* gap: 16px + !important —— 不写 !important 会被某条更深特异性规则
+   * 压成 6px（CDP 实测发现），原因排查中；!important 兜底更稳。
+   * gap 数值 16px 等于 --spacing-lg，硬编码避免 var() 在某些 WebView2
+   * 环境下解析的不确定性。 */
+  gap: 16px !important;
+  align-items: flex-start;
+}
+.view[data-view="overview"] > .grid > .glass-card {
+  /* flex-basis 0 + grow/shrink 0 → 卡 width 完全由 width 决定，不被 flex
+   * 自动收缩撑变形。max-width:none 覆盖 .glass-card-wide 那条
+   * `grid-column: 1 / -1; min-height:280px` 的间接影响。
+   *
+   * width 公式：(span / 3) * (100% - 32px)，32px = 2 × 16px gap（行内
+   * 3 卡之间共有 2 个 gap，卡宽度按"占满 span 比例的容器宽"扣掉 gap
+   * 总和）。这个公式只在总览布局（flex + gap 16px）下成立；其他视图的
+   * .grid 仍是 CSS Grid 走自己的 grid-column span，跟这里互不干扰。*/
+  flex: 0 0 auto;
+  width: calc(var(--ov-span, 1) / 3 * (100% - 32px)) !important;
+  max-width: none !important;
+  min-width: 0;
+}
+/* 命中区 absolute 的定位参考：用 .glass-card 自身（已是 position:relative）。
+   **必须在卡片视觉内部**：.glass-card 设了 overflow:hidden + border-radius，
+   把命中区伸到卡外（bottom:-4px / right:-4px）会被裁掉，用户"贴着卡
+   边缘"实际点到的是圆角外的透明 padding 或卡外，命中区根本不存在 →
+   cardResizePointerDown 早返回 → 走 grid 的 HTML5 dragstart → 看起来
+   "按下又跳回普通样式"。
+   现在命中区 100% 在卡内（bottom:0 / right:0），配合 border-radius
+   让命中区跟随卡片圆角裁掉两角（视觉无感），但其余位置全部可命中。
+   8px 厚条 + 20×20 corner 已经够大。
+   **完全透明、不显指示色**：光标 ns/ew/nwse-resize 已经暗示可拖，加
+   变色条反而喧闹（用户反馈）。*/
+/* 底部命中条：贴卡片视觉下沿、高 8px，完全在卡内。悬停不显色——
+   之前的 `linear-gradient` 橙条 + `opacity: .35` hover 提示用户反馈太
+   喧闹（每张卡边缘一亮就变色），改成完全透明命中区，只靠光标
+   ns/ew/nwse-resize 暗示可拖。功能等价，视觉更安静。 */
+.view[data-view="overview"] .grid .glass-card > .card-edge-bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 3;
+  opacity: 0;
+}
+/* 右侧命中条：贴卡片视觉右沿、宽 8px、完全在卡内。同上不显色。 */
+.view[data-view="overview"] .grid .glass-card > .card-edge-right {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  z-index: 3;
+  opacity: 0;
+}
+/* 右下角命中区：20px 见方，光标 nwse。同上不显色。 */
+.view[data-view="overview"] .grid .glass-card > .card-edge-corner {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  z-index: 4;
+  opacity: 0;
+}
+/* 详情面板：点击卡体（非交互区）弹出，右上角对齐当前卡。 */
+#card-resize-panel {
+  position: fixed;
+  z-index: 60;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .18);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+#card-resize-panel[hidden] {
+  display: none;
+}
+.card-resize-info {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.card-span-btn {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.card-span-btn.active {
+  background: var(--button-primary, var(--accent));
+  color: #fff;
+  border-color: transparent;
+}
+.card-resize-close {
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.card-resize-close:hover {
+  background: rgba(127, 127, 127, .15);
+}
+/* 拖拽期间：整卡禁过渡（否则 --ov-h 变化会跟过渡抢），光标保持一致。
+   body 上挂的 mode 类（card-resizing-h / -w / -both）决定具体哪种
+   resize 形；拖拽中鼠标可能滑到卡内任何位置，靠 body 上设 cursor +
+   !important 强制覆盖子元素的 grab / pointer。
+   **取消 hover translateY**：原来 .glass-card:hover 会 translateY(-3px)
+   把整个卡片（含命中区）上浮 3px，鼠标物理位置不变 → 命中区跟着卡走 →
+   鼠标脱离命中区 → cursor 跳回 grab/grabbing，用户报告"上下拖动时卡
+   片的上浮会导致鼠标脱离拖动识别范围又跳回普通样式"。拖拽期间禁掉
+   上浮就解决。 */
+body.card-resizing .view[data-view="overview"] .glass-card,
+body.card-resizing .view[data-view="overview"] .glass-card .card-body {
+  transition: none;
+  user-select: none;
+}
+body.card-resizing .view[data-view="overview"] .glass-card:hover {
+  transform: none !important;
+}
+body.card-resizing-h {
+  cursor: ns-resize;
+}
+body.card-resizing-w {
+  cursor: ew-resize;
+}
+body.card-resizing-both {
+  cursor: nwse-resize;
+}
+/* 拖拽中鼠标可能滑到卡内任何位置（包括卡 body、图表 SVG 等），要保证
+ * 光标保持一致：.glass-card 自己有 cursor:grab (0,3,0) 规则比 * (0,2,0)
+ * 更具体，单独 * 覆盖不到。
+ *
+ * **关键：不能写 cursor: inherit**——Chromium/WebView2 在
+ * `body.foo * { cursor: inherit !important }` 这种规则下会把 body 自身
+ * 的 cursor 也变成 inherit → 解析成 auto（因为 body 没有父级，inherit
+ * 退化）。实测 cursor(body)=auto 而不是预期的 ns-resize → 用户看到
+ * "按下后鼠标样式回归普通样式"。改成直接写具体 cursor 值 + !important，
+ * 三个 mode 类分别给 ns-resize / ew-resize / nwse-resize，覆盖 .glass-card
+ * 及其全部后代。 */
+body.card-resizing-h,
+body.card-resizing-h * {
+  cursor: ns-resize !important;
+}
+body.card-resizing-w,
+body.card-resizing-w * {
+  cursor: ew-resize !important;
+}
+body.card-resizing-both,
+body.card-resizing-both * {
+  cursor: nwse-resize !important;
+}
+/* 无持久化高度的卡：只保留默认 grid 行高（--ov-h 未设置时不强行给值，
+   否则所有卡都变成固定高度。默认只有拖过高度的卡才有 --ov-h）。
+   --ov-h 写在 .card-body 上（图表容器随高度缩放），整卡高度 = 标题 + body。
+   !important：压过 #card-agent-body {height:200px} 这类 ID 规则；
+   :not(.agent-view-list)：平台流量卡在列表模式下保持自然高度（不裁剪行）。 */
+.view[data-view="overview"] .grid .glass-card .card-body {
+  height: auto;
+}
+.view[data-view="overview"] .grid .glass-card:not(.agent-view-list) .card-body[style*="--ov-h"] {
+  height: var(--ov-h) !important;
+  flex: none;
+  /* min-height:0 —— 图表卡带 min-height:220px（.stats-chart-host 及
+     2422/2442 行的整卡规则），min-height 优先于 height，拖到 220 以下
+     会被静默夹住，表现成"往上拖没反应"。显式高度一旦生效就得解除下限。
+     applyCardSize() 也会写内联 minHeight:0，但那只在"已存过高度"的路径
+     上跑；首次拖拽还没落库，得靠这条 CSS 兜住。 */
+  min-height: 0 !important;
+}
+/* d3 文字颜色统一走现有 CSS 变量；tooltip 复用 .history-row 的字号。
+   字体用等宽优先 —— 模型名 / token 数字以 ASCII 为主，等宽比雅黑
+   清晰易认；中文（图例 "其他" 等）回退雅黑。 */
+.stats-chart-host text {
+  fill: var(--text-secondary);
+  font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.stats-chart-host text.title {
+  fill: var(--text-primary);
+  font-weight: 600;
+}
+.stats-chart-host rect.bar:hover,
+.stats-chart-host path.arc:hover {
+  filter: brightness(1.15);
+  cursor: pointer;
+}
+
+/* v0.153：单模型 30 天调用分布卡 —— 模型按钮条 / 下拉 / 图表网格线。
+   卡片是 glass-card-wide（全宽），条在卡内顶部、图在 .stats-chart-host。 */
+.stats-md-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px 0 12px;
+}
+.stats-md-bar-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.stats-md-bar-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.stats-md-chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.stats-md-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+.stats-md-chip.active {
+  background: var(--button-primary, var(--accent));
+  color: #fff;
+  border-color: transparent;
+}
+.stats-md-select {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--glass-card-bg, var(--card-bg, #fff));
+  color: var(--text-primary);
+  max-width: 180px;
+}
+.stats-chart-host line.md-grid {
+  stroke: var(--hairline);
+  stroke-width: 1;
+}
+/* v0.153：单模型 30 天图悬停 tooltip —— 浮动在柱上方，显示当日每模型
+   tokens + 合计。host 已设 position:relative，tip 绝对定位到 host 内。
+   不跟主题走 —— 始终深色半透明底 + 白字，保证三个主题下都清晰可读
+   （chart.js 24h tooltip 的同款做法：白色字 + 深色底，不依赖主题变量）。 */
+.stats-chart-host .md-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: rgba(20,20,22,.94);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  box-shadow: 0 6px 18px rgba(0,0,0,.28);
+  white-space: nowrap;
+  min-width: 140px;
+}
+.stats-chart-host .md-tip-date {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #fff;
+}
+.stats-chart-host .md-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 1px 0;
+}
+.stats-chart-host .md-tip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.stats-chart-host .md-tip-name {
+  flex: 1 1 auto;
+  color: rgba(255,255,255,.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+.stats-chart-host .md-tip-val {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.stats-chart-host .md-tip-total {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255,255,255,.18);
+  font-weight: 600;
+  color: #fff;
+}
+.stats-chart-host .md-tip-empty {
+  color: rgba(255,255,255,.65);
+  font-style: italic;
+}
+
+/* Cross-table bar (上游 × 模型 detail) */
+.stats-cross-bar {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.stats-cross-bar-bg {
+  position: relative;
+  height: 6px;
+  background: var(--hairline);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 60px;
+}
+.stats-cross-bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent, var(--platform-anthropic, #c2410c)), color-mix(in srgb, var(--accent, var(--platform-anthropic, #c2410c)) 60%, transparent));
+  border-radius: 3px;
+  transition: width .3s ease;
+}
+.stats-cross-bar-val {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 配额条 */
+.stats-quota-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stats-quota-row:last-child { border-bottom: none; }
+.stats-quota-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.stats-quota-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stats-quota-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.stats-quota-bar {
+  position: relative;
+  height: 8px;
+  background: var(--hairline);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.stats-quota-bar-fill {
+  height: 100%;
+  background: var(--accent, var(--platform-anthropic, #c2410c));
+  border-radius: 4px;
+  transition: width .3s ease;
+}
+.stats-quota-row[data-warn="warn"] .stats-quota-bar-fill {
+  background: linear-gradient(90deg, #eab308, #ca8a04);
+}
+.stats-quota-row[data-warn="critical"] .stats-quota-bar-fill,
+.stats-quota-row[data-warn="exhausted"] .stats-quota-bar-fill {
+  background: linear-gradient(90deg, #ef4444, #b91c1c);
+}
+.stats-quota-row[data-warn="no_quota"] .stats-quota-bar-fill {
+  background: var(--hairline);
+}
+.stats-quota-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Upstream-detail view — one row per upstream with full info. */
+.upstream-detail-row {
+  display: grid;
+  grid-template-columns: 1fr 100px 90px 100px 100px 100px;
+  gap: var(--spacing-md);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--hairline);
+  align-items: center;
+}
+.upstream-detail-row-card {
+  display: block;
+  position: relative;
+  padding: 12px;
+  margin: 8px 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--panel-alt);
+}
+.upstream-detail-row-card.upstream-detail-row-active {
+  border-color: var(--text-success);
+  background: rgba(16, 163, 127, .05);
+}
+.upstream-active-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-success);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.upstream-detail-url {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 4px 0;
+  word-break: break-all;
+}
+.upstream-detail-note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--hairline);
+}
+
+/* v0.90：上游页"自动切换"预览三件套
+ *   - .autoswitch-current  仅 active 上游行,灰色一句话"当前使用:xxx"
+ *   - .autoswitch-hint     利用率超阈值时,蓝色块"耗尽后切换到:yyy"
+ *   - .autoswitch-hint-warn 池内无可用目标时,暗黄色警告"池内无可切换目标"
+ *   - .autoswitch-toast    实际切换发生后,被切走的旧 active 行顶贴 3 秒
+ *                          淡出的绿色提示
+ * 颜色都用主题 token,light/day/dark 天然自适应。 */
+.autoswitch-current {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: var(--spacing-sm);
+}
+.autoswitch-current b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.autoswitch-hint {
+  font-size: 12px;
+  color: var(--quota-ok);
+  margin-top: 4px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--quota-ok) 8%, transparent);
+  border-radius: var(--radius-sm);
+  display: inline-block;
+}
+.autoswitch-hint b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+/* v0.90：hint 颜色跟随 quota-bar-fill —— 用同样的 --quota-* 变量，
+ * 主题切换时配色完全一致。data-level 由 Python 端 warning_level
+ * 提供，与 quota-bar-fill 同源。 */
+.autoswitch-hint[data-level="warn"] {
+  color: var(--quota-warn);
+  background: color-mix(in srgb, var(--quota-warn) 10%, transparent);
+}
+.autoswitch-hint[data-level="critical"] {
+  color: var(--quota-critical);
+  background: color-mix(in srgb, var(--quota-critical) 10%, transparent);
+}
+.autoswitch-hint[data-level="exhausted"] {
+  color: var(--quota-exhausted);
+  background: color-mix(in srgb, var(--quota-exhausted) 10%, transparent);
+}
+.autoswitch-hint-warn {
+  color: var(--quota-warn);
+  background: color-mix(in srgb, var(--quota-warn) 10%, transparent);
+}
+
+.autoswitch-toast {
+  font-size: 12px;
+  color: var(--text-success);
+  background: color-mix(in srgb, var(--text-success) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-success) 40%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  animation: autoswitch-toast-fadeout 3s var(--ease-out) forwards;
+}
+.autoswitch-toast b {
+  color: var(--text-success);
+  font-weight: 600;
+}
+
+@keyframes autoswitch-toast-fadeout {
+  0%, 70% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-4px); }
+}
+.upstream-detail-row:last-child { border-bottom: none; }
+.upstream-detail-row.head {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.upstream-detail-name { font-weight: 600; color: var(--text-primary); }
+.upstream-detail-name .active-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--text-success);
+  color: #fff;
+  letter-spacing: .04em;
+}
+.upstream-detail-meta { font-size: 11px; color: var(--text-muted); }
+.upstream-detail-count {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.upstream-detail-platform {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-secondary);
+}
+
+/* v0.64：上游详情卡右上角删除 ×。整条 upstream 配
+ * 置（含 API key）会跟着被删，所以放在右上角且 hover 时变
+ * 红色，给一个明显的破坏性操作提示。
+ * active 上游不允许删 —— Python 端会清 active 指针，但 GUI
+ * 这层先用 .upstream-detail-remove-disabled 占位，免得用户
+ * 点了之后看到奇怪的"切换 active"流程。 */
+.upstream-detail-remove {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+}
+.upstream-detail-remove:hover {
+  color: var(--quota-exhausted);
+  background: var(--glass-surface);
+}
+.upstream-detail-remove-disabled {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  opacity: 0.4;
+  font-size: 16px;
+  line-height: 1;
+  cursor: not-allowed;
+}
+
+/* v0.11.8: 设置页一体化 —— 不再用大块玻璃卡片容器（白框白块），
+ * 整页是一张连续的设置列表：节与节之间用 hairline 细线分隔，节标题
+ * 用小标题，像成熟 app 的设置页。 */
+.settings-view {
+  display: flex;
+  flex-direction: column;
+  /* v0.193：设置页整体放大 1.2×。非标准的 zoom 属性在 Chromium / WebView2
+   * 上等价于整页 layout 缩放（与 transform: scale 不同 —— zoom 参与
+   * 布局计算，父容器 .main 的 overflow-y:auto 会自然接管滚动，1.2×
+   * 后的内容不会撑爆窗口；只放大字会到处漏 padding/gap/控件大小，
+   * 用户要的是"所有元素整体调大"，zoom 一行解决。 仅作用于 .settings-view
+   * 根容器，不影响其它视图。 */
+  zoom: 1.2;
+}
+.settings-section {
+  padding: var(--spacing-lg) 0;
+}
+.settings-section + .settings-section {
+  border-top: 1.2px solid var(--hairline);
+}
+.settings-section-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin-bottom: var(--spacing-sm);
+}
+/* v0.102.2：设置页独立加粗标题（如"中继模式"行标签提到 section 之上）。 */
+.settings-heading-bold {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.settings-section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+}
+.settings-section-subtitle {
+  font-size: 14.4px;
+  color: var(--text-muted);
+  margin-bottom: var(--spacing-sm);
+}
+
+/* 一体化设置页里列表不设限高 —— 内容多时整页自然滚动（成熟设置页
+ * 的行为），而不是卡在 70vh 的小窗里滚。 */
+.view[data-view="settings"] .card-body-list {
+  max-height: none;
+  overflow: visible;
+}
+
+/* Settings view — two cards (relay status + upstream config). */
+.settings-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 7.2px 0;
+  font-size: 15.6px;
+  border-bottom: 1.2px solid var(--hairline);
+  gap: var(--spacing-md);
+}
+.settings-row:last-child { border-bottom: none; }
+/* v0.11.17：#15 中继状态更紧凑——纯状态展示，行高不必跟可编辑设置一样。 */
+.settings-rows-compact .settings-row { padding: 3.6px 0; font-size: 14.4px; justify-content: flex-start; gap: 9.6px; }
+.settings-row-label { color: var(--text-secondary); }
+.settings-row-value {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.settings-row-value code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 13.2px;
+  background: var(--panel-alt);
+  padding: 2.4px 7.2px;
+  border-radius: var(--radius-sm);
+}
+
+/* v0.11.7: "界面与行为" 设置卡改成成熟应用式设置列表 —— 每个设置
+ * 一个条目（左标题+说明，右控件），按小节分组（外观 / 启动 /
+ * 自动切换 / 动画）。开关用真正的 switch 滑块，不用裸 checkbox。 */
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+}
+.settings-group + .settings-group {
+  border-top: 1.2px solid var(--hairline);
+  padding-top: var(--spacing-xs);
+  margin-top: var(--spacing-xs);
+}
+.settings-group-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 4.8px 0 var(--spacing-xs);
+}
+
+.settings-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) 0;
+}
+/* #3：.settings-item 的 display:flex 会覆盖 UA 的 [hidden]{display:none}，
+ * 导致自动切换池 / 高级切换面板开关关闭后收不起来。显式声明兜底。 */
+.settings-item[hidden] { display: none; }
+.settings-item-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2.4px;
+}
+.settings-item-title {
+  font-size: 15.6px;
+  color: var(--text-primary);
+}
+.settings-item-hint {
+  font-size: 13.2px;
+  color: var(--text-muted);
+}
+.settings-item-control {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+/* v0.113n：存储管理区块 —— 操作按钮行 + 清理天数弹窗。
+     v0.113p：占用与位置合并成逐存储卡片（.storage-card），不再拆两组。 */
+.settings-storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  padding-top: var(--spacing-sm);
+}
+.seg-cleanup .seg-btn {
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.sc-clear-row {
+  margin-top: var(--spacing-md);
+}
+
+/* v0.113p：存储管理卡片 —— 每个存储一张卡，路径/占用/操作就地。 */
+.storage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--panel-alt);
+  padding: var(--spacing-sm) var(--spacing-md);
+}
+.storage-card + .storage-card {
+  margin-top: var(--spacing-xs);
+}
+.storage-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+.storage-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.storage-card-file {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--panel-bg);
+  padding: 1px 6px;
+}
+.storage-card-path {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  word-break: break-all;
+}
+.storage-card-stats {
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.storage-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  padding-top: 3px;
+}
+.storage-card-actions-footer {
+  justify-content: flex-end;
+  padding-top: var(--spacing-sm);
+}
+.storage-card-actions .btn-sm {
+  font-size: 11px;
+  padding: 3px 10px;
+}
+.storage-hint {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  padding: var(--spacing-sm) 2px 0;
+}
+
+/* v0.113o：报错分析设置区块 —— 模型下拉别撑满整行。 */
+#error-analysis-model {
+  max-width: 280px;
+}
+
+/* v0.113o：报错分析结果 toast —— 右上角堆叠，自动淡出 + × 关闭。
+   镜像 #dispatch-alerts 结构，按错误类别染色，hint 可换行。 */
+#error-hints {
+  position: fixed;
+  top: 48px;
+  right: 12px;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+}
+.error-hint {
+  position: relative;
+  padding: 10px 28px 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(220, 38, 38, 0.55);
+  background: var(--bg-elevated, rgba(30, 30, 30, 0.95));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  font-size: 11px;
+  line-height: 1.5;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.error-hint-leave {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.error-hint-balance,
+.error-hint-rate_limit { border-color: rgba(217, 119, 6, 0.6); }
+.error-hint-auth,
+.error-hint-server { border-color: rgba(220, 38, 38, 0.6); }
+.error-hint-network { border-color: rgba(59, 130, 246, 0.6); }
+.error-hint-config { border-color: rgba(168, 85, 247, 0.6); }
+.error-hint-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text-primary, inherit);
+}
+.error-hint-detail {
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+.error-hint-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 18px;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.error-hint-close:hover {
+  background: rgba(128, 128, 128, 0.2);
+  color: var(--text-primary, inherit);
+}
+
+/* v0.113k/l：滚轮选择器（自绘轮盘，替代原生 number input）。
+   v0.113l：折叠 = 单格（32px，只显示当前值），鼠标点击才弹出轮盘（76px）；
+   展开态三条值 + 中间高亮带，滚轮 / 点击上下半区 / 拖动切值。 */
+.wheel-picker {
+  position: relative;
+  width: 64px;
+  height: 32px;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-soft);
+  border: 1px solid var(--hairline);
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  font-variant-numeric: tabular-nums;
+  transition: height .15s var(--ease-out);
+}
+.wheel-picker.wp-open {
+  height: 76px;
+  cursor: ns-resize;
+}
+/* v0.113m：悬停展开 —— hover 时给一点"可交互"提示 */
+.wheel-picker:hover {
+  border-color: var(--glass-border);
+}
+/* 折叠态隐藏高亮带与上/下行，只留当前值一格 */
+.wheel-picker .wheel-picker-band,
+.wheel-picker .wheel-picker-row:not(.is-cur) {
+  display: none;
+}
+.wheel-picker.wp-open .wheel-picker-band,
+.wheel-picker.wp-open .wheel-picker-row:not(.is-cur) {
+  display: flex;
+}
+.wheel-picker-band {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 33.333%;
+  height: 33.334%;
+  border-radius: 6px;
+  background: var(--glass-surface-strong);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  pointer-events: none;
+}
+.wheel-picker-row {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.wheel-picker-row.is-cur {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.wheel-picker-unit {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* 自动切换 API 的允许池 —— 嵌套在父条目下方的整行（标签在左，
+ * chips 列表跟在控件区，随开关展开/收起）。 */
+.settings-item-nested {
+  flex-direction: column;
+  align-items: stretch;
+  padding-left: var(--spacing-md);
+  margin-left: var(--spacing-md);
+  border-left: 2.4px solid var(--hairline);
+}
+/* �߼��л���������� --- �ȿ�ʱ�Ǹ� settings-item-nested �� �������/�Ҳ�ǣ���Ƕ�塣 */.adv-switch-panel {
+  padding-left: 0 !important;
+  margin-left: 0 !important;
+  border-left: none !important;
+}
+
+/* #1: �߼��л����͵�ѡ��Ҫ��ɫ�׵� ---- ֻ�ñ߿� + ���֣�hover/ѡ�м�����ɫ */
+.adv-types-block .prefs-pool-chip {
+  background: transparent;
+  border-color: var(--hairline);
+}
+.adv-types-block .prefs-pool-chip:hover { background: color-mix(in srgb, var(--button-primary) 6%, transparent); }
+.adv-types-block .prefs-pool-chip:has(input:checked) {
+  border-color: var(--button-primary);
+  color: var(--button-primary);
+  background: color-mix(in srgb, var(--button-primary) 10%, transparent);
+}
+
+.adv-types-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--spacing-sm) 0;
+}
+.adv-types-block .prefs-pool-chips { margin-top: 2px; }
+
+.settings-item-nested .prefs-pool-chips {
+  margin-top: var(--spacing-xs);
+}
+
+/* switch —— iOS/macOS 风格滑块开关。原生 checkbox 视觉隐藏但仍可
+ * 用键盘聚焦（:focus-visible 描边提示）。 */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 28.8px;
+  flex: none;
+  cursor: pointer;
+  user-select: none;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.switch-track {
+  position: absolute;
+  inset: 0;
+  background: var(--panel-alt);
+  border: 1.2px solid var(--hairline);
+  border-radius: 1198.8px;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.switch-thumb {
+  position: absolute;
+  top: 2.4px;
+  left: 2.4px;
+  width: 21.6px;
+  height: 21.6px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1.2px 2.4px rgba(0, 0, 0, 0.2);
+  transition: transform 0.18s ease;
+}
+.switch input:checked + .switch-track {
+  background: var(--button-primary);
+  border-color: var(--button-primary);
+}
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(19.2px);
+}
+.switch input:focus-visible + .switch-track {
+  outline: 2.4px solid var(--button-primary);
+  outline-offset: 2.4px;
+}
+
+/* -------------------------------------------------------------------------
+ * Magnetic 磁吸动效 —— 按钮 / 开关悬浮时轻微吸附跟随鼠标，离开平滑回弹。
+ * --mag-x / --mag-y 由 app.js initMagnetic() 的 mousemove 委托写入；
+ * 用 @property 注册长度变量，保证变量变化时依赖它的 transform 触发
+ * transition（Chromium/WebView2 均支持）。不支持的旧内核会静默忽略
+ * 注册，磁吸仍跟随、只是瞬移。
+ * ------------------------------------------------------------------------- */
+@property --mag-x { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --mag-y { syntax: "<length>"; inherits: false; initial-value: 0px; }
+
+.magnetic {
+  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* 按钮：保留原有 hover 上浮与 active 缩放的触感，叠加磁吸偏移 */
+.btn.magnetic {
+  transition:
+    transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color .18s var(--ease-out),
+    border-color .18s var(--ease-out),
+    box-shadow .18s var(--ease-out);
+}
+.btn.magnetic:hover {
+  transform: translate(var(--mag-x, 0px), calc(var(--mag-y, 0px) - 1px));
+}
+.btn.magnetic:active {
+  transform: translate(var(--mag-x, 0px), var(--mag-y, 0px)) scale(0.98);
+}
+
+/* 开关：仅设置页使用，整体轻幅跟随（thumb 位移是子元素 transform，
+   互不干扰）。系数 0.5 —— 用户要求设置里的开关跟手更明显。 */
+.switch.magnetic {
+  --mag-strength: 0.5;
+  transform: translate(var(--mag-x, 0px), var(--mag-y, 0px));
+}
+
+/* 特殊样式按钮（wire / 快捷切换 / 消耗切换 / 卡片管理 FAB）：自身无
+   hover transform，磁吸直接接手位移。transition 补 transform 0.3s，
+   其余背景/颜色过渡保留。 */
+.wire-btn.magnetic,
+.quick-switch-btn.magnetic,
+.consume-switch-btn.magnetic,
+.cards-manage-fab.magnetic {
+  transition:
+    transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color .15s ease,
+    color .15s ease,
+    border-color .15s ease;
+}
+.wire-btn.magnetic:hover,
+.quick-switch-btn.magnetic:hover,
+.consume-switch-btn.magnetic:hover,
+.cards-manage-fab.magnetic:hover {
+  transform: translate(var(--mag-x, 0px), var(--mag-y, 0px));
+}
+
+/* 导航文字按钮（侧栏一级 .nav-item + 设置子菜单 .nav-sub-item）：自身无
+   hover transform，磁吸直接接手位移。transition 补 transform 0.3s，
+   其余背景/颜色过渡保留。active 指示伪元素(::before)随项整体移动，无冲突。 */
+.nav-item.magnetic,
+.nav-sub-item.magnetic {
+  transition:
+    transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color .18s var(--ease-out),
+    color .18s var(--ease-out);
+}
+.nav-item.magnetic:hover,
+.nav-sub-item.magnetic:hover {
+  transform: translate(var(--mag-x, 0px), var(--mag-y, 0px));
+}
+
+/* 界面偏好「池」选择标签（.prefs-pool-chip）：文字胶囊，无 hover transform。 */
+.prefs-pool-chip.magnetic {
+  transition:
+    transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color .15s ease,
+    color .15s ease,
+    border-color .15s ease;
+}
+.prefs-pool-chip.magnetic:hover {
+  transform: translate(var(--mag-x, 0px), var(--mag-y, 0px));
+}
+
+.prefs-pool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.prefs-pool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  background: var(--glass-surface-strong);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.prefs-pool-chip input { cursor: pointer; }
+.btn-xs { padding: 1px 8px; font-size: 11px; }
+.quota-result { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+body.hide-status-bar .topbar { display: none; }
+/* v0.104：实时栏管理里的 int input（最多显示的数量）。 */
+.prefs-live-panel-max-input {
+  background: var(--input-bg, transparent);
+  color: var(--text-primary);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm, 4px);
+  padding: 4px 6px;
+  font-size: 13px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.prefs-live-panel-max-input:focus {
+  outline: none;
+  border-color: var(--button-primary);
+}
+.settings-config-footer { padding: var(--spacing-sm) 0; display: flex; justify-content: flex-end; }
+.cfg-url-display {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--panel-alt);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+}
+.prefs-pool-chip:has(input:checked) {
+  border-color: var(--button-primary);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--button-primary) 10%, var(--card-bg));
+}
+
+/* v0.11.17：#2 高级闪烁功能编辑器 */
+.flash-advanced { display: none; flex-direction: column; gap: var(--spacing-sm); margin-top: var(--spacing-sm); }
+.flash-advanced.show { display: flex; }
+.flash-advanced-title {
+  font-size: 11px; font-weight: 700; color: var(--text-muted);
+  letter-spacing: .08em; text-transform: uppercase;
+}
+/* cubic-bezier 编辑器 */
+.cbz-wrap { display: flex; gap: var(--spacing-md); align-items: center; }
+.cbz-canvas {
+  width: 200px; height: 200px;
+  background: var(--panel-alt);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  cursor: crosshair;
+  touch-action: none;
+}
+.cbz-readout {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px; color: var(--text-secondary);
+  min-width: 150px;
+}
+.cbz-readout code { background: var(--panel-alt); padding: 2px 5px; border-radius: var(--radius-sm); }
+/* 颜色/粗细/宽度编辑器 */
+.flash-gradient-editor { display: flex; flex-direction: column; gap: 8px; }
+.flash-gradient-row { display: flex; align-items: center; gap: var(--spacing-md); font-size: 12px; }
+.flash-gradient-row label { width: 64px; color: var(--text-secondary); flex: none; }
+.flash-gradient-row input[type="range"] { flex: 1; }
+.flash-gradient-row .val { width: 52px; text-align: right; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.flash-gradient-row input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: none; }
+.flash-swatch {
+  width: 70px; height: 16px; border-radius: 8px;
+  background: linear-gradient(90deg, transparent, var(--flash-color-bump) 46%, var(--flash-color-bump) 88%);
+}
+
+/* v0.11.3: 闪烁 / 释放闪烁偏好 —— body 级开关，把对应的动画类整个
+ * 掐掉。JS 端已不再挂类，这里再兜一层 CSS 防止其它路径残留。 */
+body.prefs-no-flash .upstream-row-bumped::after { animation: none; opacity: 0; }
+body.prefs-no-flash .nav-item[data-view="live"].has-stream::after { animation: none; opacity: 0; }
+body.prefs-no-release .upstream-row-decreased::after { animation: none; opacity: 0; }
+
+/* v0.11.19：全页闪烁 —— 模仿 nav"实时"的右→左扫光，整窗一条渐变光带
+ * 从右到左扫过（不是亮度闪一下）。JS 在流（bump）时给 body 短暂挂
+ * .body-flash。光带覆盖全屏（fixed 定位），结束后移除类。 */
+body.body-flash::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--flash-color-bump) 22%, transparent) 40%,
+    color-mix(in srgb, var(--flash-color-bump) 60%, transparent) 50%,
+    color-mix(in srgb, var(--flash-color-bump) 22%, transparent) 60%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-position: 100% 0; /* 起始在最右 */
+  animation: body-flash-sweep 1.4s cubic-bezier(0.615, -0.0031250000000000444, 0.325, 0.986875);
+}
+@keyframes body-flash-sweep {
+  0%   { background-position: 100% 0; }
+  83%  { background-position: -100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* v0.11.19：#13 金色滑动扫光 —— 文字本身变金色，从右往左平滑滑过。
+ * 用 background-clip:text 把金色渐变裁剪到文字上（比 color-dodge 混
+ * 合更可靠，WebView2 对文字层混色支持不稳）。金色带覆盖整个文字，随
+ * 波纹方向从右→左扫过，最后落回主题色。 */
+.upstream-row-bumped .upstream-name {
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--gold-sheen) 0%,
+    #f5d97e 40%,
+    var(--text-primary) 55%,
+    var(--text-primary) 100%
+  );
+  background-size: 220% 100%;
+  background-position: 0% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: name-gold-sweep 1.6s var(--flash-ease, linear);
+}
+@keyframes name-gold-sweep {
+  0%   { background-position: 100% 0; }
+  70%  { background-position: 0% 0; }
+  100% { background-position: 0% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .upstream-row-bumped .upstream-name {
+    color: var(--text-primary);
+    background-image: none;
+    animation: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.body-flash::before { animation: none; display: none; }
+}
+.settings-platform-group {
+  margin-bottom: var(--spacing-md);
+}
+.settings-platform-name {
+  font-size: 13.2px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+  margin-bottom: 7.2px;
+  padding-bottom: 4.8px;
+  border-bottom: 1.2px solid var(--hairline);
+}
+.settings-upstream-item {
+  display: block;
+  padding: 9.6px 0;
+  margin-bottom: var(--spacing-md);
+  border-bottom: 1.2px solid var(--hairline);
+}
+.settings-upstream-item:last-child { border-bottom: none; }
+.settings-upstream-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2.4px;
+  padding: 7.2px 9.6px;
+}
+/* v0.113j：去掉 active 行左侧绿条（此类左侧细条设计不再使用），
+   保留淡绿底作为 active 状态提示。 */
+.settings-upstream-row:has(.active-tag) { background: rgba(16, 163, 127, .04); }
+.settings-upstream-item .name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.settings-upstream-item .name .active-tag {
+  display: inline-block;
+  margin-left: 7.2px;
+  font-size: 10.8px;
+  padding: 1.2px 7.2px;
+  border-radius: var(--radius-pill);
+  background: var(--text-success);
+  color: #fff;
+  letter-spacing: .04em;
+}
+.settings-upstream-item .url {
+  font-size: 13.2px;
+  color: var(--text-muted);
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+.settings-upstream-item .note {
+  font-size: 13.2px;
+  color: var(--text-secondary);
+  margin-top: 2.4px;
+}
+
+.platform-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 7.2px 0;
+}
+
+.platform-badge {
+  display: inline-block;
+  padding: 2.4px 12px;
+  border-radius: var(--radius-pill);
+  font-size: 13.2px;
+  font-weight: 600;
+  color: white;
+  letter-spacing: 0.04em;
+}
+
+.platform-badge.platform-anthropic { background: var(--platform-anthropic); }
+.platform-badge.platform-openai    { background: var(--platform-openai); }
+
+/* v0.143：openai 拆端点（chat / responses）—— chat 沿用 platform-openai
+   色（蓝绿主色），responses 用 color-mix 往紫色调一点区分（OpenAI
+   官方 Responses 品牌色相近）。chat 是当前所有 openai 入向流量，
+   responses 行从 0 开始增长。 */
+.platform-badge.platform-openai.platform-endpoint-openai-chat {
+  background: var(--platform-openai);
+}
+.platform-badge.platform-openai.platform-endpoint-openai-responses {
+  background: color-mix(in srgb, var(--platform-openai) 65%, #a78bfa);
+}
+
+.platform-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* v0.155/v0.156：平台流量卡片 —— 客户端工具（agent）徽标。原始名落库，
+   显示名经 agent_aliases 映射；配色按已知工具固定，兜底桶（其它）走灰色，
+   动态平台（bun/python-httpx/…）走默认灰、可加专属色。 */
+.agent-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+  letter-spacing: 0.04em;
+  background: #94a3b8;
+}
+.agent-badge.agent-claude-code { background: #d97706; }
+.agent-badge.agent-opencode    { background: #10a37f; }
+.agent-badge.agent-codex       { background: #2563eb; }
+.agent-badge.agent-openclaw    { background: #c026d3; }
+.agent-badge.agent-ai-sdk      { background: #8b5cf6; }
+/* v0.159：徽标底色优先用 inline style（用户 agent_aliases.color 覆盖），
+   未设时 css .agent-{key} 默认配色生效。两个 source 不冲突 —— color 非空
+   时 renderAgent 给徽标加 style="background: ${color}"。 */
+
+/* v0.160：总览「平台流量」点击改名 modal —— 名字 input + Material 风
+   格 12×8 离散色板（点击直选）+ 实时预览。删了 v0.159 的 HSL/lightness
+   slider + HEX 直输（用户嫌滑块控制太繁琐，给了一张色板图要求改成
+   点选）。 */
+.alias-edit-name {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.alias-edit-name:focus {
+  outline: none;
+  border-color: var(--accent, #3b82f6);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #3b82f6) 25%, transparent);
+}
+.alias-edit-preview-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+.alias-edit-preview {
+  /* 用 12px 圆形徽标预览，避免全尺寸抢戏。 */
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 4px 14px;
+  border-radius: var(--radius-pill);
+  color: white;
+  background: var(--agent-preview-bg, #6b7280);
+}
+.alias-swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+}
+.alias-swatch {
+  aspect-ratio: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  transition: transform 80ms ease, outline 80ms ease;
+  padding: 0;
+}
+.alias-swatch:hover {
+  transform: scale(1.12);
+  outline: 1px solid rgba(255, 255, 255, 0.6);
+}
+.alias-swatch.is-selected {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: 1px;
+}
+.alias-edit-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+/* v0.155：Settings 页平台别名编辑输入框。 */
+.agent-alias-input {
+  flex: 1;
+  max-width: 220px;
+  padding: 4px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+/* v0.157：Settings 页 UA 归类 —— UA 串（只读，超长省略）+ 平台名输入。
+   输入框复用 agent-alias-input 视觉，这里只调 UA 标签的省略布局。 */
+.ua-rule-ua {
+  grid-column: 1 / span 3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: help;
+}
+
+/* qs-row 默认 4 列（140px 1fr auto auto），UA 归类行改 2 列布局：
+   UA 标签跨 3 列 + 输入框占第 4 列。 */
+.ua-rule-input {
+  grid-column: 4;
+  width: 180px;
+  padding: 4px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.model-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.model-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-bar {
+  height: 6px;
+  background: var(--panel-alt);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.model-bar-fill {
+  height: 100%;
+  background: var(--button-primary);
+  transition: width .4s var(--ease-out);
+  border-radius: 3px;
+}
+
+.model-tokens {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  min-width: 48px;
+  text-align: right;
+}
+
+.recent-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: 11px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.recent-row:last-child { border-bottom: none; }
+
+.recent-time { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.recent-platform { color: var(--text-primary); font-weight: 500; }
+.recent-model {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-tokens { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+/* -------------------------------------------------------------------------
+ * Honour reduce-motion preference (regression parity with the old
+ * Tk version's reduce-motion gate).
+ * ------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * v0.19 — quota / utilization
+ *
+ * Three surfaces share these components:
+ *   1. sidebar        — 4px micro-bar under each upstream <select>
+ *   2. upstreams view — full-width bar + warning pill + model breakdown
+ *   3. settings view  — the editor (<details class="upstream-config">)
+ *
+ * Colour is driven entirely by `data-level` on the bar / pill, matching
+ * the snapshot's ``warning_level`` string. No per-level class lists.
+ * ------------------------------------------------------------------------- */
+
+.quota-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--text-muted) 22%, transparent);
+  overflow: hidden;
+}
+
+/* Micro variant for the sidebar — colour alone carries the signal at
+ * this size, so there's no accompanying text. */
+.quota-bar-micro { height: 4px; margin-top: 6px; }
+
+.quota-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--quota-ok);
+  transition: width 420ms var(--ease-out), background-color 220ms linear;
+}
+
+.quota-bar-fill[data-level="warn"]      { background: var(--quota-warn); }
+.quota-bar-fill[data-level="critical"]  { background: var(--quota-critical); }
+.quota-bar-fill[data-level="exhausted"] { background: var(--quota-exhausted); }
+
+.warning-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  color: var(--quota-ok);
+  background: color-mix(in srgb, var(--quota-ok) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--quota-ok) 30%, transparent);
+}
+
+.warning-pill[data-level="warn"] {
+  color: var(--quota-warn);
+  background: color-mix(in srgb, var(--quota-warn) 14%, transparent);
+  border-color: color-mix(in srgb, var(--quota-warn) 30%, transparent);
+}
+.warning-pill[data-level="critical"] {
+  color: var(--quota-critical);
+  background: color-mix(in srgb, var(--quota-critical) 16%, transparent);
+  border-color: color-mix(in srgb, var(--quota-critical) 34%, transparent);
+}
+.warning-pill[data-level="exhausted"] {
+  color: var(--quota-exhausted);
+  background: color-mix(in srgb, var(--quota-exhausted) 18%, transparent);
+  border-color: color-mix(in srgb, var(--quota-exhausted) 38%, transparent);
+}
+
+/* Quota summary line above the bar in the upstreams view. */
+.quota-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: 10px;
+  margin-bottom: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.quota-summary-used {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.quota-summary-eta { margin-left: auto; color: var(--text-muted); }
+
+/* Per-model weighted cost, shown under the bar. Each chip reads
+ * "model ×mult = cost" so the multiplier's effect is legible without
+ * cross-referencing the settings form. */
+.quota-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.quota-breakdown-chip {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--glass-surface-soft);
+  border: 1px solid var(--glass-border);
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-breakdown-chip b { color: var(--text-primary); font-weight: 500; }
+
+/* Models seen on this upstream that aren't in its allow-list. */
+.quota-unauthorized {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--quota-critical);
+}
+
+/* ----- settings editor ----- */
+
+.upstream-config {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-soft);
+  margin-bottom: var(--spacing-sm);
+  overflow: hidden;
+  /* .upstream-config is a flex item inside .card-body-list (flex column,
+   * max-height:70vh, overflow-y:auto). Because this element's own overflow
+   * is not "visible", flexbox's automatic min-height:auto is treated as 0
+   * here, so with the default flex-shrink:1 the browser was free to squash
+   * an expanded card shorter than its content whenever the whole list
+   * exceeded 70vh — and since the squashed part is clipped by this
+   * overflow:hidden (not auto), there was no scrollbar to reach it. That's
+   * why the per-upstream edit form looked "stuck" and couldn't scroll down.
+   * flex-shrink:0 keeps every card at its natural height so the outer
+   * .card-body-list scrollbar (which already works) covers the overflow
+   * instead. */
+  flex-shrink: 0;
+}
+
+/* Clicking an upstream on 总览 / 上游 jumps to its editor here; the
+   flash tells the user which card in a long list they just landed on. */
+.upstream-row-clickable {
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.upstream-row-clickable:hover { background: var(--glass-surface); }
+
+.upstream-config-flash { animation: upstream-config-flash 1.2s ease-out; }
+
+@keyframes upstream-config-flash {
+  0%, 40% {
+    border-color: var(--seg-input);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.28);
+  }
+  100% { border-color: var(--glass-border); box-shadow: none; }
+}
+
+.upstream-config > summary {
+  padding: 10px var(--spacing-md);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: 12px;
+  color: var(--text-primary);
+  user-select: none;
+  list-style: none;
+}
+
+.upstream-config > summary::-webkit-details-marker { display: none; }
+
+/* Disclosure triangle, rotated by the open state. Hand-rolled so it
+ * inherits the text colour instead of the platform's default marker. */
+.upstream-config > summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  opacity: 0.5;
+  transition: transform 180ms var(--ease-out);
+}
+
+.upstream-config[open] > summary::before { transform: rotate(90deg); }
+.upstream-config > summary:hover { background: var(--glass-surface); }
+
+.upstream-config-platform {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.upstream-config-body {
+  padding: var(--spacing-md);
+  padding-top: var(--spacing-sm);
+  border-top: 1px solid var(--glass-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  /* v0.77：不再内嵌滚动（去掉 65vh max-height + overflow-y:auto）。
+   * 之前的双滚动条（编辑器内 65vh + 列表 70vh）会把滚轮吃在编辑器
+   * 内部那一层 —— 编辑器滚到底后 overscroll-behavior:contain 挡住
+   * 链式滚动，列表和页面都动不了，展开的表单下半截看起来就像被容器
+   * 截断。现在编辑器随内容自然长高，滚动只发生在 .card-body-list
+   * 这一层（配合它的 overscroll-behavior:auto 链到页面）。 */
+}
+
+.cfg-field { display: flex; flex-direction: column; gap: 6px; }
+
+.cfg-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cfg-hint { color: var(--text-muted); font-size: 10px; }
+
+.cfg-input {
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-surface-strong);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.cfg-input:focus {
+  outline: 2px solid var(--button-primary);
+  outline-offset: -2px;
+}
+
+/* v0.112l：统一所有 <select> 选择器的玻璃风格。
+   appearance:none 去掉原生外观/箭头，改自绘主题色箭头（--select-arrow）。
+   背景/描边/圆角/字体与 .cfg-input / .upstream-select 一致 —— select 与
+   文本输入框、按钮同一种玻璃面，不再露出 Chromium 原生 select 外观。
+   ⚠ 弹出的选项列表（option 下拉）是 OS 渲染，无法定制；这里统的只是
+   框体本身。 */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: var(--select-arrow);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px;
+  background-color: var(--glass-surface-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 26px 6px 9px;
+  cursor: pointer;
+  transition: border-color .18s var(--ease-out);
+}
+/* 这些类自带 background / padding shorthand，会重置 background-image 吃掉
+ * 箭头、并把 padding-right 压回 8-9px（箭头压文字）—— 用更高 specificity
+ * 重设箭头/底色 + 右侧箭头预留位。v0.113e 侧栏上游选择器已改为自绘按钮
+ * （.upstream-select 现在是 <button>，箭头是真实 SVG），这里只剩 .cfg-input。 */
+select.cfg-input {
+  background-image: var(--select-arrow);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px;
+  background-color: var(--glass-surface-strong);
+  padding: 6px 26px 6px 9px;
+}
+select:hover {
+  border-color: var(--text-muted);
+}
+select:focus {
+  outline: 2px solid var(--button-primary);
+  outline-offset: -2px;
+}
+
+/* v0.12.1：分段选择器（默认主题）——替代原生 select，契合胶囊风格 */
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-surface-soft);
+  gap: 2px;
+}
+.seg-btn {
+  padding: 4px 13px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color .18s var(--ease-out),
+    color .18s var(--ease-out),
+    box-shadow .18s var(--ease-out);
+}
+.seg-btn:hover {
+  color: var(--text-primary);
+}
+.seg-btn.active {
+  background: var(--glass-surface-strong);
+  color: var(--text-primary);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .15);
+}
+
+.cfg-quota { max-width: 160px; font-variant-numeric: tabular-nums; }
+
+.cfg-multipliers-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cfg-multipliers-row .cfg-mult-name  { flex: 1; min-width: 0; }
+.cfg-multipliers-row .cfg-mult-value {
+  width: 76px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-row-remove {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+
+.cfg-row-remove:hover {
+  background: color-mix(in srgb, var(--quota-exhausted) 14%, transparent);
+  color: var(--quota-exhausted);
+}
+
+/* ----- allow-list chip input ----- */
+
+.cfg-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-surface-strong);
+  min-height: 34px;
+}
+
+.cfg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 5px 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.cfg-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.cfg-chip-remove:hover { color: var(--quota-exhausted); }
+
+/* v0.190：支持图片的模型 chip 列表容器。继承自 .settings-item-control
+ * （display:flex 单行、flex:none、无 wrap），chip 一多就横向溢出看不全。
+ * 这里覆盖成可换行：flex:1 占满标题与保存按钮之间的空间、min-width:0 允许
+ * 收缩、flex-wrap:wrap 让整枚按钮（.cfg-vm-chip 已 nowrap + flex-shrink:0）
+ * 放不下时换到下一行。 */
+.settings-vm-chips {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* v0.188：支持图片的模型 —— 多选 chip。无「×」删除钮（点整个 chip 切换
+ * 勾选态），active 态高亮描边标记「已勾选」。
+ * cursor:pointer 提示可点；宽度保持 .cfg-chip 同款，微调 padding 抵消
+ * 移除的 gap（.cfg-chip 有 remove 钮的 padding，这里去掉）。 */
+.cfg-vm-chip {
+  cursor: pointer;
+  padding: 3px 10px;
+  border-color: var(--hairline);
+  user-select: none;
+  /* v0.190：按钮文字不换行（模型名含连字符，如 deepseek-v4-flash-vision-exp，
+   * 空间不足时 CSS 会在连字符处断行）。flex-shrink:0 保证按钮不被压窄，
+   * 空间不够时整枚按钮换到下一行（父容器 .cfg-chips 已 flex-wrap: wrap）。 */
+  white-space: nowrap;
+  flex-shrink: 0;
+  /* v0.192：字号调大 —— 继承 .cfg-chip 的 11px 太小，带上游前缀后字符串更长
+   * 更看不清。提到 12.5px 并顺带放宽行高，兼顾可读性与换行密度。 */
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.cfg-vm-chip.active {
+  border-color: var(--platform-anthropic);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--platform-anthropic) 14%, var(--panel-bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--platform-anthropic) 30%, transparent);
+}
+
+/* Bare input that lives inside the chip box — no border of its own so
+ * the surrounding .cfg-chips reads as the single field. */
+.cfg-chip-input {
+  flex: 1;
+  min-width: 110px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: inherit;
+  padding: 3px 4px;
+}
+
+.cfg-chip-input:focus { outline: none; }
+
+/* v0.119：链接上游 chip + 「+ 新建链接」按钮。视觉上与 allowed_models
+ * chip 同款，加一个 🔗 前缀图标 + 浅蓝描边区分；保存行为一致。 */
+.cfg-linked-chip {
+  border-color: color-mix(in srgb, var(--platform-anthropic) 35%, var(--hairline));
+  background: color-mix(in srgb, var(--platform-anthropic) 6%, var(--panel-bg));
+}
+.cfg-linked-chip .cfg-chip-link-icon {
+  font-size: 10px;
+  margin-right: 2px;
+  opacity: 0.75;
+}
+.cfg-link-add {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px dashed var(--hairline);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background .15s ease;
+}
+.cfg-link-add:hover {
+  border-color: var(--button-primary);
+  color: var(--button-primary);
+  background: color-mix(in srgb, var(--button-primary) 5%, transparent);
+}
+
+/* v0.119：链接上游 modal。同款 modal-overlay / modal-card 套路。 */
+.cfg-link-card { width: min(420px, 92vw); }
+.cfg-link-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: var(--spacing-sm);
+}
+.cfg-link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.cfg-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color .12s ease;
+}
+.cfg-link-row:hover { background: var(--glass-surface-soft); }
+.cfg-link-row-name { font-weight: 600; font-size: 12px; }
+.cfg-link-row-meta {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-left: auto;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cfg-link-row-platform {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-left: 4px;
+  opacity: 0.7;
+}
+
+.cfg-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.cfg-status { font-size: 11px; color: var(--text-secondary); }
+.cfg-status[data-kind="ok"]    { color: var(--quota-ok); }
+.cfg-status[data-kind="error"] { color: var(--quota-exhausted); }
+
+/* ---------------------------------------------------------------------
+ * v0.36 — History view pagination + request-detail modal.
+ *
+ * History rows are clickable (data-id → openRequestDetail). The hover
+ * cue is a subtle background tint and the row gains an outline so the
+ * keyboard focus state (tabindex=0) reads the same way as the mouse
+ * hover. Same affordance for the overview "最近活动" rows.
+ * --------------------------------------------------------------------- */
+
+.history-row[data-id],
+.recent-row[data-id] {
+  cursor: pointer;
+  transition: background-color .12s ease;
+}
+.history-row[data-id]:hover,
+.history-row[data-id]:focus-visible,
+.recent-row[data-id]:hover,
+.recent-row[data-id]:focus-visible {
+  background-color: var(--panel-alt);
+  outline: none;
+}
+.history-row[data-id]:focus-visible,
+.recent-row[data-id]:focus-visible {
+  /* Outline is suppressed in :hover so the hover background is the
+   * only cue; restore it only when the row is focused via keyboard
+   * (so the focus ring is visible without it looking noisy on mouse
+   * hover). */
+  box-shadow: inset 0 0 0 1px var(--platform-anthropic);
+}
+
+/* Sentinel at the bottom of the paginated history list — used by
+ * IntersectionObserver to trigger the next /requests?before_id=...
+ * fetch. Idle state shows a hint, loading state shows the spinner-
+ * less "加载中…" text, and the end-state replaces it with "已加载
+ * 全部 N 条" once the server reports next_before_id=null. */
+.history-sentinel {
+  padding: 12px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+  border-top: 1px dashed var(--hairline);
+  margin-top: 8px;
+}
+.history-sentinel-end {
+  color: var(--text-secondary);
+  border-top-style: solid;
+}
+
+/* --- Modal overlay + card ---------------------------------------- */
+
+.modal-open { overflow: hidden; }
+
+/* HTML `hidden` attribute is equivalent to `[hidden] { display: none }`
+ * in the UA stylesheet, but our own `.modal-overlay { display: flex }`
+ * rule wins by source order — without this explicit override the modal
+ * is visible from page load and never actually closes when JS toggles
+ * `overlay.hidden`. Higher specificity than the bare class rule, so
+ * the hidden state is honoured. */
+.modal-overlay[hidden] { display: none; }
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 10, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9000;
+  padding: 24px;
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.modal-card {
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  width: min(720px, 100%);
+  /* v0.113d：同 card-body-list —— 除以 --page-zoom，纯放大下 modal 卡片
+   * 不超高被裁（fixed 的 .modal-overlay 不被 zoom 放大，卡片会被放大，
+   * 84vh 会变成 84%×Z 的实际高度，超过视口）。 */
+  max-height: calc(84vh / var(--page-zoom, 1));
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+  font-family: "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+}
+
+.modal-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color .12s ease, color .12s ease;
+}
+.modal-close:hover,
+.modal-close:focus-visible {
+  background: var(--panel-alt);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.modal-header {
+  padding: 16px 24px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.modal-id {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+.modal-loading,
+.modal-error,
+.modal-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 8px 0;
+}
+
+.modal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.modal-meta span { white-space: nowrap; }
+.modal-meta b {
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-right: 4px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.modal-meta-mono {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  word-break: break-all;
+  white-space: normal;
+  max-width: 100%;
+}
+.modal-meta-error { color: var(--text-error); }
+
+.modal-body {
+  padding: 16px 24px 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Each saved message — user / assistant / other role. The user rows
+ * use the platform-anthropic tint for the role badge, the assistant
+ * rows use the platform-openai tint; "other" stays neutral. */
+.modal-msg {
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--panel-alt);
+}
+/* v0.113j：去掉消息框左侧的角色彩色条（此类左侧细条设计不再使用）。
+   role 仍有文本标签（.modal-msg-role）可辨；thinking 仅保留淡显样式。 */
+.modal-msg-thinking   { opacity: 0.85; }
+.modal-msg-thinking .modal-msg-role { font-style: italic; }
+
+.modal-msg-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.modal-msg-role { font-weight: 700; color: var(--text-secondary); }
+.modal-msg-ts   { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.modal-msg-text {
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  /* 该用等宽就给等宽（代码、JSON 字符串、命令）。普通段落也走 system
+   * fallback，所以混排也能读。 */
+  font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+}
+
+.modal-msg-json {
+  margin-top: 8px;
+  font-size: 11px;
+}
+.modal-msg-json summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 2px 0;
+  user-select: none;
+}
+.modal-msg-json pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: var(--panel-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre;
+  color: var(--text-primary);
+}
+
+/* ---------------------------------------------------------------------
+ * v0.68 — "上游状态" 卡片点击弹出的按模型拆分详情 modal.
+ *
+ * 复用 .modal-overlay / .modal-card / .modal-body 视觉，这里只加表格
+ * 本身的样式 —— 没有引入新的 overlay/card 外观。
+ * --------------------------------------------------------------------- */
+
+.upstream-models-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.upstream-models-table th,
+.upstream-models-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+.upstream-models-table th {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.upstream-models-table td:first-child,
+.upstream-models-table th:first-child {
+  white-space: normal;
+  word-break: break-word;
+}
+.upstream-models-table tbody tr:last-child td { border-bottom: none; }
+.upstream-models-table tbody tr:hover td { background: var(--panel-alt); }
+
+/* v0.120：链接上游明细 modal 的「属于上游」头部 + 聚合统计 + 成员分块。
+   复用既有 .cfg-linked-chip（紫底 + 🔗 图标）显示虚拟名/成员名。 */
+.upstream-link-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding-bottom: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+  border-bottom: 1px solid var(--hairline);
+}
+.upstream-link-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.upstream-link-aggregate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-xs);
+  margin-bottom: var(--spacing-md);
+  background: var(--panel-alt);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.upstream-link-stat b {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.upstream-link-members {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+.upstream-link-member {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+}
+.upstream-link-member-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+.upstream-link-member-stats {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.upstream-link-member-table {
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------
+ * v0.71 — 自定义 confirmModal / alertModal 对话框。
+ *
+ * 视觉跟其它 .modal-card 完全一致（玻璃面 / 标题 / 关闭按钮复用），
+ * 这里只补 dialog-specific 的样式：稍微窄一点、底部带操作按钮行。
+ * --------------------------------------------------------------------- */
+
+.modal-card-dialog {
+  width: 440px;
+  /* v0.113d：除以 --page-zoom，同 modal-card —— 纯放大下 dialog 不超宽。 */
+  max-width: calc((100vw - 32px) / var(--page-zoom, 1));
+  display: flex;
+  flex-direction: column;
+}
+.dialog-body {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 16px 24px;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--hairline);
+}
+
+/* ---------------------------------------------------------------------
+ * v0.46 — "新建上游" modal.
+ *
+ * Slightly narrower than the request-detail modal (640 vs 720) so the
+ * three quota fields + multiplier editor don't sprawl. Reuses the same
+ * overlay + card chrome so visually they read as siblings.
+ * --------------------------------------------------------------------- */
+
+/* Title row with an action button on the right. The "+ 新建" button
+ * sits inside the 上游详情 card header — keeps the topbar from
+ * collecting one-off per-view actions. */
+.card-title-with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+.card-title-action {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-pill);
+  letter-spacing: 0.02em;
+}
+
+/* The create modal is narrower than the request-detail one — keeps
+ * the field labels readable at typical window widths. */
+.modal-card-create {
+  width: min(640px, 100%);
+}
+
+.create-body {
+  padding: 4px 22px 22px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Platform radio row — two pills side by side. Keeps the form tight. */
+.create-platform-row {
+  display: flex;
+  gap: 8px;
+}
+/* v0.12：新建上游表单"高级功能"折叠区（计费/倍率/限额/协议适配） */
+.cfg-advanced {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-card, 12px);
+  background: var(--glass-surface-soft);
+  overflow: hidden;
+}
+.cfg-advanced-summary {
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.cfg-advanced-summary::-webkit-details-marker { display: none; }
+.cfg-advanced-summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform .12s ease;
+}
+.cfg-advanced[open] .cfg-advanced-summary::before { transform: rotate(90deg); }
+.cfg-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--glass-border);
+}
+/* v0.12：协议三选一按钮组 */
+.wire-btns {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+/* v0.194：协议按钮组竖线分隔 —— 在 Anthropic 与 OpenAI 两族协议之间
+ * 加一条 hairline 同色细线，点不动、纯装饰（aria-hidden）。align-self
+ * 让它在 flex 容器里居中；width/height 用绝对像素保证换行后不会拉伸
+ * 成怪形状（flex-wrap:wrap 时其他按钮可能跨行，但分隔条固定 24px 高）。 */
+.wire-btns-sep {
+  width: 1px;
+  height: 24px;
+  background: var(--hairline);
+  flex: none;
+  align-self: center;
+}
+.wire-btn {
+  padding: 7px 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill, 999px);
+  background: var(--glass-surface-soft);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.wire-btn:hover { border-color: var(--button-primary); color: var(--text-primary, inherit); }
+.wire-btn-active {
+  background: var(--button-primary);
+  border-color: transparent;
+  color: var(--text-on-primary, #fff);
+}
+/* v0.12：新建上游表单里「平台与协议」分组框 —— 入站/出站两行放一起讲清职责 */
+.cfg-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-card, 12px);
+  background: var(--glass-surface-soft);
+}
+.cfg-group-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cfg-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.cfg-group-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary, inherit);
+}
+.cfg-group-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.create-platform-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--glass-surface-soft);
+  user-select: none;
+  transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.create-platform-opt input { accent-color: var(--button-primary); margin: 0; }
+.create-platform-opt:has(input:checked) {
+  background: var(--button-primary);
+  color: var(--button-primary-fg);
+  border-color: var(--button-primary);
+}
+
+/* Tiny "*" beside required field labels. */
+.cfg-req { color: var(--text-error); font-weight: 700; }
+
+/* Three-column row for 5h / week / month quotas. Collapses to single
+ * column on narrow widths so the inputs stay tappable. */
+.cfg-field-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 520px) {
+  .cfg-field-grid { grid-template-columns: 1fr; }
+}
+
+/* Action row at the bottom of the form: cancel + submit + status. */
+.create-actions {
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+  margin-top: 4px;
+}
+/* v0.12.1："测试"按钮放最左，占住行动行左端（右侧是取消/创建）。
+   v0.84：新增"连通性测试"，两个测试按钮并排靠左。 */
+.create-actions .btn#create-test,
+.create-actions .btn#create-connectivity-test {
+  margin-right: auto;
+}
+.create-actions .btn#create-connectivity-test {
+  margin-right: 0;
+}
+
+/* v0.12.1：新建上游"测试"日志面板 —— 按钮下方的小终端窗口。 */
+.create-test-log {
+  margin-top: 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--glass-surface-soft);
+}
+.create-test-log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--glass-border);
+}
+.create-test-log-clear {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.create-test-log-clear:hover { color: var(--text-primary); }
+.create-test-log-body {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---------------------------------------------------------------------
+ * v0.70 — settings 页 "快捷切换" 管理区。
+ *
+ * 一行一个快捷项：左侧 label、加粗；中间 platform/upstream/model 摘要
+ * 用次要文字色；右侧两个小按钮。复用主题色变量(--hairline / --panel-alt
+ * / --text-secondary)，不要再造一组视觉。
+ * --------------------------------------------------------------------- */
+
+.qs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qs-row {
+  display: grid;
+  grid-template-columns: 140px 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--panel-alt);
+}
+
+.qs-row-label {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.qs-row-target {
+  color: var(--text-secondary);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.qs-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* v0.XX 透传模式两段滑动开关：滑块在「转换模式 / 透传模式」之间滑动，
+ * data-enabled="1" 时滑块右移。v0.102.2：样式贴合项目玻璃主题（与 .consume-
+ * switch-btn / .stats-mode-btn 同语言）—— 玻璃面板容器 + 主色渐变滑块
+ * + 段落文字主题色对比，hover/active 都有过渡。 */
+.pt-mode-switch {
+  position: relative;
+  display: inline-flex;
+  width: 240px;
+  height: 34px;
+  flex: none;
+  padding: 3px;
+  background: linear-gradient(
+    180deg,
+    var(--glass-surface-strong) 0%,
+    var(--glass-surface-soft) 100%
+  );
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  box-sizing: border-box;
+  user-select: none;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: box-shadow .18s var(--ease-out), border-color .18s var(--ease-out);
+}
+.pt-mode-switch:hover {
+  border-color: var(--text-muted);
+  /* v0.102.2：hover 用 box-shadow 增强 + 边框加深表达"可点"，不用 transform
+   * —— scale 会让 flex 子元素的文字在某些渲染顺序下消失。 */
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.04),
+    0 4px 12px color-mix(in srgb, var(--button-primary) 15%, transparent);
+}
+/* v0.102.2：滑块从纯白升级为主色渐变胶囊，贴合主题；box-shadow 柔化。 */
+.pt-mode-slider {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  height: calc(100% - 6px);
+  background: linear-gradient(180deg, var(--button-primary) 0%, color-mix(in srgb, var(--button-primary) 88%, #000 12%) 100%);
+  border-radius: 999px;
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--button-primary) 30%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transition: transform .22s var(--ease-out);
+  pointer-events: none;
+}
+.pt-mode-switch[data-enabled="1"] .pt-mode-slider {
+  transform: translateX(100%);
+}
+.pt-mode-opt {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  border: 0;
+  background: none;
+  /* v0.102.2：字号 + 字重双增，确保任意主题下两段文字都清晰可读（不受主色
+   * 滑块/玻璃面板背景色叠加影响）。激活段由滑块覆盖后文字反白，weight
+   * 进一步加到 700，与非激活段 600 形成明显对比。 */
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: color .18s var(--ease-out), font-weight .18s var(--ease-out);
+  /* 文字边缘极弱阴影 —— 万一主题对比度偏弱，保证可读（不抢主色滑块的视觉）。 */
+  text-shadow: 0 0 1px color-mix(in srgb, var(--text-primary) 20%, transparent);
+}
+.pt-mode-opt:hover {
+  /* v0.102.2：hover 完全不改文字颜色（避免与玻璃背景撞色），只用
+   * font-weight 加粗反馈。 */
+  font-weight: 700;
+}
+.pt-mode-opt-active {
+  color: var(--text-on-primary, #fff);
+  font-weight: 700;
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--button-primary) 40%, transparent);
+}
+.pt-mode-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+/* -------------------------------------------------------------------------
+ * v0.XX 透传模式（passthrough-mode）：body 类由 JS 按 snapshot 驱动。
+ * 开启后只保留透传相关 UI，关闭后移除类即整体恢复。
+ * ------------------------------------------------------------------------- */
+
+/* 1) 设置页：只保留透传模式 + 透传上游两个 section */
+body.passthrough-mode .settings-section:not([data-card="settings-passthrough"]):not([data-card="settings-passthrough-upstreams"]):not([data-card="settings-relay-mode"]) {
+  display: none;
+}
+
+/* 2) 左下角上游选择器（sidebar）隐藏 —— 透传模式没有配置型上游可选 */
+body.passthrough-mode #sidebar-upstream-list {
+  display: none;
+}
+
+/* 3) 上游详情：非透传记录整体隐藏（整个 upstreams 视图透传下不可用，
+ *    导航项保留，点击看到提示占位） */
+body.passthrough-mode [data-view="upstreams"] #view-upstreams-grid {
+  display: none;
+}
+body.passthrough-mode [data-view="upstreams"] .pt-empty-note {
+  display: block;
+}
+/* #3b：.pt-empty-note 携带 .glass-card（display:flex），会覆盖 UA 的
+ *    [hidden]{display:none}，导致非透传模式下也显示出来。显式兜底
+ *    保证 [hidden] 属性一直生效（透传模式下被上一条规则 display:block
+ *    覆盖）。 */
+.pt-empty-note[hidden] { display: none; }
+
+/* 4) v0.102.2：转换模式的"快捷切换"按钮组（侧栏）隐藏 —— 每个按钮都
+ *    指向配置型上游，透传模式下没有配置型上游可选。 */
+body.passthrough-mode #sidebar-quick-switch {
+  display: none;
+}
+
+/* 5) 设置页子菜单里只属于转换模式的项隐藏（上游配置 / 快捷切换），
+ *    避免点击后滚动到已被隐藏的 section。 */
+body.passthrough-mode .nav-sub-item[data-settings-sub="config"],
+body.passthrough-mode .nav-sub-item[data-settings-sub="quickswitch"] {
+  display: none;
+}
+
+/* -------------------------------------------------------------------------
+ * v0.102：三极消耗口径开关（仅透传 / 全部 / 仅转换）+ 卡片管理 + 紧凑间距。
+ * ------------------------------------------------------------------------- */
+
+/* 更紧凑的卡片间距 —— 总览 6 卡 + 统计页 8 图卡统一收紧。 */
+.view[data-view="overview"] .grid {
+  /* v0.112c：卡片间距 10px → 6px（紧凑）。 */
+  gap: 6px;
+}
+.stats-grid {
+  gap: 10px;
+}
+.view[data-view="overview"] .grid .glass-card {
+  /* v0.112c：卡片内边距 12px → 10px（紧凑）。 */
+  padding: 10px;
+  gap: 6px;
+}
+/* v0.112d/e→g：全部页面卡片「液态玻璃」质感 —— Apple Liquid Glass 方案。
+   backdrop-filter:url(#lg-glass) 引用 index.html 顶部注入的 SVG filter：
+   feTurbulence 低频噪声(feDisplacementMap 折射背景光晕) + feColorMatrix
+   高饱和。玻璃光泽由本卡背景渐变 + inset 高光承担。浏览器不支持
+   backdrop-filter:url(#) 时自动降级为半透明渐变（仍为玻璃观感）。
+   ⚠ 性能：v0.41 因 backdrop-filter:blur 拖慢 WebView2 全线下线玻璃。
+   v0.112g：扩展到全部 .glass-card（总览/统计/live/history/上游/设置），
+   唯独排除 .top-model-spotlight —— 它 v0.112g 起悬空裸底（见下）。 */
+.glass-card:not(.top-model-spotlight) {
+  background: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.20),
+    rgba(255, 255, 255, 0.05) 55%,
+    rgba(255, 255, 255, 0.13)
+  );
+  border-color: rgba(255, 255, 255, 0.28);
+  backdrop-filter: url(#lg-glass);
+  -webkit-backdrop-filter: url(#lg-glass);
+  box-shadow:
+    0 6px 24px rgba(0, 0, 0, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* v0.112g：「用量最大的模型」悬空裸底 —— 去卡片背景/边框/玻璃/阴影，
+   文字直接浮在页面底色上。hover 不上浮、无阴影；内高光伪元素也去掉。 */
+.top-model-spotlight {
+  background: transparent;
+  border-color: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+.top-model-spotlight:hover {
+  transform: none;
+  box-shadow: none;
+}
+.top-model-spotlight::before {
+  display: none;
+}
+
+/* v0.112i：实时/上游/历史/统计四页卡片去背景 —— 悬空裸底（同 spotlight）。
+   总览（6 卡+spotlight）与设置页保留液态玻璃；这四页把卡片的玻璃背景/
+   边框/阴影/backdrop-filter/hover 上浮/内高光全部清掉，文字直接浮在
+   页面底色上。四页的卡都是 index.html 静态 .glass-card，视图作用域覆盖。 */
+.view[data-view="live"] .glass-card,
+.view[data-view="upstreams"] .glass-card,
+.view[data-view="history"] .glass-card,
+.view[data-view="stats"] .glass-card {
+  background: transparent;
+  border-color: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+.view[data-view="live"] .glass-card:hover,
+.view[data-view="upstreams"] .glass-card:hover,
+.view[data-view="history"] .glass-card:hover,
+.view[data-view="stats"] .glass-card:hover {
+  transform: none;
+  box-shadow: none;
+}
+.view[data-view="live"] .glass-card::before,
+.view[data-view="upstreams"] .glass-card::before,
+.view[data-view="history"] .glass-card::before,
+.view[data-view="stats"] .glass-card::before {
+  display: none;
+}
+
+/* v0.113：设置「无边框」开关 —— body.overview-no-frame 时总览页所有卡片
+   去掉玻璃容器（背景/边框/阴影/backdrop-filter/hover 上浮/内高光），裸
+   悬浮在页面底色上（与 .top-model-spotlight / v0.112i 四页同款）。由
+   app.js applyPrefsClass() 根据 prefs.noFrame 切换 body class。 */
+body.overview-no-frame .view[data-view="overview"] .glass-card {
+  background: transparent;
+  border-color: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+body.overview-no-frame .view[data-view="overview"] .glass-card:hover {
+  transform: none;
+  box-shadow: none;
+}
+body.overview-no-frame .view[data-view="overview"] .glass-card::before {
+  display: none;
+}
+
+.stats-grid .glass-card {
+  padding: 12px;
+  gap: 6px;
+}
+.view[data-view="overview"] .grid .card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 15px;
+}
+
+/* 总览页顶部数据口径工具栏。 */
+.consume-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.consume-toolbar-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* 三极开关本体 —— 胶囊分段控件，与 .pt-mode-switch 同语言。 */
+.consume-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--card-border);
+  border-radius: 999px;
+}
+.consume-switch-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+.consume-switch-btn:hover {
+  color: var(--text-primary);
+}
+.consume-switch-btn.active {
+  background: var(--button-primary);
+  color: #fff;
+}
+/* 设置页标题行里的内联开关（透传模式下"中继状态"卡被隐藏，其开关随之隐藏）。 */
+.settings-section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.consume-switch-inline {
+  flex-shrink: 0;
+}
+
+/* 卡片右上角移除按钮 —— 悬停卡时显现，点按立即从总览移除（可经
+ * "管理卡片"恢复）。 */
+.card-close-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.glass-card:hover .card-close-btn {
+  opacity: 1;
+}
+.card-close-btn:hover {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--text-primary);
+}
+
+/* 右下角"管理卡片"悬浮按钮 —— 仅总览视图显示。 */
+.cards-manage-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 60;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 999px;
+  box-shadow: var(--card-shadow);
+  cursor: pointer;
+  transition: color 0.15s ease, box-shadow 0.15s ease;
+}
+.cards-manage-fab:hover {
+  color: var(--text-primary);
+  box-shadow: var(--card-shadow-hover);
+}
+
+/* 卡片管理弹层 —— checkbox 列表。 */
+.cards-manage-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.cards-manage-item + .cards-manage-item {
+  border-top: 1px solid var(--card-border);
+}
+.cards-manage-item input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--button-primary);
+}
+/* v0.186.1：标题占满剩余宽度、自由按钮靠右。*/
+.cards-manage-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* v0.102：切档淡入 —— 三极开关切换数据口径后，总览卡片内容统一
+   淡入新数据（不闪空、不跳变）。同档位内的常规 tick 刷新不重播。 */
+@keyframes cardFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.card-fade-in {
+  animation: cardFadeIn 0.22s ease;
+}
+
+/* v0.103：配置说明页（只读） —— 浮在背景上，无 .glass-card 框。
+   内容来自 README.md 经前端小型 Markdown 渲染器转 HTML，要覆盖 标题 /
+   段落 / 列表 / 代码块 / 引用 / 链接 / 分隔线 全套元素。 */
+.config-page {
+  max-width: 760px;
+  margin: 8px auto 32px auto;
+  padding: 0 24px;
+}
+.config-page .cfg-help { line-height: 1.7; font-size: 13.5px; color: var(--text-primary); }
+/* —— 段落 —— */
+.config-page .cfg-help p { margin: 8px 0 10px 0; }
+/* —— 标题 —— 大档用浅左边线分组，避免靠字号硬区分 */
+.config-page .cfg-help h1 {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 18px 0 14px 0;
+  color: var(--text-primary);
+}
+.config-page .cfg-help h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 22px 0 8px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--border-soft, rgba(0,0,0,0.18));
+  color: var(--text-primary);
+}
+.config-page .cfg-help h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 18px 0 6px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-soft, rgba(0,0,0,0.12));
+  color: var(--text-primary);
+}
+.config-page .cfg-help h4,
+.config-page .cfg-help h5,
+.config-page .cfg-help h6 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 14px 0 6px 0;
+  color: var(--text-primary);
+}
+/* —— 行内 code / 围栏代码块 —— */
+.config-page .cfg-help code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-muted, rgba(0,0,0,0.05));
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.08));
+}
+.config-page .cfg-help pre {
+  margin: 10px 0 14px 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--surface-muted, rgba(0,0,0,0.04));
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.10));
+  overflow-x: auto;
+}
+.config-page .cfg-help pre code {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+/* —— 列表 —— */
+.config-page .cfg-help ul,
+.config-page .cfg-help ol {
+  margin: 6px 0 12px 0;
+  padding-left: 24px;
+}
+.config-page .cfg-help li { margin-bottom: 4px; }
+/* —— 引用 —— */
+.config-page .cfg-help blockquote {
+  margin: 10px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--border-soft, rgba(0,0,0,0.20));
+  background: var(--surface-muted, rgba(0,0,0,0.03));
+  color: var(--text-secondary, var(--text-primary));
+  font-style: italic;
+}
+.config-page .cfg-help blockquote p { margin: 4px 0; }
+/* —— 链接 —— */
+.config-page .cfg-help a {
+  color: var(--button-primary, #5b8def);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+.config-page .cfg-help a:hover { border-bottom-color: currentColor; }
+/* —— 分隔线 —— */
+.config-page .cfg-help hr {
+  border: none;
+  border-top: 1px solid var(--border-soft, rgba(0,0,0,0.10));
+  margin: 18px 0;
+}
+/* —— strong / em —— Markdown 里写了再加重，不强制 */
+.config-page .cfg-help strong { font-weight: 600; color: var(--text-primary); }
+.config-page .cfg-help em { font-style: italic; }
+
+/* =========================================================================
+   v0.110：配置页「使用中继」指南 —— 结构化卡片（.cfg-guide）。
+   复用 .config-page 容器（max-width 760 居中）。不再渲染 README.md。
+   ========================================================================= */
+.config-page .cfg-guide { display: flex; flex-direction: column; gap: 20px; }
+
+/* v0.112：**不再用背景块突出文字** —— 各段说明直接悬浮在底背景上。
+   段间靠标题层级 + 间距分隔，视觉干净；代码块（.cfg-code）与可点击
+   上游行（.cfg-upstream-row）保留浅底，因为它们是工具/交互元素而非正文。 */
+.config-page .cfg-guide-block {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+}
+
+.config-page .cfg-guide-h {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+  color: var(--text-primary);
+}
+.config-page .cfg-guide-p {
+  margin: 0 0 18px 0;
+  padding-left: 22px;
+  /* v0.152：段首空两格（中文文档习惯），配合 padding-left 整体位移 */
+  text-indent: 2em;
+  font-size: 22px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+.config-page .cfg-guide-p code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 20px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-muted, rgba(0,0,0,0.05));
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.08));
+}
+/* v0.152：正文里强调的术语（auto / 上游 url / api_key 等）—— 加粗 + accent
+   着色，等同 docx 原文里加粗的关键词，阅读时一眼定位「要填什么」。 */
+.config-page .cfg-guide-p strong {
+  font-weight: 700;
+  color: var(--accent, #f59e0b);
+}
+
+/* —— 可复制代码块 —— */
+.config-page .cfg-code {
+  margin: 10px 0 10px 22px;
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.12));
+  border-radius: 8px;
+  overflow: hidden;
+}
+.config-page .cfg-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--surface-muted, rgba(0,0,0,0.05));
+  border-bottom: 1px solid var(--border-soft, rgba(0,0,0,0.08));
+}
+.config-page .cfg-code-label {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.config-page .cfg-copy {
+  font-size: 18px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.14));
+  background: var(--surface, rgba(0,0,0,0.03));
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.config-page .cfg-copy:hover {
+  border-color: var(--accent, #f59e0b);
+  color: var(--text-primary);
+}
+.config-page .cfg-code pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-muted, rgba(0,0,0,0.03));
+  overflow-x: auto;
+}
+.config-page .cfg-code pre code {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1.55;
+}
+/* v0.154：示例代码里的「中继约定的特殊字符」高亮 —— 占位符 auto、
+   分隔符 @@ 等染金；浅色主题用琥珀金，深色主题用暖黄，靠白底色衬出来。 */
+.config-page .cfg-code pre code .cfg-hl {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.18);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+[data-theme="dark"] .config-page .cfg-code pre code .cfg-hl {
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.22);
+}
+
+/* —— v0.152：极简字段列表（KEY = value 一眼看清） —— */
+/* v0.152：客户端配置 —— 一段等宽代码行，纯文本风格（无框无行线）。
+   整块放 <pre>，CSS grid 按空格对齐让 `=` 竖线成列。不换行，超宽横向滚动。 */
+.config-page .cfg-fields {
+  margin: 6px 0 10px 0;
+  padding-left: 22px;
+  font-size: 24px;
+}
+.config-page .cfg-fields pre {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  line-height: 1.7;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--text-primary);
+}
+.config-page .cfg-fields pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+/* —— v0.152：两列表格（字段 | 值） —— */
+.config-page .cfg-table-wrap {
+  margin: 10px 0 10px 22px;
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.12));
+  border-radius: 8px;
+  overflow: hidden;
+}
+.config-page .cfg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 20px;
+}
+.config-page .cfg-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-soft, rgba(0,0,0,0.06));
+  line-height: 1.5;
+}
+.config-page .cfg-table tr:last-child td { border-bottom: none; }
+.config-page .cfg-table-k {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  width: 1%;
+}
+.config-page .cfg-table-v {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+/* —— v0.152：可折叠「高级 curl 例子」 —— */
+.config-page .cfg-adv-curl {
+  margin: 8px 0 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.config-page .cfg-adv-curl summary {
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+.config-page .cfg-adv-curl summary:hover {
+  color: var(--text-primary);
+}
+
+/* —— 已配置上游行（可点击切换） —— */
+.config-page .cfg-upstream-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  text-align: left;
+  padding: 7px 10px;
+  margin: 4px 0;
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.10));
+  border-radius: 6px;
+  background: var(--surface, rgba(0,0,0,0.02));
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+.config-page .cfg-upstream-row:hover {
+  border-color: var(--accent, #f59e0b);
+}
+.config-page .cfg-upstream-row-active {
+  border-color: var(--accent, #f59e0b);
+  background: var(--surface-muted, rgba(0,0,0,0.05));
+}
+.config-page .cfg-upstream-name { font-weight: 600; white-space: nowrap; }
+.config-page .cfg-upstream-url {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.config-page .cfg-upstream-models {
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+.config-page .cfg-active-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: rgba(34, 170, 34, 0.14);
+  border: 1px solid var(--text-success, rgba(34,170,34,0.5));
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+/* —— 当前 active 上游一览 —— */
+.config-page .cfg-active-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+.config-page .cfg-active-plat {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-muted, rgba(0,0,0,0.06));
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.10));
+  color: var(--text-secondary);
+}
+.config-page .cfg-active-name { font-weight: 600; color: var(--text-primary); }
+
+/* —— 快捷切换按钮组（复用 sidebar 的 .quick-switch-btn 样式） —— */
+.config-page .cfg-qs-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* —— 配置页空状态（未配置上游 / 无 active）—— 轻量居中提示，区别于
+   .stats-chart-host .card-empty 的 absolute 布局。 */
+.config-page .cfg-empty {
+  padding: 8px 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* —— 模式块标题（比 .cfg-guide-h 大一号区分两个模式） —— */
+.config-page .cfg-mode-title {
+  font-size: 30px;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.config-page .cfg-mode-tag {
+  font-size: 20px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.15));
+}
+
+/* —— 模式配置步骤（编号行） —— */
+.config-page .cfg-steps {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-primary);
+}
+.config-page .cfg-steps code {
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-muted, rgba(0,0,0,0.05));
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.08));
+}
+
+/* —— 高级折叠区（复杂内容收尾，无背景块 —— 只留顶部虚线分隔） —— */
+.config-page .cfg-adv {
+  margin-top: 8px;
+  border-top: 1px dashed var(--hairline);
+  padding-top: 8px;
+}
+.config-page .cfg-adv-summary {
+  cursor: pointer;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  list-style: none;
+  user-select: none;
+}
+.config-page .cfg-adv-summary::-webkit-details-marker { display: none; }
+.config-page .cfg-adv-summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--text-muted);
+  transition: transform .12s ease;
+}
+.config-page .cfg-adv[open] .cfg-adv-summary::before { transform: rotate(90deg); }
+.config-page .cfg-adv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 10px 2px 2px 22px;
+}
+
+/* ===========================================================================
+ * v0.186：总览卡片「自由模式」
+ * 让任意一张卡脱离 flex 流，用 X,Y 绝对像素定位，可以叠放到其它卡之上。
+ * 默认模式走 .view[data-view="overview"] > .grid 的 flex-wrap + 21
+ * 档 --ov-span。自由模式只是把单张卡切到 position:absolute；不影响其它
+ * 卡。重置回默认模式时清掉 inline top/left 即可。
+ *
+ * 关键约束（沿用 v0.185 教训）：
+ *  - `position: absolute !important` 必须加 !important：v0.185 实测 .view[
+ *    data-view="overview"] > .grid > .glass-card { flex: 0 0 auto } 会反压
+ *    同特异性的 position 规则，必须靠 !important 兜底。
+ *  - cursor 不能用 inherit：WebView2 在 body.x * { cursor: inherit !important }
+ *    下会让 body 自身 cursor 变 inherit → 退化成 auto。直接写 move 值。
+ *  - 拖动期间 body.card-dragging-free 上挂 cursor:move !important，跟
+ *    body.card-resizing-h/w/both 同一套模式。
+ * =========================================================================== */
+.view[data-view="overview"] > .grid > .glass-card.card-free-positioned {
+  position: absolute !important;
+  margin: 0 !important;
+  /* width 仍走 --ov-span calc() —— 自由模式保留列跨度，只是换定位方式 */
+}
+/* 自由模式拖动期间：禁过渡（避免 top/left 跳变）、禁 hover 上浮 */
+body.card-dragging-free .view[data-view="overview"] .glass-card.card-free-positioned,
+body.card-dragging-free .view[data-view="overview"] .glass-card.card-free-positioned .card-body {
+  transition: none;
+  user-select: none;
+}
+body.card-dragging-free .view[data-view="overview"] .glass-card.card-free-positioned:hover {
+  transform: none !important;
+}
+/* 自由模式：卡体非交互区暗示可拖（hover 显示 move 光标）。
+ * 不覆盖 .glass-card 自身的 grab —— 自由卡 hover 时整体可拖，光标 move
+ * 比 grab 更准确表达"移动这张卡"的意图。 */
+.view[data-view="overview"] .glass-card.card-free-positioned,
+.view[data-view="overview"] .glass-card.card-free-positioned .card-body {
+  cursor: move;
+}
+/* 拖动期间 cursor 强制 move（覆盖子元素 button/select 的默认 cursor）：
+ * 直接写具体值，不用 inherit —— 跟 v0.185 同源的 WebView2 cursor 陷阱。 */
+body.card-dragging-free,
+body.card-dragging-free .view[data-view="overview"] .glass-card.card-free-positioned,
+body.card-dragging-free .view[data-view="overview"] .glass-card.card-free-positioned * {
+  cursor: move !important;
+}
+
+/* v0.187：「管理卡片」弹层顶部的全局「布局模式」总开关（默认 / 自由
+ * 二选一），取代 v0.186.1 每行一个「📌 自由」按钮的逐卡开关。
+ *
+ * 视觉：左侧标签 + 右侧一组紧贴的二选一按钮（segmented control），
+ * 当前模式那个套 primary 背景。跟下面的卡片列表用一条 hairline 分隔，
+ * 让"全局设置"和"逐卡显隐"在视觉上分层。 */
+.layout-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 4px 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--card-border);
+}
+.layout-mode-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+/* 一组按钮紧贴成 segmented control：中间边框合并，只有外侧留圆角。 */
+.layout-mode-group {
+  display: flex;
+  flex: 0 0 auto;
+}
+.layout-mode-btn {
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 12px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.layout-mode-btn:first-child {
+  border-radius: 6px 0 0 6px;
+}
+.layout-mode-btn:last-child {
+  border-radius: 0 6px 6px 0;
+  /* 相邻边框合并 —— 不然两个 1px 边挨着看起来是 2px 粗 */
+  margin-left: -1px;
+}
+.layout-mode-btn:hover {
+  background: rgba(127, 127, 127, .12);
+}
+.layout-mode-btn.active {
+  background: var(--button-primary, var(--accent));
+  color: #fff;
+  border-color: transparent;
+  /* active 的那半盖在邻居的 -1px margin 之上，边框才不被切掉 */
+  position: relative;
+  z-index: 1;
+}
+.layout-mode-btn.active:hover {
+  /* active 态 hover 不变灰 —— 已经是 primary 背景 */
+  background: var(--button-primary, var(--accent));
+  filter: brightness(1.05);
+}

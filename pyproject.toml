@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relaymeter"
+version = "0.1.0"
+description = "RelayMeter — local relay that meters token usage and converts protocols across Claude Code, Codex, and OpenClaw"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "pydantic-settings>=2.5",
+    "aiosqlite>=0.20",
+    "textual>=0.50",
+    "pystray>=0.19",
+    "Pillow>=10",
+    "pywebview>=5.0",
+    "martian-linguafranca>=0.3.14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+relay = "relay.main:run"
+relay-dashboard = "relay.tui:run"
+relay-stats = "relay.cli:print_stats"
+relay-gui = "relay.gui:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# GUI 前端资产必须随 wheel 分发（gui.py 用 _WEB_DIR = __file__/web 经
+# file:// 加载）。开发残留（探针 / 孤儿 HTML）已迁出 src/relay/web/。
+relay = [
+    "web/*.html",
+    "web/*.js",
+    "web/*.css",
+    "web/vendor/*.js",
+    "web/cursors/*.png",
+    # v0.177 发布默认配置 seed：frozen exe / wheel 安装首启时从包内
+    # 复制到 %LOCALAPPDATA%\Relay\（仅 frozen 路径生效；源码运行跳过）。
+    # ⚠ 这两份文件**只**是发布标准的「设置页可控制开关」默认 + 账号字
+    # 段占位，不含真实 API key；用户须在首次启动前补全 upstreams.json
+    # 里的 url/api_key。
+    "packaging/relay.env.dist",
+    "packaging/relay.upstreams.dist.json",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+markers = [
+    "gui_smoke: opt-in headless Tk tests (run with `pytest -m gui_smoke`); skipped by default because multi-instance Tk init hits a conda Tcl quirk",
+]

@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RelayMeter</title>
+    <link rel="stylesheet" href="styles-20260817.css?v=20260827-03" />
+  </head>
+  <body>
+    <!-- v0.41 背景：删除 canvas + rAF 动效。回到 v0.22 之前的纯静态
+         CSS 背景，整张页面只画一次，不进 GPU 合成层重算。
+         WebView2 的 backdrop-filter:blur 即使降到 12px 仍会拖慢帧率。
+         毛玻璃卡片（9 张 + sidebar），所以这里同时把 .glass-card /
+         .sidebar 的 backdrop-filter 整个去掉，改用底色 + 描边。
+         v0.42：再加两块静态成块光晕，用 filter:blur 一次进合成层，
+         不进 rAF，跟"动效"完全脱钩，仅首帧 paint 时算一次。 -->
+    <div class="bg-glow bg-glow-1" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-2" aria-hidden="true"></div>
+    <!-- v0.112d 液态玻璃 SVG filter —— 苹果 Liquid Glass 方案。
+         v0.112e：改用 feTurbulence 程序化低频噪声做折射位移 —— 弃用
+         PNG 位移图/高光层（源图自带大圆斑/左上亮斑，位移后成鼓包+圆环）。
+         v0.112h：修正「玻璃下光晕分块渐变」—— 原 baseFrequency=0.014
+         波长 ~71px，比卡片/光晕渐变过渡还粗，位移 ±16px 把平滑渐变折叠成
+         几大块错位，saturate 1.5 再把色差放大 → 分块感。改：波长 ~25px
+         （宏观均匀细腻）、位移 ±8px、saturate 1.1（几乎不再放大色差）。
+         玻璃光泽由 CSS 渐变 + inset 高光承担；区域扩到 130% 防切边。 -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+      <defs>
+        <filter id="lg-glass" x="-15%" y="-15%" width="130%" height="130%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.04 0.04"
+            numOctaves="2" seed="7" result="flow" />
+          <feDisplacementMap in="SourceGraphic" in2="flow" scale="8"
+            xChannelSelector="R" yChannelSelector="G" result="displaced" />
+          <feColorMatrix in="displaced" type="saturate" values="1.1" />
+        </filter>
+      </defs>
+    </svg>
+    <div class="window-controls">
+      <button class="win-ctrl" id="btn-win-min" title="最小化" aria-label="最小化">
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="5" width="8" height="1" fill="currentColor"/></svg>
+      </button>
+      <button class="win-ctrl" id="btn-win-max" title="最大化" aria-label="最大化">
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <button class="win-ctrl win-ctrl-close" id="btn-win-close" title="关闭" aria-label="关闭">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5" stroke="currentColor" stroke-width="1" fill="none"/>
+        </svg>
+      </button>
+    </div>
+    <div id="app">
+      <aside class="sidebar">
+        <div class="logo">
+          <div class="logo-mark">TM</div>
+          <div class="logo-text">
+            <div class="logo-title">RelayMeter</div>
+            <div class="logo-subtitle">Token 计量中继</div>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <div class="nav-item active" data-view="overview">总览</div>
+          <div class="nav-item" data-view="live">实时</div>
+          <div class="nav-item" data-view="history">历史</div>
+          <div class="nav-item" data-view="upstreams">上游</div>
+          <div class="nav-item" data-view="stats">统计</div>
+          <div class="nav-item" data-view="settings">设置</div>
+          <!-- v0.103：配置页 —— 只读说明页，把 README / 上游池 / 协议
+               转换 / 透传模式 / quota 自动切换等核心概念集中展示。
+               渲染走 renderConfigPage()，内容写死在 app.js 里。 -->
+          <div class="nav-item" data-view="config">配置</div>
+          <!-- v0.11.17#12 设置页子菜单（仅设置视图时显示） -->
+          <div class="nav-sub" id="nav-settings-sub">
+            <div class="nav-sub-item" data-settings-sub="relay" data-i18n="中继状态">中继状态</div>
+            <div class="nav-sub-item" data-settings-sub="prefs" data-i18n="界面与偏好">界面与偏好</div>
+            <!-- v0.113n：存储管理 —— 空间占用 + 存储位置。 -->
+            <div class="nav-sub-item" data-settings-sub="storage" data-i18n="存储管理">存储管理</div>
+            <!-- v0.113o：报错分析 —— 小模型分类错误类型 + 给用户提示。 -->
+            <div class="nav-sub-item" data-settings-sub="error" data-i18n="报错分析">报错分析</div>
+            <div class="nav-sub-item" data-settings-sub="config" data-i18n="上游配置">上游配置</div>
+            <div class="nav-sub-item" data-settings-sub="quickswitch" data-i18n="快捷切换">快捷切换</div>
+          </div>
+        </nav>
+
+        <div class="sidebar-upstream" id="sidebar-upstream-list">
+          <div class="card-empty">加载上游配置…</div>
+        </div>
+
+        <!-- v0.69：sidebar "快捷切换"按钮组。
+             内容由 renderQuickSwitch() 从 snapshot.quick_switch 渲染，
+             没配时整个 div hidden，占位也省掉。 -->
+        <div class="sidebar-quick-switch" id="sidebar-quick-switch" hidden>
+          <div class="sidebar-quick-switch-label">快捷切换</div>
+          <div class="sidebar-quick-switch-list" id="sidebar-quick-switch-list"></div>
+        </div>
+
+        <div class="status-card">
+          <div class="status-card-row">
+            <span class="status-dot dot-stopped"></span>
+            <span class="status-text" id="sidebar-status-text">连接中…</span>
+          </div>
+          <div class="status-card-meta" id="sidebar-status-meta">等待首次轮询</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-status">
+            <span class="status-dot dot-stopped"></span>
+            <span id="status-label">加载中…</span>
+            <span id="status-meta" class="topbar-meta"></span>
+            <!-- v0.11.21：内外转换映射条（topbar 状态条内，紧凑）。
+                 开启后显示最新一对 对内模型 ↔ 对外模型 映射。 -->
+            <div class="topbar-io-map" id="topbar-io-map" hidden></div>
+          </div>
+          <div class="topbar-actions">
+            <button class="btn btn-primary" id="btn-toggle">启动</button>
+            <button class="btn" id="btn-restart">重启</button>
+            <!-- v0.11.21：内外转换显示开关（菜单栏）——状态与设置页
+                 用同一个后端开关同步，开启后 topbar 状态条右侧实时显示
+                 最新一对 对内/对外 模型映射。 -->
+            <button class="btn btn-ghost" id="btn-io-map" title="内外转换显示：开启后顶部状态栏显示 对内(客户端→中继)/对外(中继→上游) 模型映射" aria-pressed="false">内外转换</button>
+            <!-- v0.89 实时流侧栏开关（与设置页 prefs-live-panel 共用后端） -->
+            <button class="btn btn-ghost" id="btn-live-panel" title="实时流：右侧独立窗口，跟随主窗；显示 api-key 明文、入/出向 wire、token 用量、思考与正文流" aria-pressed="false">实时流</button>
+            <!-- v0.113y：关闭顶部调试栏 —— 隐藏整条顶栏（不只是状态条）；
+                 按钮自身也隐藏，「重新打开」走设置页开关。 -->
+            <button class="btn btn-ghost" id="btn-hide-status-bar" title="关闭顶部调试栏：隐藏整个顶栏（状态条 + 按钮行）；与「设置 → 启动开发者模式 → 隐藏顶部调试栏」功能一致" aria-pressed="false">关闭顶部调试栏</button>
+            <button class="btn btn-ghost" id="btn-theme">主题</button>
+            <button class="btn btn-ghost" id="btn-reload-gui" title="开发用：重新加载界面（读取磁盘上的最新代码）">刷新GUI</button>
+          </div>
+        </header>
+
+        <section class="hero">
+          <h1 class="hero-title">RelayMeter</h1>
+          <!-- v0.62：原来的 hero-pill（"中继正在运行中" 圆形胶囊）合并到顶栏
+               topbar 的 status-label。两条线显示同一信息，属于冗余。
+               v0.63：subtitle 一行删了，hero 只剩 HELLO + 主标题。
+               v0.101：去掉 HELLO 小标题，只留主标题 "中继"。 -->
+        </section>
+
+        <section class="view" data-view="overview">
+          <div class="top-model-spotlight glass-card" id="top-model-spotlight" hidden>
+            <div class="tms-header">
+              <div class="tms-eyebrow">用量最大的模型</div>
+              <div class="tms-name" id="tms-name" data-i18n-keep>—</div>
+              <div class="tms-meta">
+                <span class="tms-stat tms-stat-total"><span class="tms-stat-head"><span class="tms-stat-cn" id="tms-total-cn"></span><span class="tms-stat-label" id="tms-total-label">总计</span></span><span class="tms-stat-value"><span id="tms-total" title="点击切换：总计 / 用量最大模型" role="button" tabindex="0">—</span><span class="tms-stat-unit">tokens</span></span></span>
+                <span class="tms-stat tms-stat-total"><span class="tms-stat-label">请求数</span><span class="tms-stat-value"><span id="tms-requests">—</span><span class="tms-stat-unit">req</span></span></span>
+              </div>
+            </div>
+            <div class="tms-bar" id="tms-bar">
+              <div class="tms-bar-seg tms-seg-input"  id="tms-seg-input"  style="width:0%"></div>
+              <div class="tms-bar-seg tms-seg-output" id="tms-seg-output" style="width:0%"></div>
+              <div class="tms-bar-seg tms-seg-cache"  id="tms-seg-cache"  style="width:0%"></div>
+            </div>
+            <div class="tms-legend">
+              <span class="tms-legend-item"><span class="tms-swatch tms-seg-input"></span>输入 <span class="tms-legend-val" id="tms-input-val">—</span></span>
+              <span class="tms-legend-item"><span class="tms-swatch tms-seg-output"></span>输出 <span class="tms-legend-val" id="tms-output-val">—</span></span>
+              <span class="tms-legend-item"><span class="tms-swatch tms-seg-cache"></span>缓存 <span class="tms-legend-val" id="tms-cache-val">—</span></span>
+            </div>
+          </div>
+          <!-- v0.104：删除「数据显示」三极档位开关 —— 跟每张图表自带
+               的档位冲突，UI 上有多余控件，统一移除。档位逻辑仍保留
+               在 app.js (consume-mode / getConsumeMode / setConsumeMode)
+               以支持设置页内部使用，仅移除 overview 视图顶部的视觉控件。 -->
+          <div class="grid">
+            <!-- v0.59：重排顺序——chart (span 2) + 上游状态 (span 1)
+                 并排在第一行，4 张小卡片 (今日 / 平台 / 模型 / 最近活动)
+                 占下面两行。原顺序里 chart 单独放最底的全宽，浪费垂
+                 直空间。
+                 v0.60：每张卡 draggable=true —— JS 接口做拖拽重排，
+                 顺序存 localStorage。spotlight 不进 grid，单独留顶上。 -->
+            <div class="glass-card card-chart-row" data-card="hourly" draggable="true">
+              <div class="card-title">Token 消耗 · 近 24h</div>
+              <div class="card-body card-body-chart" id="card-hourly-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </div>
+            <div class="glass-card" data-card="upstream" draggable="true">
+              <div class="card-title">上游状态</div>
+              <div class="card-body" id="card-upstream-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </div>
+            <div class="glass-card" data-card="today" draggable="true">
+              <div class="card-title">今日用量</div>
+              <div class="card-body" id="card-today-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </div>
+            <div class="glass-card" data-card="platform" draggable="true">
+              <div class="card-title">协议分布</div>
+              <div class="card-body" id="card-platform-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </div>
+            <div class="glass-card" data-card="agent" draggable="true">
+              <div class="card-title">
+                <span>平台流量</span>
+                <span class="agent-view-toggle" data-agent-view-toggle="1">
+                  <button type="button" class="agent-view-btn" data-agent-view="chart">图</button>
+                  <button type="button" class="agent-view-btn" data-agent-view="list">列表</button>
+                </span>
+              </div>
+              <div class="card-body" id="card-agent-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </div>
+            <div class="glass-card" data-card="models" draggable="true">
+              <div class="card-title">模型分布</div>
+              <div class="card-body" id="card-models-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </div>
+            <div class="glass-card" data-card="recent" draggable="true">
+              <div class="card-title">最近活动</div>
+              <div class="card-body" id="card-recent-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </div>
+          </div>
+          <!-- v0.102：总览卡片管理入口 —— 右下角悬浮按钮，打开弹层
+               勾选/取消总览 6 张卡片的显隐。 -->
+          <button class="cards-manage-fab" id="btn-cards-manage" type="button">管理卡片</button>
+          <!-- v0.xxx：卡片尺寸详情面板 —— 点击卡体（非交互区）弹出，
+               显示当前高度 + 列跨度（1/2/3）快速切换。位置由 JS 按活动卡
+               对齐，初始 hidden。 -->
+          <div id="card-resize-panel" hidden>
+            <span class="card-resize-info">
+              高度 <span data-card-h>200px</span> · 列
+            </span>
+            <span data-card-span></span>
+            <button type="button" class="card-resize-close" data-card-resize-close="1" title="关闭">×</button>
+          </div>
+        </section>
+
+        <section class="view" data-view="live" hidden>
+          <div class="grid">
+            <div class="glass-card glass-card-wide" data-card="live">
+              <div class="card-eyebrow">实时</div>
+              <div class="card-title">正在进行的请求</div>
+              <div class="card-body card-body-list" id="card-live-body">
+                <div class="card-empty">暂无进行中的请求</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="history" hidden>
+          <div class="grid">
+            <div class="glass-card glass-card-wide" data-card="history">
+              <div class="card-eyebrow">历史</div>
+              <div class="card-title">最近</div>
+              <div class="card-body card-body-list" id="card-history-body">
+                <div class="card-empty">暂无记录</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="upstreams" hidden>
+          <!-- v0.XX 透传模式：配置型上游全部隐藏，显示提示占位（CSS 控制显隐） -->
+          <div class="pt-empty-note glass-card glass-card-wide" hidden>
+            <div class="card-eyebrow" data-i18n="上游">上游</div>
+            <div class="card-title" data-i18n="透传模式">透传模式</div>
+            <div class="card-body">
+              <div class="card-empty" data-i18n="透传模式不使用配置型上游；请在&quot;设置 → 透传模式&quot;查看自动发现的上游。">透传模式不使用配置型上游；请在"设置 → 透传模式"查看自动发现的上游。</div>
+            </div>
+          </div>
+          <div class="grid" id="view-upstreams-grid">
+            <div class="glass-card glass-card-wide" data-card="upstreams-detail">
+              <div class="card-eyebrow">上游</div>
+              <div class="card-title card-title-with-action">
+                <span>上游详情</span>
+                <!-- v0.46：新建上游入口按钮，点击打开 modal，提交后由
+                     api.createUpstream 写入 upstreams.json。 -->
+                <button class="btn btn-primary card-title-action js-open-create"
+                        id="btn-upstream-new" type="button">+ 新建</button>
+              </div>
+              <div class="card-body card-body-list" id="card-upstreams-detail-body">
+                <div class="card-empty">加载上游配置…</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- v0.99：统计页 —— 时间段聚合 / 每日趋势 / 配额利用率 / 对照表。
+             内容由后端 /api/stats/aggregate?range=&dim= 与 /api/stats/daily 提供，
+             前端从 snapshot.stats 读取（或首次进入时主动拉一次）。 -->
+        <section class="view" data-view="stats" hidden>
+          <div class="stats-toolbar">
+            <div class="stats-toolbar-label">时间段</div>
+            <div class="stats-toolbar-range" id="stats-range-group">
+              <button class="btn btn-ghost stats-range-btn" data-range="1d" type="button">近 24h</button>
+              <button class="btn btn-ghost stats-range-btn" data-range="7d" type="button">近 7 天</button>
+              <button class="btn btn-ghost stats-range-btn active" data-range="30d" type="button">近 30 天</button>
+            </div>
+            <div class="stats-toolbar-label" style="margin-left:12px">维度</div>
+            <div class="stats-dim-group" id="stats-dim-group">
+              <button class="btn btn-ghost stats-dim-btn active" data-dim="upstream" type="button">按上游</button>
+              <button class="btn btn-ghost stats-dim-btn" data-dim="model" type="button">按模型</button>
+            </div>
+            <div class="stats-toolbar-label" style="margin-left:12px">模式</div>
+            <div class="stats-mode-group" id="stats-mode-group">
+              <button class="btn btn-ghost stats-mode-btn" data-mode="passthrough" type="button">仅透传</button>
+              <button class="btn btn-ghost stats-mode-btn" data-mode="all" type="button">全部</button>
+              <button class="btn btn-ghost stats-mode-btn active" data-mode="relay" type="button">仅转换</button>
+            </div>
+            <div class="stats-toolbar-hint" id="stats-range-hint">—</div>
+          </div>
+          <!--
+            v0.100.1 统计页 · 8 张 D3 + 原生 SVG 高级图。
+            布局：2 行 4 列 grid，单卡 span 1 / span 2 / span 4 自适应。
+            每张图卡内有 .stats-chart-svg，D3 在此挂 <svg>。
+          -->
+          <div class="grid stats-grid">
+            <!-- v0.100.2：2 张图 —— treemap（按 dim 拆）+ pie（按 dim 拆）
+                 v0.120a：删掉两个 card-title（"Token 消耗树状图" / "今日 token
+                 消耗饼图"），只留图本身，减少视觉噪音。 -->
+            <div class="glass-card glass-card-wide" data-card="stats-treemap">
+              <div class="card-body stats-chart-host" id="stats-host-treemap">
+                <div class="card-empty">暂无数据</div>
+              </div>
+            </div>
+            <div class="glass-card" data-card="stats-pie">
+              <div class="card-body stats-chart-host" id="stats-host-pie">
+                <div class="card-empty">暂无数据</div>
+              </div>
+            </div>
+            <!-- v0.155：30天按平台流量 —— 独立于 dim/range 选择器的固定
+                 agent 聚合块，数据由 renderStatsAgent() 拉 relay 库 agent
+                 维度 30d 并复用 renderPie 渲染。 -->
+            <div class="glass-card" data-card="stats-agent">
+              <div class="card-title">30天按平台流量</div>
+              <div class="card-body stats-chart-host" id="stats-host-agent">
+                <div class="card-empty">暂无数据</div>
+              </div>
+            </div>
+            <!-- v0.153：单模型 30 天调用分布 —— 模型按钮条（「全部 / 各
+                 模型」）+ 选中模型 30 天按日柱状图 + 模型下拉。 -->
+            <div class="glass-card glass-card-wide" data-card="stats-model-daily">
+              <div class="stats-md-bar">
+                <div class="stats-md-bar-label">单模型 30 天调用分布</div>
+                <div class="stats-md-bar-chips" id="stats-md-chips"></div>
+                <select class="stats-md-select" id="stats-md-select" aria-label="选择模型"></select>
+              </div>
+              <div class="card-body stats-chart-host" id="stats-host-model-daily">
+                <div class="card-empty">暂无数据</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="settings" hidden>
+          <!-- v0.11.8：设置页一体化 —— 去掉大块 glass-card 白卡片、白块堆，
+               一张连续的外观设置列表，节与节之间用细分割线，像成品 app
+               的设置页。body 的 id 不变，JS 渲染逻辑零改动。 -->
+          <div class="settings-view">
+            <!-- v0.102.2：中继模式（双极按钮）section，置于最顶。 -->
+            <section class="settings-section" data-card="settings-relay-mode">
+              <div class="card-body" id="card-settings-relay-mode-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+            <!-- v0.112f：删除「数据显示」死 section —— 无渲染函数填充，
+                 永远停在「加载中…」。透传数据口径改由中继模式 section 的
+                 三极开关 + 统计页工具栏承担。 -->
+            <section class="settings-section" data-card="settings-passthrough-upstreams">
+              <div class="settings-section-title">透传上游（自动发现）</div>
+              <div class="settings-section-subtitle">透传模式开启后，客户端请求自动发现的上游。可重命名，不可删除。</div>
+              <div class="card-body card-body-list" id="card-settings-pt-upstreams-body">
+                <div class="card-empty">暂无</div>
+              </div>
+            </section>
+            <section class="settings-section" data-card="settings-relay">
+              <div class="settings-section-title">中继状态</div>
+              <div class="card-body" id="card-settings-relay-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+            <!-- v0.11.3：界面与偏好 —— 默认主题 / 开机自启 /
+                 自动切换 API（含允许池）/ 主题 / 释放闪烁。
+                 值存两处：主题 + 自动切换走后端（.env / 注册表）；
+                 闪烁类前端偏好走 localStorage。
+                 v0.11.17#4 "新建上游"移到上游配置列表下面。 -->
+            <section class="settings-section" data-card="settings-prefs">
+              <div class="settings-section-title settings-section-title-row">
+                <span>界面与偏好</span>
+              </div>
+              <div class="card-body card-body-list" id="card-settings-prefs-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+            <!-- v0.113n + v0.113p：存储管理 —— v0.113p 重排成逐存储卡片：
+                 每个存储一张卡（名称/路径/占用/就地操作按钮：清理/压缩/修改位置），
+                 upstreams.json 只读展示。渲染走 renderSettingsStorage()（app.js），
+                 写操作走 relay HTTP（cleanup/vacuum 按 target 只作用于当前库）。 -->
+            <section class="settings-section" data-card="settings-storage">
+              <div class="settings-section-title">存储管理</div>
+              <div class="card-body card-body-list" id="card-settings-storage-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+            <!-- v0.113o：报错分析 —— 开关 + 分析模型 + 测试。GUI 进程把
+                 relay.db 里新出现的请求错误发给所选小模型分类（余额不足 /
+                 网络错误 / 达到次数限制），结果在主窗右上角渲染成提示 toast。
+                 渲染走 renderSettingsError()（app.js），配置存 upstreams.json
+                 顶层 error_analysis。 -->
+            <section class="settings-section" data-card="settings-error">
+              <div class="settings-section-title">报错分析</div>
+              <div class="card-body card-body-list" id="card-settings-error-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+            <!-- v0.188：支持图片的模型（v0.190 移到开发者模式组内 —— 与
+                 自动切换 API / 高级切换（实验）同级，作为开发者模式子项）。
+                 渲染走 renderSettingsVision()（app.js），配置存 upstreams.json
+                 顶层 vision_models；HTML 主体在开发者模式组里（prefs 视图）。 -->
+            <!-- v0.102.2：透传模式 section 已移到设置页顶部，此处不再重复。 -->
+            <section class="settings-section" data-card="settings-config">
+              <div class="settings-section-title">上游配置</div>
+              <div class="card-body card-body-list" id="card-settings-config-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+              <div class="settings-config-footer">
+                <button class="btn btn-primary js-open-create"
+                        id="btn-upstream-new-settings" type="button">+ 新建上游</button>
+              </div>
+            </section>
+            <!-- v0.70：在 Settings 页里管理 sidebar "快捷切换"按钮组。
+                 内容由 renderSettingsQuickSwitch() 从 snapshot.quick_switch
+                 渲染,支持新增 / 编辑 / 删除,通过 api.saveQuickSwitch 写回
+                 upstreams.json 顶层 quick_switch 数组。 -->
+            <section class="settings-section" data-card="settings-quickswitch">
+              <div class="settings-section-title">快捷切换</div>
+              <div class="settings-section-subtitle">选中的模型可在左下角快速切换为预设</div>
+              <div class="card-body card-body-list" id="card-settings-quickswitch-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+            <!-- v0.155：平台别名 —— 把识别出的客户端工具名（claude-code /
+                 opencode / codex / 其它…）改成自定义显示名。纯展示层映射，
+                 原始名落库不变。内容由 renderSettingsAgentAlias() 渲染。 -->
+            <section class="settings-section" data-card="settings-agentalias">
+              <div class="settings-section-title">平台别名</div>
+              <div class="settings-section-subtitle">为识别出的客户端工具设置显示名称（如「其它」→「自研客户端」）</div>
+              <div class="card-body card-body-list" id="card-settings-agentalias-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+            <!-- v0.157：UA 归类 —— 把真实出现过的 User-Agent 整串归到一个
+                 平台名（新建或并入已有）。规则存 upstreams.json 顶层 ua_rules，
+                 中继进程在请求入口消费（精确命中即落库该平台名）。留空 = 删除。
+                 内容由 renderSettingsUaRules() 渲染。 -->
+            <section class="settings-section" data-card="settings-uarules">
+              <div class="settings-section-title">UA 归类</div>
+              <div class="settings-section-subtitle">把某个 User-Agent 整串归到一个平台（如把 Bun/1.3.14 归为「脚本」）。日后同一种头 UA 都算这个平台。</div>
+              <div class="card-body card-body-list" id="card-settings-uarules-body">
+                <div class="card-empty">加载中…</div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <!-- v0.103：配置说明页（只读，浮在背景上，无 .glass-card 框）。
+             内容由 app.js 的 renderConfigPage() 静态生成 —— 无后端拉取、
+             无表单、不写状态。目的是把"中继怎么配 / 怎么用"集中到 GUI 里，
+             不必切到 README.md。 -->
+        <section class="view" data-view="config" hidden>
+          <div class="config-page" data-card="config-page">
+            <div class="card-body" id="card-config-body">
+              <div class="card-empty">加载中…</div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+<script src="vendor/d3.v7.min.js"></script>
+<script src="vendor/chart.umd.min.js"></script>
+<script src="app.js?v=20260827-01"></script>
+
+    <!-- v0.36 请求详情 modal：点击历史页/最近活动行 显示完整对话。
+         居中卡片 + 半透明遮罩；ESC / 点遮罩 / 点 X 都关闭。
+         内容由 JS 动态填充（#modal-header / #modal-body）。 -->
+    <div class="modal-overlay" id="modal-overlay" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <button class="modal-close" id="modal-close" aria-label="关闭" type="button">×</button>
+        <div class="modal-header" id="modal-header">
+          <div class="modal-title" id="modal-title">请求详情</div>
+        </div>
+        <div class="modal-body" id="modal-body"></div>
+      </div>
+    </div>
+
+    <!-- v0.102：总览卡片管理弹层 —— 勾选控制总览页 6 张卡片的显隐，
+         关闭按钮/遮罩点击/ESC 均关闭。 -->
+    <div class="modal-overlay" id="cards-manage-overlay" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cards-manage-title">
+        <button class="modal-close" id="cards-manage-close" aria-label="关闭" type="button">×</button>
+        <div class="modal-header">
+          <div class="modal-title" id="cards-manage-title">管理卡片</div>
+        </div>
+        <div class="modal-body" id="cards-manage-body"></div>
+      </div>
+    </div>
+
+    <!-- v0.46：新建上游表单 modal。
+         字段顺序按用户要求：platform / name / url / api /
+         allowed_models / model_multipliers / quota_5h / quota_week /
+         quota_month / note。提交由 wireUpstreamCreate() 处理。 -->
+    <div class="modal-overlay modal-overlay-create" id="create-overlay" hidden>
+      <div class="modal-card modal-card-create" role="dialog"
+           aria-modal="true" aria-labelledby="create-title">
+        <button class="modal-close" id="create-close"
+                aria-label="关闭" type="button">×</button>
+        <div class="modal-header">
+          <div class="modal-title" id="create-title">新建上游</div>
+        </div>
+        <div class="modal-body create-body">
+          <form class="create-form" id="create-form" autocomplete="off">
+
+            <!-- v0.79：预设配置 —— 选 OpenCode Go / Zen 预设后自动填
+                 url/协议/鉴权/计费/适配器，用户只需输入名称 + API Key。
+                 见 docs/opencode-zen-upstreams.md（实测端点/计费语义）。 -->
+            <div class="cfg-field">
+              <label class="cfg-label" for="create-preset">
+                预设配置
+                <span class="cfg-hint">选预设后只需填名称和 API Key，其余自动配好</span>
+              </label>
+              <select class="cfg-input" id="create-preset" style="width:100%">
+                <!-- v0.154：全部预设（自定义 + 5 个供应商预设）从下拉里隐藏 ——
+                     用户从预设开始反而绕远；所有字段由用户自行填写更直观。
+                     value="" 仍保留作为 JS 哨兵（change 监听用 `!p` 跳过
+                     模板填充；reset 分支显式写回 ""），hidden 让列表点开是
+                     空白。UPSTREAM_PRESETS / applyPreset 代码不动 —— 暂时
+                     下线不删，便于日后恢复。 -->
+                <option value="" hidden selected></option>
+                <option value="deepseek" hidden>DeepSeek 官方（Anthropic 协议）</option>
+                <option value="opencode-go" hidden>OpenCode Go 订阅（Anthropic 协议）</option>
+                <option value="opencode-zen" hidden>OpenCode Zen 按量付费（OpenAI 协议）</option>
+                <option value="opencode-zen-free" hidden>OpenCode Zen 免费模型（OpenAI 协议）</option>
+                <option value="huoshan" hidden>HuoShan Agent Plan（Anthropic 协议）</option>
+              </select>
+            </div>
+
+            <!-- v0.98.2：HuoShan / opencode-zen-free 预设的模型选择 ——
+                 由 app.js 按预设动态填充（火山无 /models 接口，模型列表
+                 由用户确认；zen 免费模型必须带 *-free 后缀）。选中后自动
+                 填名称（按预设前缀）+ 允许列表。 -->
+            <div class="cfg-field" id="create-preset-model-field" style="display:none">
+              <label class="cfg-label" for="create-preset-model">
+                模型
+                <span class="cfg-hint">自动填名称与允许列表</span>
+              </label>
+              <select class="cfg-input" id="create-preset-model" style="width:100%">
+                <option value="" selected>— 请选择模型 —</option>
+              </select>
+            </div>
+
+            <!-- v0.12：单池单 active —— 协议（上游协议）三选一按钮，不选=自动。 -->
+            <div class="cfg-field">
+              <label class="cfg-label">
+                协议
+                <span class="cfg-hint">上游说的协议；不选 = 自动跟随客户端入口</span>
+              </label>
+              <div class="wire-btns" id="create-wire-btns">
+                <button type="button" class="wire-btn" data-wire="anthropic-messages">Anthropic</button>
+                <!-- v0.194：协议按钮组中间加竖线，把 Anthropic 与 OpenAI 两族
+                     协议在视觉上隔开（点击行为不变，纯装饰分隔）。 -->
+                <div class="wire-btns-sep" aria-hidden="true"></div>
+                <button type="button" class="wire-btn" data-wire="openai-chat">OpenAI Chat</button>
+                <button type="button" class="wire-btn" data-wire="openai-responses">OpenAI Responses</button>
+              </div>
+              <input type="hidden" id="create-wire" value="" />
+            </div>
+
+            <!-- v0.12.1：鉴权头三选一，不选 = 跟随协议默认。转写路径、
+                 直通路径都按这个配置发上游（用户配置说了算）。 -->
+            <div class="cfg-field">
+              <label class="cfg-label">
+                鉴权头
+                <span class="cfg-hint">发给上游的认证格式；不选 = 跟随协议默认（Anthropic → x-api-key，OpenAI → Bearer）</span>
+              </label>
+              <div class="wire-btns" id="create-auth-btns">
+                <button type="button" class="wire-btn" data-auth="bearer">Bearer</button>
+                <button type="button" class="wire-btn" data-auth="x-api-key">x-api-key</button>
+                <button type="button" class="wire-btn" data-auth="none">无鉴权</button>
+              </div>
+              <input type="hidden" id="create-auth-style" value="" />
+            </div>
+
+            <div class="cfg-field">
+              <label class="cfg-label" for="create-name">
+                名称 <span class="cfg-req">*</span>
+                <span class="cfg-hint">唯一，且不能叫 "active"</span>
+              </label>
+              <input class="cfg-input" id="create-name" type="text"
+                     placeholder="如 default-anthropic" required />
+            </div>
+
+            <div class="cfg-field">
+              <label class="cfg-label" for="create-url">
+                URL <span class="cfg-req">*</span>
+                <span class="cfg-hint">上游 API endpoint</span>
+              </label>
+              <input class="cfg-input" id="create-url" type="text"
+                     placeholder="https://api.example.com/v1" required />
+            </div>
+
+            <div class="cfg-field">
+              <label class="cfg-label" for="create-api">
+                API Key
+                <span class="cfg-hint">明文保存到 upstreams.json，留空跳过</span>
+              </label>
+              <input class="cfg-input" id="create-api" type="password"
+                     placeholder="sk-…" />
+            </div>
+
+            <div class="cfg-field">
+              <label class="cfg-label">
+                允许的模型
+                <span class="cfg-hint">留空 = 不限制。回车添加</span>
+              </label>
+              <div class="cfg-chips" id="create-chips">
+                <input class="cfg-chip-input" id="create-chip-input"
+                       type="text" placeholder="输入模型名后回车" />
+              </div>
+            </div>
+
+            <!-- v0.12：计费/倍率/限额/协议适配折叠进"高级功能"，点击展开。 -->
+            <details class="cfg-advanced" id="create-advanced">
+              <summary class="cfg-advanced-summary">高级功能（计费 / 倍率 / 限额 / 协议适配）</summary>
+              <div class="cfg-advanced-body">
+
+                <div class="cfg-field">
+                  <label class="cfg-label">计费模式</label>
+                  <select class="cfg-input" id="create-billing-unit" style="width:100%">
+                    <option value="count" selected>按次数计费</option>
+                    <option value="token">按 Token 计费</option>
+                  </select>
+                </div>
+
+                <div class="cfg-field cfg-token-fields-create" style="display:none">
+                  <label class="cfg-label">Token 计费字段</label>
+                  <div class="cfg-token-checkboxes">
+                    <label class="cfg-checkbox-label">
+                      <input type="checkbox" id="create-tf-input" data-field="input_tokens" checked /> input_tokens（输入）
+                    </label>
+                    <label class="cfg-checkbox-label">
+                      <input type="checkbox" id="create-tf-output" data-field="output_tokens" checked /> output_tokens（输出）
+                    </label>
+                    <label class="cfg-checkbox-label">
+                      <input type="checkbox" id="create-tf-cr" data-field="cache_read_input_tokens" /> cache_read_input_tokens（缓存命中读取）
+                    </label>
+                    <label class="cfg-checkbox-label">
+                      <input type="checkbox" id="create-tf-cc" data-field="cache_creation_input_tokens" /> cache_creation_input_tokens（缓存写入）
+                    </label>
+                  </div>
+                </div>
+
+                <div class="cfg-field">
+                  <label class="cfg-label">
+                    模型倍率
+                    <span class="cfg-hint">未列出的模型按 1× 计</span>
+                  </label>
+                  <div class="cfg-multipliers" id="create-multipliers"></div>
+                  <button class="btn btn-ghost" id="create-add-mult"
+                          type="button">+ 添加倍率</button>
+                </div>
+
+                <div class="cfg-field-grid">
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="create-quota-5h">
+                      5h 限额
+                      <span class="cfg-hint">留空 = 不限制</span>
+                    </label>
+                    <input class="cfg-input" id="create-quota-5h"
+                           type="number" min="0" step="1" placeholder="1500" />
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="create-quota-week">
+                      周限额
+                      <span class="cfg-hint">留空 = 不限制</span>
+                    </label>
+                    <input class="cfg-input" id="create-quota-week"
+                           type="number" min="0" step="1" placeholder="8000" />
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="create-quota-month">
+                      月限额
+                      <span class="cfg-hint">留空 = 不限制</span>
+                    </label>
+                    <input class="cfg-input" id="create-quota-month"
+                           type="number" min="0" step="1" placeholder="30000" />
+                  </div>
+                </div>
+
+                <div class="cfg-field">
+                  <label class="cfg-checkbox-label" style="align-items:flex-start;gap:8px">
+                    <input type="checkbox" id="create-adapter" />
+                    <span>
+                      OpenCode Go 协议适配
+                      <span class="cfg-hint">仅 opencode-go 用：自动换 x-api-key、模型小写、剥 thinking</span>
+                    </span>
+                  </label>
+                </div>
+
+              </div>
+            </details>
+
+            <div class="cfg-field">
+              <label class="cfg-label" for="create-note">
+                备注
+                <span class="cfg-hint">可选，会显示在上游详情卡片底部</span>
+              </label>
+              <input class="cfg-input" id="create-note" type="text"
+                     placeholder="如：日常账号 / 测试用" />
+            </div>
+
+            <div class="cfg-actions create-actions">
+              <button class="btn" id="create-test" type="button">测试</button>
+              <button class="btn" id="create-connectivity-test" type="button">连通性测试</button>
+              <button class="btn" id="create-cancel" type="button">取消</button>
+              <button class="btn btn-primary" id="create-submit" type="submit">创建</button>
+              <span class="cfg-status" id="create-status"></span>
+            </div>
+
+            <!-- v0.12.1：测试日志面板 —— 点"测试"后展开，Python 后台
+                 线程经 evaluate_js 实时逐行打印。 -->
+            <div class="create-test-log" id="create-test-log" hidden>
+              <div class="create-test-log-head">
+                <span>测试日志</span>
+                <button type="button" class="create-test-log-clear"
+                        id="create-test-log-clear">清空</button>
+              </div>
+              <pre class="create-test-log-body" id="create-test-log-body"></pre>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- v0.68：点击上游状态卡片某一行 → 弹出按模型拆分的调用详情，
+         取代原来跳转设置页的行为。内容由 openUpstreamModels() 从
+         snapshot.by_upstream_model 同步渲染,不需要 bridge round-trip。 -->
+    <div class="modal-overlay" id="upstream-models-overlay" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true"
+           aria-labelledby="upstream-models-title">
+        <button class="modal-close" id="upstream-models-close"
+                aria-label="关闭" type="button">×</button>
+        <div class="modal-header">
+          <div class="modal-title" id="upstream-models-title">按模型拆分详情</div>
+        </div>
+        <div class="modal-body" id="upstream-models-body"></div>
+      </div>
+    </div>
+
+    <!-- v0.70：快捷切换新建/编辑共用 modal。
+         内容由 openQuickSwitchEditor() 动态组装 4 字段表单 (label /
+         platform / upstream / model),保存走 api.saveQuickSwitch。 -->
+    <div class="modal-overlay" id="qs-editor-overlay" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true"
+           aria-labelledby="qs-editor-title">
+        <button class="modal-close" id="qs-editor-close"
+                aria-label="关闭" type="button">×</button>
+        <div class="modal-header">
+          <div class="modal-title" id="qs-editor-title">快捷切换编辑器</div>
+        </div>
+        <div class="modal-body" id="qs-editor-body"></div>
+      </div>
+    </div>
+
+  </body>
+</html>

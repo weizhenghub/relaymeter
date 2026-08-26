@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "Hand-edit this file to add APIs / nodes, then restart the relay.",
+    "Copy to upstreams.json (gitignored, holds your real keys).",
+    "This file WINS over ANTHROPIC_UPSTREAMS / OPENAI_UPSTREAMS in .env.",
+    "Flat pool format (v0.12): 'active' is a single name; all upstreams",
+    "share one pool regardless of which entry (/anthropic or /openai) the",
+    "traffic arrives on. Old per-platform layout auto-migrates on load.",
+    "",
+    "Per-upstream keys:",
+    "  name  (required, unique), url (required),",
+    "  api_key (optional - relay substitutes it into the auth header),",
+    "  auth_header (legacy; auth_style wins in v0.12+),",
+    "  wire (optional - anthropic-messages | openai-chat | openai-responses,",
+    "        auto-derived from url if omitted; drives cross-wire conversion),",
+    "  endpoint (optional - explicit path for cross-wire),",
+    "  auth_style (optional - bearer | x-api-key; wins over auth_header),",
+    "  model / default_model / allowed_models (optional - model forcing/whitelist),",
+    "  requires_anthropic_adapter (optional - true for dual-protocol gateways,",
+    "        e.g. OpenCode Go: lowercase model + strip thinking + x-api-key),",
+    "  thinking_options / token_fields / billing_unit (optional - GUI/accounting),",
+    "  quota_5h / quota_week / quota_month / model_multipliers (optional - quotas),",
+    "  note (optional - free text shown in the GUI).",
+    "'active' picks which one is used; the GUI writes it back here on switch."
+  ],
+  "active": "official",
+  "upstreams": [
+    {
+      "name": "official",
+      "url": "https://api.anthropic.com",
+      "note": "官方直连，用客户端自带的 key"
+    },
+    {
+      "name": "minimax",
+      "url": "https://minnimax.chat",
+      "api_key": "sk-replace-me",
+      "auth_style": "x-api-key",
+      "wire": "anthropic-messages",
+      "note": "中转节点（anthropic 协议）"
+    },
+    {
+      "name": "minimax-openai",
+      "url": "https://minnimax.chat",
+      "api_key": "Bearer sk-replace-me",
+      "auth_style": "bearer",
+      "wire": "openai-chat",
+      "note": "同一中转的 OpenAI 协议段"
+    },
+    {
+      "name": "go-flash",
+      "url": "https://opencode.ai/zen/go/v1",
+      "api_key": "sk-replace-me",
+      "requires_anthropic_adapter": true,
+      "wire": "anthropic-messages",
+      "allowed_models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+      "note": "OpenCode Go 订阅（Anthropic 协议）"
+    }
+  ]
+}

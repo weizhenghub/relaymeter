@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / dist
+build/
+dist/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project-specific: keep DB out of git (recreated on first run)
+relay.db
+relay.db-*
+relay-gui.log
+relay_trace.log
+.env
+.env.local
+
+# Holds real API keys (seeded from .env on first server start)
+upstreams.json
+upstreams.json.tmp
+
+# Allow the templates
+!.env.example
+!upstreams.example.json
+# Relay runtime
+.relay-logs/
+scratch/

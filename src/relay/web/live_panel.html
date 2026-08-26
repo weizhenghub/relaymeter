@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>实时流</title>
+    <!-- v0.170：启动白屏修复 —— URL #theme=<当前主题>（用 hash fragment 而非
+         ?query：顶层 file:// 导航带 ?query 会被 WebView2 当文件路径 →
+         ERR_FILE_NOT_FOUND 整页白屏）。头部同步脚本在首帧渲染前把
+         <html data-theme> 设成正确主题。否则静态默认 light 会让深色主题的
+         侧栏先白（--root-bg #f5f5f7）到 _on_panel_loaded 的异步 setTheme
+         才转黑。同步脚本先于 <link>，data-theme 先于 CSSOM 生效。 -->
+    <script>
+      try {
+        var m = location.hash.match(/[#&]theme=([^&]+)/);
+        if (m) document.documentElement.setAttribute("data-theme", decodeURIComponent(m[1]));
+      } catch (e) {}
+    </script>
+    <!-- v0.89 复用主窗 styles-20260817.css，所有主题色都是 CSS 变量
+         （[data-theme="light"|"day"|"dark"]），setTheme 切一次属性即
+         可生效，不需要新写一份 CSS。 -->
+    <link rel="stylesheet" href="styles-20260817.css?v=20260824-05" />
+    <link rel="stylesheet" href="live_panel.css?v=20260823-59" />
+  </head>
+  <body class="live-panel-body">
+    <!-- v0.95 收尾：与主窗同款背景光晕 —— 复用 styles-20260817.css 的
+         .bg-glow（fixed + z-index:-1 模糊圆块，body transparent 后透出）。 -->
+    <div class="bg-glow bg-glow-1" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-2" aria-hidden="true"></div>
+    <!-- v0.130：frameless 自绘顶栏 —— X 固定窗口右上角。单窗口宽随列数
+         变化，顶栏留 32px 不压容器。v0.183：顶栏同时是 Electron 拖拽区
+         （panelDrag mousedown/mouseup → 主进程 drag-start/drag-end 轮询
+         光标跟手，替代 pywebview easy_drag）。 -->
+    <div class="window-controls" id="panel-drag-region">
+      <button class="win-ctrl win-ctrl-close" id="panel-btn-close" title="关闭" aria-label="关闭">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5" stroke="currentColor" stroke-width="1" fill="none"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- v0.130：列行容器 —— .live-panel-main 由「单列」改「列行」。JS 按
+         内容建 .lp-col 列（宽度 = panel_width 400px），每列纵排容器。
+         静态元素：endpoint（col1 顶）、#lp-tools-wrap（全局工具容器，layout
+         时拼到最后一个容器后面，无 tool 调用时整卡隐藏）。per-rid 容器
+         （thinkstream / puretext）由 live_panel.js 动态创建。 -->
+    <div class="live-panel-main">
+      <div class="lp-col" id="lp-col-1">
+        <!-- v0.132：端点数据容器 —— 顶部全局（最新活跃 rid 的上游 + phase 徽标），
+             中间并发请求列表（每个请求一行：平台·模型 + phase + 入出向，JS 渲染
+             renderEpList），底部 api-key（同一 endpoint 全局）。列表超高滚动。 -->
+        <section class="live-panel-endpoint">
+          <div class="live-panel-endpoint-row">
+            <span class="live-panel-endpoint-upstream" id="lp-upstream">—</span>
+            <span class="live-panel-badge" id="lp-badge" data-phase="idle">空闲</span>
+          </div>
+          <div class="lp-ep-list" id="lp-ep-list"></div>
+          <div class="live-panel-row live-panel-row-key">
+            <span class="live-panel-label">api-key</span>
+            <code class="live-panel-key" id="lp-key">（明文待加载）</code>
+          </div>
+        </section>
+
+        <!-- v0.130：全局工具容器 —— 无论哪个请求的调用，随时按到达序拼在
+             最后一个 rid 容器后面（JS applyTools 追加，cap 30 条 + 20vh 滚动）。
+             没有工具调用时不占位、整卡隐藏（JS layout 按 tool 条数切 display）。
+             v0.124 纯正文容器 / v0.127 带思考流容器不再是静态 HTML —— 由
+             live_panel.js 按 rid 流类型动态创建（模板在 JS 里，见 buildContainer）。 -->
+        <details class="live-panel-card live-panel-details" id="lp-tools-wrap">
+          <summary class="live-panel-summary">工具调用 <span class="live-panel-count" id="lp-tools-count"></span></summary>
+          <div id="lp-tools"></div>
+        </details>
+      </div>
+    </div>
+
+    <script>
+      // ---- Electron 拖拽接线（v0.183）----
+      // 顶栏拖拽区 mousedown -> panelDrag.start()，document mouseup -> end()。
+      // 主进程 panel_main.js 轮询光标跟手，只有用户拖动才发 moved 事件。
+      // 非 Electron 环境（pywebview）下 window.panelDrag 不存在 → 静默 no-op。
+      window.panelDrag = window.panelDrag || { start: function () {}, end: function () {} };
+      (function () {
+        var region = document.getElementById("panel-drag-region");
+        if (!region) return;
+        var dragging = false;
+        region.addEventListener("mousedown", function (e) {
+          if (e.target && e.target.id === "panel-btn-close") return; // X 按钮不触发拖拽
+          dragging = true;
+          window.panelDrag.start();
+        });
+        document.addEventListener("mouseup", function () {
+          if (!dragging) return;
+          dragging = false;
+          window.panelDrag.end();
+        });
+        document.addEventListener("mouseleave", function () {
+          if (!dragging) return;
+          dragging = false;
+          window.panelDrag.end();
+        });
+      })();
+    </script>
+    <script src="live_panel.js?v=20260825-01"></script>
+  </body>
+</html>
