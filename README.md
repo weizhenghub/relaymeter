@@ -7,8 +7,6 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 &nbsp;&nbsp;
-<b>A local relay for all AI coding agents. Translates between Anthropic / OpenAI protocols and meters token usage across every request, platform, and upstream.</b>
-
 
 **1. Token metering**<br>
 &nbsp;&nbsp;Meters the token usage of every request packet passing through the relay.<br>
