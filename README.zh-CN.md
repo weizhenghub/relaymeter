@@ -10,15 +10,13 @@
 <b>面向所有AI 编程智能体的本地中继，在 Anthropic / OpenAI 之间互转协议，统计所有请求、平台和上游的 token 用量。</b>
 
 
-**1、token统计：**
-&nbsp;&nbsp;统计所有平台过中继的请求包的token用量。可按平台、模型、上游统计消耗。
-并可将消息原文保存到本地数据库
-
-**2、协议转换**
-&nbsp;&nbsp;在不兼容的平台和上游提供商接受协议之间，进行协议转换
-（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之间互转）
-
-**3、实时流**
+**1、token统计**<br>
+&nbsp;&nbsp;统计所有平台过中继的请求包的token用量。可按平台、模型、上游统计消耗。<br>
+并可将消息原文保存到本地数据库<br>
+**2、协议转换**<br>
+&nbsp;&nbsp;在不兼容的平台和上游提供商接受协议之间，进行协议转换<br>
+（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之间互转）<br>
+**3、实时流**<br>
 &nbsp;&nbsp;在实时流侧栏查看当前正在进行的的思考和输出文本流
 
 
@@ -28,17 +26,13 @@
 
 
 ## 为什么需要它
-**1、你有好几个智能体（Claude Code、Codex、OpenClaw……），还有好几个模型提供商（Anthropic、MiniMax、DeepSeek、ollama……）。
-&nbsp;&nbsp;它们支持的协议各不相同，有些支持anthropic，有些支持openai。在只支持anthropic的平台上，无法使用只支持openai的上游提供商，
-提供商不接受这个包，平台也没法解析结果
-
-2、你有多个上游提供商和多个模型，需要根据不同任务切换到不同的模型或上游，但你不想在一堆平台上改配置文件，很是麻烦
-
-3、你在多个平台用了一个上游提供商，想统计它总共消耗了多少token，可是除了上游提供的网页，没有任何一个工具能给你一个统一的视图，统计总的 token消耗数量
-
-4、很多智能体平台在coding时就是个黑箱，思考流、甚至正文流都不放出来，你看不到具体输出了什么，到底是仍在跑还是已经卡死了
-
-5、单纯想鉴赏一下自己有多能烧token**
+**1、你有好几个智能体（Claude Code、Codex、OpenClaw……），还有好几个模型提供商（Anthropic、MiniMax、DeepSeek、ollama……）。**<br>
+&nbsp;&nbsp;它们支持的协议各不相同，有些支持anthropic，有些支持openai。在只支持anthropic的平台上，无法使用只支持openai的上游提供商，<br>
+提供商不接受这个包，平台也没法解析结果<br>
+**2、你有多个上游提供商和多个模型，需要根据不同任务切换到不同的模型或上游，但你不想在一堆平台上改配置文件，很是麻烦**<br>
+**3、你在多个平台用了一个上游提供商，想统计它总共消耗了多少token，可是除了上游提供的网页，没有任何一个工具能给你一个统一的视图，统计总的 token消耗数量**<br>
+**4、很多智能体平台在coding时就是个黑箱，思考流、甚至正文流都不放出来，你看不到具体输出了什么，到底是仍在跑还是已经卡死了**<br>
+**5、单纯想鉴赏一下自己有多能烧token**
 
 ## RelayMeter 能做什么
 

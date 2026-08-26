@@ -10,15 +10,13 @@
 <b>A local relay for all AI coding agents. Translates between Anthropic / OpenAI protocols and meters token usage across every request, platform, and upstream.</b>
 
 
-**1. Token metering**
-&nbsp;&nbsp;Meters the token usage of every request packet passing through the relay. Break down consumption by platform, model, or upstream,
-and optionally save raw message bodies to a local database.
-
-**2. Protocol conversion**
-&nbsp;&nbsp;Converts between incompatible client and upstream protocols
-(Anthropic Messages, OpenAI Chat Completions, OpenAI Responses — any-to-any).
-
-**3. Live streams**
+**1. Token metering**<br>
+&nbsp;&nbsp;Meters the token usage of every request packet passing through the relay.<br>
+Break down consumption by platform, model, or upstream, and optionally save raw message bodies to a local database.<br>
+**2. Protocol conversion**<br>
+&nbsp;&nbsp;Converts between incompatible client and upstream protocols<br>
+(Anthropic Messages, OpenAI Chat Completions, OpenAI Responses — any-to-any).<br>
+**3. Live streams**<br>
 &nbsp;&nbsp;Watch the in-flight thinking and output text streams in the live-stream sidebar.
 
 
@@ -28,17 +26,13 @@ and optionally save raw message bodies to a local database.
 
 
 ## Why you need it
-**1. You run several agents (Claude Code, Codex, OpenClaw…) against several model providers (Anthropic, MiniMax, DeepSeek, ollama…).
-&nbsp;&nbsp;Their protocols differ — some speak Anthropic, some speak OpenAI. On an Anthropic-only client you can't use an OpenAI-only upstream:
-the provider rejects the payload, and the client can't parse the response either.
-
-2. You have multiple upstreams and models, and you want to switch model or upstream per task — without editing config files on a pile of platforms.
-
-3. You use one upstream provider across several platforms and want to know how many tokens it consumed in total. But no tool except the provider's own web page gives you a unified view of total token consumption.
-
-4. Many coding-agent platforms are a black box while coding — they don't expose the thinking stream, sometimes not even the text stream. You can't see what's being produced, or whether it's still running or already hung.
-
-5. You just want to admire how many tokens you can burn.**
+**1. You run several agents (Claude Code, Codex, OpenClaw…) against several model providers (Anthropic, MiniMax, DeepSeek, ollama…).**<br>
+&nbsp;&nbsp;Their protocols differ — some speak Anthropic, some speak OpenAI. On an Anthropic-only client you can't use an OpenAI-only upstream:<br>
+the provider rejects the payload, and the client can't parse the response either.<br>
+**2. You have multiple upstreams and models, and you want to switch model or upstream per task — without editing config files on a pile of platforms.**<br>
+**3. You use one upstream provider across several platforms and want to know how many tokens it consumed in total. But no tool except the provider's own web page gives you a unified view of total token consumption.**<br>
+**4. Many coding-agent platforms are a black box while coding — they don't expose the thinking stream, sometimes not even the text stream. You can't see what's being produced, or whether it's still running or already hung.**<br>
+**5. You just want to admire how many tokens you can burn.**
 
 ## What RelayMeter can do
 

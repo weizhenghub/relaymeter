@@ -10,15 +10,13 @@
 <b>面向所有 AI 程式設計智能體的本機中繼，在 Anthropic / OpenAI 之間互轉協定，統計所有請求、平台和上游的 token 用量。</b>
 
 
-**1、token 統計：**
-&nbsp;&nbsp;統計所有平台過中繼的請求封包的 token 用量。可按平台、模型、上游統計消耗。
-並可將訊息原文儲存到本機資料庫
-
-**2、協定轉換**
-&nbsp;&nbsp;在不相容的平台和上游供應商接受的協定之間，進行協定轉換
-（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之間互轉）
-
-**3、即時流**
+**1、token 統計：**<br>
+&nbsp;&nbsp;統計所有平台過中繼的請求封包的 token 用量。<br>
+可按平台、模型、上游統計消耗，並可將訊息原文儲存到本機資料庫<br>
+**2、協定轉換**<br>
+&nbsp;&nbsp;在不相容的平台和上游供應商接受的協定之間，進行協定轉換<br>
+（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之間互轉）<br>
+**3、即時流**<br>
 &nbsp;&nbsp;在即時流側欄查看目前正在進行的思考和輸出文字流
 
 
@@ -28,17 +26,13 @@
 
 
 ## 為什麼需要它
-**1、你有好幾個智能體（Claude Code、Codex、OpenClaw……），還有好幾個模型供應商（Anthropic、MiniMax、DeepSeek、ollama……）。
-&nbsp;&nbsp;它們支援的協定各不相同，有些支援 anthropic，有些支援 openai。在只支援 anthropic 的平台上，無法使用只支援 openai 的上游供應商，
-供應商不接受這個封包，平台也沒法解析結果
-
-2、你有多個上游供應商和多個模型，需要根據不同任務切換到不同的模型或上游，但你不想在一堆平台上改設定檔，很是麻煩
-
-3、你在多個平台用了一個上游供應商，想統計它總共消耗了多少 token，可是除了上游提供的網頁，沒有任何一個工具能給你一個統一的視圖，統計總的 token 消耗數量
-
-4、很多智能體平台在 coding 時就是個黑箱，思考流、甚至正文流都不放出來，你看不到具體輸出了什麼，到底是仍在跑還是已經卡死了
-
-5、單純想鑑賞一下自己有多能燒 token**
+**1、你有好幾個智能體（Claude Code、Codex、OpenClaw……），還有好幾個模型供應商（Anthropic、MiniMax、DeepSeek、ollama……）。**<br>
+&nbsp;&nbsp;它們支援的協定各不相同，有些支援 anthropic，有些支援 openai。在只支援 anthropic 的平台上，無法使用只支援 openai 的上游供應商，<br>
+供應商不接受這個封包，平台也沒法解析結果<br>
+**2、你有多個上游供應商和多個模型，需要根據不同任務切換到不同的模型或上游，但你不想在一堆平台上改設定檔，很是麻煩**<br>
+**3、你在多個平台用了一個上游供應商，想統計它總共消耗了多少 token，可是除了上游提供的網頁，沒有任何一個工具能給你一個統一的視圖，統計總的 token 消耗數量**<br>
+**4、很多智能體平台在 coding 時就是個黑箱，思考流、甚至正文流都不放出來，你看不到具體輸出了什麼，到底是仍在跑還是已經卡死了**<br>
+**5、單純想鑑賞一下自己有多能燒 token**
 
 ## RelayMeter 能做什麼
 
