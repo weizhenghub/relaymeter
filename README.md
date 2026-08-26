@@ -13,9 +13,11 @@
 **1. Token metering**
 &nbsp;&nbsp;Meters the token usage of every request packet passing through the relay. Break down consumption by platform, model, or upstream,
 and optionally save raw message bodies to a local database.
+
 **2. Protocol conversion**
 &nbsp;&nbsp;Converts between incompatible client and upstream protocols
 (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses — any-to-any).
+
 **3. Live streams**
 &nbsp;&nbsp;Watch the in-flight thinking and output text streams in the live-stream sidebar.
 
@@ -29,9 +31,13 @@ and optionally save raw message bodies to a local database.
 **1. You run several agents (Claude Code, Codex, OpenClaw…) against several model providers (Anthropic, MiniMax, DeepSeek, ollama…).
 &nbsp;&nbsp;Their protocols differ — some speak Anthropic, some speak OpenAI. On an Anthropic-only client you can't use an OpenAI-only upstream:
 the provider rejects the payload, and the client can't parse the response either.
+
 2. You have multiple upstreams and models, and you want to switch model or upstream per task — without editing config files on a pile of platforms.
+
 3. You use one upstream provider across several platforms and want to know how many tokens it consumed in total. But no tool except the provider's own web page gives you a unified view of total token consumption.
+
 4. Many coding-agent platforms are a black box while coding — they don't expose the thinking stream, sometimes not even the text stream. You can't see what's being produced, or whether it's still running or already hung.
+
 5. You just want to admire how many tokens you can burn.**
 
 ## What RelayMeter can do
@@ -97,18 +103,6 @@ curl http://127.0.0.1:8088/live      # in-flight requests
 **Upstreams -> New upstream:**
 <p style="margin-left:10%"><img src="img_15.png" alt="" width="440"></p>
 You can create multiple models; press Enter to confirm each one.
-
-Advanced options (billing / multipliers / quotas / protocol adapter, collapsible):
-
-| Field | Description |
-|---|---|
-| Billing unit | Per-request / Per-token |
-| Token billing fields | `input_tokens` (input) / `output_tokens` (output) / `cache_read_input_tokens` (cache hit read) / `cache_creation_input_tokens` (cache write) |
-| Model multipliers | Models not listed count as 1× |
-| 5h / weekly / monthly quota | Empty = unlimited |
-| OpenCode Go protocol adapter | opencode-go only: auto x-api-key, lowercase models, strip thinking |
-
-Note: optional; shown at the bottom of the upstream detail card. The "Test" and "Connectivity test" buttons at the bottom let you verify an upstream before creating it.
 
 ### 5. Point your agents at the relay
 The relay offers two modes:

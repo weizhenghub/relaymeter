@@ -13,9 +13,11 @@
 **1、token统计：**
 &nbsp;&nbsp;统计所有平台过中继的请求包的token用量。可按平台、模型、上游统计消耗。
 并可将消息原文保存到本地数据库
-**2、协议转换**：
+
+**2、协议转换**
 &nbsp;&nbsp;在不兼容的平台和上游提供商接受协议之间，进行协议转换
 （Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之间互转）
+
 **3、实时流**
 &nbsp;&nbsp;在实时流侧栏查看当前正在进行的的思考和输出文本流
 
@@ -29,9 +31,13 @@
 **1、你有好几个智能体（Claude Code、Codex、OpenClaw……），还有好几个模型提供商（Anthropic、MiniMax、DeepSeek、ollama……）。
 &nbsp;&nbsp;它们支持的协议各不相同，有些支持anthropic，有些支持openai。在只支持anthropic的平台上，无法使用只支持openai的上游提供商，
 提供商不接受这个包，平台也没法解析结果
+
 2、你有多个上游提供商和多个模型，需要根据不同任务切换到不同的模型或上游，但你不想在一堆平台上改配置文件，很是麻烦
+
 3、你在多个平台用了一个上游提供商，想统计它总共消耗了多少token，可是除了上游提供的网页，没有任何一个工具能给你一个统一的视图，统计总的 token消耗数量
+
 4、很多智能体平台在coding时就是个黑箱，思考流、甚至正文流都不放出来，你看不到具体输出了什么，到底是仍在跑还是已经卡死了
+
 5、单纯想鉴赏一下自己有多能烧token**
 
 ## RelayMeter 能做什么
@@ -94,18 +100,6 @@ curl http://127.0.0.1:8088/live      # 正在进行的请求
 **上游 -> 新建上游：**
 <p style="margin-left:10%"><img src="img_15.png" alt="" width="440"></p>
 可以创建多个模型，输入完毕后请回车确认。
-
-高级功能（计费 / 倍率 / 限额 / 协议适配，折叠区）：
-
-| 字段 | 说明 |
-|---|---|
-| 计费模式 | 按次数计费 / 按 Token 计费 |
-| Token 计费字段 | `input_tokens`（输入）/ `output_tokens`（输出）/ `cache_read_input_tokens`（缓存命中读取）/ `cache_creation_input_tokens`（缓存写入） |
-| 模型倍率 | 未列出的模型按 1× 计 |
-| 5h 限额 / 周限额 / 月限额 | 留空 = 不限制 |
-| OpenCode Go 协议适配 | 仅 opencode-go 用：自动换 x-api-key、模型小写、剥 thinking |
-
-备注：可选，会显示在上游详情卡片底部。底部有「测试」和「连通性测试」按钮，创建前可验证上游。
 
 ### 5. 把智能体请求地址指向中继
 中继提供两种模式：
