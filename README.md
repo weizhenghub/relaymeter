@@ -65,8 +65,8 @@ the provider rejects the payload, and the client can't parse the response either
 ### 1. Install
 
 ```bash
-git clone https://github.com/weizhenghub/token-relay.git
-cd token-relay
+git clone https://github.com/weizhenghub/relaymeter.git
+cd relaymeter
 python -m pip install -e .
 ```
 

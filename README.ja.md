@@ -65,8 +65,8 @@
 ### 1. インストール
 
 ```bash
-git clone https://github.com/weizhenghub/token-relay.git
-cd token-relay
+git clone https://github.com/weizhenghub/relaymeter.git
+cd relaymeter
 python -m pip install -e .
 ```
 
