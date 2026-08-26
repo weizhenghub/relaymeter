@@ -132,7 +132,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Token Consumption Relay",
-        version="0.2.0",
+        version="0.99",
         lifespan=lifespan,
     )
 
