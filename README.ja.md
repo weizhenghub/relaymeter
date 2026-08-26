@@ -37,22 +37,22 @@
 ## RelayMeter でできること
 
 **• クリック一つで使いたいモデルに切り替え：**
-<img src="img_1.png" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" /> />  
+<p align="center"><img src="img_1.png" alt="" width="480"></p> /> />  
 
 **• プラットフォーム別のトラフィック統計を確認：**  
-<img src="img_13.png" alt="" style="display:block;width:420px;max-width:100%;margin:12px auto;" /> />
+<p align="center"><img src="img_13.png" alt="" width="420"></p> /> />
 
 **• 履歴からメッセージ本文を直接確認**
-<img src="output2.gif" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" /> />  
+<p align="center"><img src="output2.gif" alt="" width="480"></p> /> />  
 
 **• 豊富な統計グラフ：**  
-<img src="output3.gif" alt="" style="display:block;width:640px;max-width:100%;margin:12px auto;" /> />  
+<p align="center"><img src="output3.gif" alt="" width="640"></p> /> />  
 
 **• ストリーム状態表示アニメーション**  
-<img src="output4.gif" alt="" style="display:block;width:560px;max-width:100%;margin:12px auto;" /> />  
+<p align="center"><img src="output4.gif" alt="" width="560"></p> /> />  
 
 **• リアルタイムストリームサイドバーを開いて、ストリーミング内容とツール呼び出し情報をリアルタイムに確認**  
-<img src="output.gif" alt="" style="display:block;width:320px;max-width:100%;margin:12px auto;" /> />    
+<p align="center"><img src="output.gif" alt="" width="320"></p> /> />    
 
 **• さらに、サイドバー操作用のフローティングボール、パススルーモード、クロスプロトコル変換、ストリームプラットフォーム識別など、多彩で実用的な機能を搭載。**
 <br><br>
@@ -95,7 +95,7 @@ curl http://127.0.0.1:8088/live      # 進行中のリクエスト
 ```
 ### 4. 中継にモデルプロバイダーを追加  
 **アップストリーム -> 新規アップストリーム：**  
-<img src="img_15.png" alt="" style="display:block;width:440px;max-width:100%;margin:12px auto;" /> />    
+<p align="center"><img src="img_15.png" alt="" width="440"></p> /> />    
 複数のモデルを作成できます。入力後は Enter で確定してください。
 
 詳細設定（課金 / 倍率 / 上限 / プロトコルアダプター、折りたたみ領域）：
@@ -190,9 +190,9 @@ model                    = 実際のモデル
 
 ### 6. 使い始める
 モデルを選択：  
-<img src="img_16.png" alt="" style="display:block;width:520px;max-width:100%;margin:12px auto;" /> />    
+<p align="center"><img src="img_16.png" alt="" width="520"></p> /> />    
 使い始める：  
-<img src="img_17.png" alt="" style="display:block;width:720px;max-width:100%;margin:12px auto;" /> />    
+<p align="center"><img src="img_17.png" alt="" width="720"></p> /> />    
 
 
 ```mermaid

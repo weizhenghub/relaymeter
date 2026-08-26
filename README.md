@@ -37,22 +37,22 @@ the provider rejects the payload, and the client can't parse the response either
 ## What RelayMeter can do
 
 **• Click to switch to the model you want:**
-<img src="img_1.png" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" />
+<p align="center"><img src="img_1.png" alt="" width="480"></p>
 
 **• View traffic stats across platforms:**  
-<img src="img_13.png" alt="" style="display:block;width:420px;max-width:100%;margin:12px auto;" />
+<p align="center"><img src="img_13.png" alt="" width="420"></p>
 
 **• Inspect raw message bodies right in history**
-<img src="output2.gif" alt="" style="display:block;width:480px;max-width:100%;margin:12px auto;" />
+<p align="center"><img src="output2.gif" alt="" width="480"></p>
 
 **• Rich charts:**  
-<img src="output3.gif" alt="" style="display:block;width:640px;max-width:100%;margin:12px auto;" />
+<p align="center"><img src="output3.gif" alt="" width="640"></p>
 
 **• Stream-status indicator animations**  
-<img src="output4.gif" alt="" style="display:block;width:560px;max-width:100%;margin:12px auto;" />
+<p align="center"><img src="output4.gif" alt="" width="560"></p>
 
 **• Open the live-stream sidebar to watch streaming content and tool calls in real time**  
-<img src="output.gif" alt="" style="display:block;width:320px;max-width:100%;margin:12px auto;" />
+<p align="center"><img src="output.gif" alt="" width="320"></p>
 
 **• Plus a floating-ball sidebar control, passthrough mode, cross-protocol conversion, stream-platform detection, and more.**
 <br><br>
@@ -95,7 +95,7 @@ curl http://127.0.0.1:8088/live      # in-flight requests
 ```
 ### 4. Link a model provider in the relay  
 **Upstreams -> New upstream:**  
-<img src="img_15.png" alt="" style="display:block;width:440px;max-width:100%;margin:12px auto;" />    
+<p align="center"><img src="img_15.png" alt="" width="440"></p>    
 You can create multiple models; press Enter to confirm each one.
 
 Advanced options (billing / multipliers / quotas / protocol adapter, collapsible):
@@ -190,9 +190,9 @@ The request rewritten through the relay:
 
 ### 6. Start using
 Pick a model:  
-<img src="img_16.png" alt="" style="display:block;width:520px;max-width:100%;margin:12px auto;" />    
+<p align="center"><img src="img_16.png" alt="" width="520"></p>    
 Start using:  
-<img src="img_17.png" alt="" style="display:block;width:720px;max-width:100%;margin:12px auto;" />    
+<p align="center"><img src="img_17.png" alt="" width="720"></p>    
 
 
 ```mermaid
