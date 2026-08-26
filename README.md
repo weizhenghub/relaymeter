@@ -40,7 +40,7 @@ the provider rejects the payload, and the client can't parse the response either
 <img src="img_1.png" alt="" style="width: 60%;margin-left: 5%;" />  
 
 **• View traffic stats across platforms:**  
-<img src="img_13.png" alt="" style="width: 60%;margin-left: 5%;" />
+<img src="img_13.png" alt="" style="width: 60%;margin-left: 5%;" />  
 
 **• Inspect raw message bodies right in history**
 <img src="output2.gif" alt="" style="width: 70%;margin-left: 5%;" />  
