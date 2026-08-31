@@ -4,7 +4,7 @@
 // Electron 主窗口 preload：给 index.html 的 app.js 一个 `window.pywebview.api.*`
 // 兼容桥。app.js 期望 `await window.pywebview.api.<name>(...)` 返回 Promise。
 // 方法集 = web/app.js 里 `_call("…")` 首参 + 直接 `window.pywebview.api.X` 调用
-// （gen_preload.py 提取，共 99 个）。每次 app.js 增删桥方法后重跑本脚本。
+// （gen_preload.py 提取，共 101 个）。每次 app.js 增删桥方法后重跑本脚本。
 //
 // 注意：**不能用 Proxy** —— contextBridge.exposeInMainWorld 无法克隆
 // new Proxy({}, ...)（"An object could not be cloned."），必须显式枚举。
@@ -99,9 +99,11 @@ const api = {
   set_upstream_model: makeCall("set_upstream_model"),
   set_vision_models: makeCall("set_vision_models"),
   start_server: makeCall("start_server"),
+  stats_agent_hourly: makeCall("stats_agent_hourly"),
   stats_aggregate: makeCall("stats_aggregate"),
   stats_daily: makeCall("stats_daily"),
   stats_model_daily: makeCall("stats_model_daily"),
+  stats_upstream_model_daily: makeCall("stats_upstream_model_daily"),
   stop_server: makeCall("stop_server"),
   test_error_analysis: makeCall("test_error_analysis"),
   test_upstream: makeCall("test_upstream"),

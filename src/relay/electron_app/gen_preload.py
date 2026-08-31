@@ -21,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[3]          # .../Usage_stats
+_ROOT = Path(__file__).resolve().parents[3]          # .../RelayMeter
 _APP_JS = _ROOT / "src" / "relay" / "web" / "app.js"
 _OUT = Path(__file__).resolve().parent / "main_preload.js"
 
