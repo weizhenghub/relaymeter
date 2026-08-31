@@ -171,6 +171,29 @@ class SelectBody(BaseModel):
 async def select_active(request: Request, platform: str, body: SelectBody) -> dict[str, Any]:
     _ensure_known(platform)
     settings = request.app.state.settings
+    # v0.197 fix：先把磁盘上游 overlay 到当前 settings，再 set_active。
+    #
+    # 背景：新建/删除上游走 GUI 桥（config.add_upstream/remove_upstream）写
+    # upstreams.json，但中继 uvicorn 子进程的 app.state.settings 是 lifespan
+    # 启动时的快照，除非有别的调用刷新它，否则**不知道**磁盘上新加的条目。
+    # GUI 桥 create_upstream 里的补救是 POST /api/upstreams/refresh，但那趟
+    # 请求可能因 setTimeout 前子进程正在 restart / 或 base_url 与监听址不一致
+    # 而静默失败（gui.py 里 ``except: pass`` 吞掉）。于是一旦用户「新建后紧接着
+    # 顶栏切换」（作者注释明说这个场景），set_active 找不到新条目 → KeyError →
+    # 404「no upstream named ...」→ GUI 弹窗。
+    #
+    # 这里让 select 端点**自身**在每次切换前从磁盘 reload 一份上游列表，彻底
+    # 消除「中继内存 vs 上游文件」的不同步 —— 新建/删除后不需要 restart、
+    # 也不需要赌那趟 refresh 是否送达。仅 overlay 上游列表 + active 指针到
+    # **当前** settings 对象（apply_to_settings 就地改），不重建整个 Settings，
+    # 避免把 passthrough_mode 等运行时状态一起重置。
+    try:
+        from ..upstreams_file import apply_to_settings
+        apply_to_settings(settings, settings.relay_upstreams_file)
+    except Exception as exc:
+        # overlay 失败不硬拒切换：加载已在 lifespan 里做过一次，这里只是补一份
+        # 最新盘，极端情况下（文件被临时占用）退回快照也还能切到旧上游。
+        log.warning("select: apply_to_settings failed: %s", exc)
     try:
         cfg = settings.set_active(platform, body.name)
     except KeyError as exc:

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RelayMeter</title>
-    <link rel="stylesheet" href="styles-20260817.css?v=20260827-03" />
+    <link rel="stylesheet" href="styles-20260817.css?v=20260830-09" />
   </head>
   <body>
     <!-- v0.41 背景：删除 canvas + rAF 动效。回到 v0.22 之前的纯静态
@@ -140,11 +140,14 @@
 
         <section class="view" data-view="overview">
           <div class="top-model-spotlight glass-card" id="top-model-spotlight" hidden>
+            <!-- v0.205：重新规划 —— 删掉「用量最大模型」标题与模型名
+                 (tms-name)，卡片只留全中继总消耗：总计 + 请求数 + 输入/
+                 输出/缓存三段条 + 图例。原「总计 / 最大模型」点击切换一并
+                 移除（切换展示的就是最大模型的数字，模型名没了它没有
+                 锚点，口径固定为全模型合计）。 -->
             <div class="tms-header">
-              <div class="tms-eyebrow">用量最大的模型</div>
-              <div class="tms-name" id="tms-name" data-i18n-keep>—</div>
               <div class="tms-meta">
-                <span class="tms-stat tms-stat-total"><span class="tms-stat-head"><span class="tms-stat-cn" id="tms-total-cn"></span><span class="tms-stat-label" id="tms-total-label">总计</span></span><span class="tms-stat-value"><span id="tms-total" title="点击切换：总计 / 用量最大模型" role="button" tabindex="0">—</span><span class="tms-stat-unit">tokens</span></span></span>
+                <span class="tms-stat tms-stat-total"><span class="tms-stat-head"><span class="tms-stat-cn" id="tms-total-cn"></span><span class="tms-stat-label">总计</span></span><span class="tms-stat-value"><span id="tms-total">—</span><span class="tms-stat-unit">tokens</span></span></span>
                 <span class="tms-stat tms-stat-total"><span class="tms-stat-label">请求数</span><span class="tms-stat-value"><span id="tms-requests">—</span><span class="tms-stat-unit">req</span></span></span>
               </div>
             </div>
@@ -177,7 +180,7 @@
               </div>
             </div>
             <div class="glass-card" data-card="upstream" draggable="true">
-              <div class="card-title">上游状态</div>
+              <div class="card-title">上游统计</div>
               <div class="card-body" id="card-upstream-body">
                 <div class="card-empty">加载中…</div>
               </div>
@@ -329,9 +332,22 @@
             </div>
             <!-- v0.155：30天按平台流量 —— 独立于 dim/range 选择器的固定
                  agent 聚合块，数据由 renderStatsAgent() 拉 relay 库 agent
-                 维度 30d 并复用 renderPie 渲染。 -->
+                 维度 30d 并复用 renderPie 渲染。
+                 v0.203：卡标题右侧二分切换（饼图 / 竖状图）+ 竖状图窗口
+                 二极（24h / 3d，小时粒度）。竖状图走 statsAgentHourly 的
+                 agent×小时聚合，多色叠柱（同 model-daily 模式）。 -->
             <div class="glass-card" data-card="stats-agent">
-              <div class="card-title">30天按平台流量</div>
+              <div class="card-title card-title-with-action">
+                <span>30天按平台流量</span>
+                <span class="agent-view-toggle">
+                  <button type="button" class="agent-view-btn agent-md-btn active" data-agent-mode="pie">饼图</button>
+                  <button type="button" class="agent-view-btn agent-md-btn" data-agent-mode="chart">竖状图</button>
+                  <span class="agent-hours-group" hidden>
+                    <button type="button" class="agent-view-btn agent-md-btn active" data-agent-hours="24">24h</button>
+                    <button type="button" class="agent-view-btn agent-md-btn" data-agent-hours="72">3d</button>
+                  </span>
+                </span>
+              </div>
               <div class="card-body stats-chart-host" id="stats-host-agent">
                 <div class="card-empty">暂无数据</div>
               </div>
@@ -478,7 +494,7 @@
 
 <script src="vendor/d3.v7.min.js"></script>
 <script src="vendor/chart.umd.min.js"></script>
-<script src="app.js?v=20260827-01"></script>
+<script src="app.js?v=20260830-08"></script>
 
     <!-- v0.36 请求详情 modal：点击历史页/最近活动行 显示完整对话。
          居中卡片 + 半透明遮罩；ESC / 点遮罩 / 点 X 都关闭。
@@ -620,9 +636,10 @@
             <div class="cfg-field">
               <label class="cfg-label">
                 允许的模型
-                <span class="cfg-hint">留空 = 不限制。回车添加</span>
+                <span class="cfg-hint">留空 = 不限制。回车添加，逐行显示；每行可勾选「支持图片输入」</span>
               </label>
-              <div class="cfg-chips" id="create-chips">
+              <div class="cfg-chips cfg-chips-model-list" id="create-chips">
+                <div id="create-model-list"></div>
                 <input class="cfg-chip-input" id="create-chip-input"
                        type="text" placeholder="输入模型名后回车" />
               </div>

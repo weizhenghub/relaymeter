@@ -4,19 +4,19 @@
 
 <p align="center">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
-  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
-</p>
-&nbsp;&nbsp;
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">  
+</p>  
+&nbsp;&nbsp; 
 <b>すべての AI コーディングエージェントのためのローカル中継。Anthropic / OpenAI 間のプロトコルを相互変換し、すべてのリクエスト・プラットフォーム・アップストリームのトークン使用量を集計します。</b>
 
 
-**1、トークン集計：**<br>
-&nbsp;&nbsp;中継を通過するすべてのリクエストパケットのトークン使用量を集計。<br>
-プラットフォーム・モデル・アップストリーム別に消費量を分析できます。メッセージ本文をローカルデータベースに保存することも可能。<br>
-**2、プロトコル変換：**<br>
-&nbsp;&nbsp;互換性のないクライアントとアップストリームプロバイダーの間でプロトコルを相互変換<br>
-（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses を相互に変換）<br>
-**3、リアルタイムストリーム：**<br>
+**1、トークン集計：**  
+&nbsp;&nbsp;中継を通過するすべてのリクエストパケットのトークン使用量を集計。プラットフォーム・モデル・アップストリーム別に消費量を分析できます。
+メッセージ本文をローカルデータベースに保存することも可能。  
+**2、プロトコル変換：**  
+&nbsp;&nbsp;互換性のないクライアントとアップストリームプロバイダーの間でプロトコルを相互変換
+（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses を相互に変換）  
+**3、リアルタイムストリーム：**  
 &nbsp;&nbsp;リアルタイムストリームサイドバーで、実行中の思考プロセスと出力テキストを確認できます。
 
 
@@ -26,33 +26,33 @@
 
 
 ## なぜ必要か
-**1、複数のエージェント（Claude Code、Codex、OpenClaw……）と複数のモデルプロバイダー（Anthropic、MiniMax、DeepSeek、ollama……）を併用している。**<br>
-&nbsp;&nbsp;対応プロトコルはそれぞれ異なり、Anthropic 対応のものもあれば OpenAI 対応のものもある。Anthropic 専用のクライアントでは、OpenAI 専用のアップストリームを使えない——<br>
-プロバイダー側がリクエストを拒否し、クライアント側もレスポンスを解析できない。<br>
-**2、複数のアップストリームとモデルがあり、タスクに応じてモデルやアップストリームを切り替えたい。しかし、あちこちのプラットフォームで設定ファイルを編集するのは面倒。**<br>
-**3、同じアップストリームプロバイダーを複数のプラットフォームで使い、総トークン消費量を知りたい。しかし、プロバイダー自身のウェブページ以外に、総消費トークンを統一ビューで確認できるツールは存在しない。**<br>
-**4、多くのエージェントプラットフォームはコーディング中ブラックボックスだ。思考ストリームも、場合によっては本文ストリームも出してくれない。何が出力されているのか、まだ動いているのかフリーズしているのか、まったく見えない。**<br>
-**5、自分がどれだけトークンを燃やしているかを鑑賞したいだけ。**
+**1、複数のエージェント（Claude Code、Codex、OpenClaw……）と複数のモデルプロバイダー（Anthropic、MiniMax、DeepSeek、ollama……）を併用している。
+&nbsp;&nbsp;対応プロトコルはそれぞれ異なり、Anthropic 対応のものもあれば OpenAI 対応のものもある。Anthropic 専用のクライアントでは、OpenAI 専用のアップストリームを使えない——
+プロバイダー側がリクエストを拒否し、クライアント側もレスポンスを解析できない。  
+2、複数のアップストリームとモデルがあり、タスクに応じてモデルやアップストリームを切り替えたい。しかし、あちこちのプラットフォームで設定ファイルを編集するのは面倒。    
+3、同じアップストリームプロバイダーを複数のプラットフォームで使い、総トークン消費量を知りたい。しかし、プロバイダー自身のウェブページ以外に、総消費トークンを統一ビューで確認できるツールは存在しない。  
+4、多くのエージェントプラットフォームはコーディング中ブラックボックスだ。思考ストリームも、場合によっては本文ストリームも出してくれない。何が出力されているのか、まだ動いているのかフリーズしているのか、まったく見えない。  
+5、自分がどれだけトークンを燃やしているかを鑑賞したいだけ。**  
 
 ## RelayMeter でできること
 
 **• クリック一つで使いたいモデルに切り替え：**
-<p style="margin-left:10%"><img src="img_1.png" alt="" width="480"></p>
+<img src="img_1.png" alt="" style="width: 60%;margin-left: 5%;" />  
 
-**• プラットフォーム別のトラフィック統計を確認：**
-<p style="margin-left:10%"><img src="img_13.png" alt="" width="420"></p>
+**• プラットフォーム別のトラフィック統計を確認：**  
+<img src="img_13.png" alt="" style="width: 60%;margin-left: 5%;" />
 
 **• 履歴からメッセージ本文を直接確認**
-<p style="margin-left:10%"><img src="output2.gif" alt="" width="480"></p>
+<img src="output2.gif" alt="" style="width: 70%;margin-left: 5%;" />  
 
-**• 豊富な統計グラフ：**
-<p style="margin-left:10%"><img src="output3.gif" alt="" width="640"></p>
+**• 豊富な統計グラフ：**  
+<img src="output3.gif" alt="" style="width: 60%;margin-left: 5%;" />  
 
-**• ストリーム状態表示アニメーション**
-<p style="margin-left:10%"><img src="output4.gif" alt="" width="560"></p>
+**• ストリーム状態表示アニメーション**  
+<img src="output4.gif" alt="" style="width: 60%;margin-left: 5%;" />  
 
-**• リアルタイムストリームサイドバーを開いて、ストリーミング内容とツール呼び出し情報をリアルタイムに確認**
-<p style="margin-left:10%"><img src="output.gif" alt="" width="320"></p>
+**• リアルタイムストリームサイドバーを開いて、ストリーミング内容とツール呼び出し情報をリアルタイムに確認**  
+<img src="output.gif" alt="" style="width: 40%;margin-left: 5%;" />    
 
 **• さらに、サイドバー操作用のフローティングボール、パススルーモード、クロスプロトコル変換、ストリームプラットフォーム識別など、多彩で実用的な機能を搭載。**
 <br><br>
@@ -65,22 +65,12 @@
 ### 1. インストール
 
 ```bash
-git clone https://github.com/weizhenghub/relaymeter.git
+git clone https://github.com/<your-org>/relaymeter.git
 cd relaymeter
 python -m pip install -e .
 ```
 
 Python 3.11+ 推奨。Windows / macOS / Linux いずれでも動作します。デスクトップ GUI には pywebview 対応のシステム WebView バックエンドが必要です（Windows は WebView2 標準搭載、macOS は WKWebView 標準搭載、Linux は `webkit2gtk-4.1` をインストール）。
-
-> **フローティングボール / リアルタイムストリームサイドバー（Electron）** —— フローティングボールとリアルタイムストリームサイドバーは WebView ではなく Electron レンダラーです。有効にするには、clone 後に Electron ランタイムをインストールします：
-
-```bash
-cd src/relay/electron_app
-npm ci          # または npm install；Electron バイナリを node_modules に取得
-cd ../..
-```
-
-この手順がない場合、メインダッシュボードは動作しますが、フローティングボールとリアルタイムストリームサイドバーは表示されません（リレーログに `electron.exe not found` と出ます）。
 
 ### 2. 起動
 
@@ -103,15 +93,27 @@ curl http://127.0.0.1:8088/healthz   # → {"ok": true}
 curl http://127.0.0.1:8088/stats     # プラットフォーム別トークン総量
 curl http://127.0.0.1:8088/live      # 進行中のリクエスト
 ```
-### 4. 中継にモデルプロバイダーを追加
-**アップストリーム -> 新規アップストリーム：**
-<p style="margin-left:10%"><img src="img_15.png" alt="" width="440"></p>
+### 4. 中継にモデルプロバイダーを追加  
+**アップストリーム -> 新規アップストリーム：**  
+<img src="img_15.png" alt="" style="width: 60%;margin-left: 5%;" />    
 複数のモデルを作成できます。入力後は Enter で確定してください。
+
+詳細設定（課金 / 倍率 / 上限 / プロトコルアダプター、折りたたみ領域）：
+
+| フィールド | 説明 |
+|---|---|
+| 課金モード | リクエスト課金 / トークン課金 |
+| トークン課金フィールド | `input_tokens`（入力）/ `output_tokens`（出力）/ `cache_read_input_tokens`（キャッシュヒット読み取り）/ `cache_creation_input_tokens`（キャッシュ書き込み） |
+| モデル倍率 | 未記載のモデルは 1× として計算 |
+| 5h / 週 / 月の上限 | 空欄 = 無制限 |
+| OpenCode Go プロトコルアダプター | opencode-go のみ：x-api-key 自動切り替え、モデル小文字化、thinking 除去 |
+
+備考：任意。アップストリーム詳細カードの下部に表示されます。下部の「テスト」「接続テスト」ボタンで、作成前にアップストリームを検証できます。
 
 ### 5. エージェントのリクエスト先を中継に向ける
 中継には2つのモードがあります：
 
-**変換モード**
+**変換モード**  
 変換モードでは、モデルとアップストリームの選択を中継が完全に制御します。コーディングクライアントからの全リクエストはまず中継に到達し、中継が引き継いで選択したアップストリームへ送信します。クライアント側は URL を中継に向け、api-key とモデルを `auto` プレースホルダーにするだけで構いません。
 
 ```
@@ -187,10 +189,10 @@ model                    = 実際のモデル
 
 
 ### 6. 使い始める
-モデルを選択：
-<p style="margin-left:10%"><img src="img_16.png" alt="" width="520"></p>
-使い始める：
-<p style="margin-left:10%"><img src="img_17.png" alt="" width="720"></p>
+モデルを選択：  
+<img src="img_16.png" alt="" style="width: 60%;margin-left: 5%;" />    
+使い始める：  
+<img src="img_17.png" alt="" style="width: 60%;margin-left: 5%;" />    
 
 
 ```mermaid

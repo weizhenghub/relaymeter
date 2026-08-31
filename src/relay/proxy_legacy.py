@@ -737,6 +737,87 @@ async def _anthropic_adapter_relay_sse(
 
     async def gen() -> AsyncIterator[bytes]:
         nonlocal last_usage, error_msg, final_status
+        # v0.166：与 cross-wire / direct 同款 shield 修复 —— 客户端断开时
+        # starlette 会 cancel 本任务，finally 内第一个 await（db.record 等）
+        # 会被再次 CancelledError 打断导致漏记。收尾逻辑抽成闭包，finally
+        # 用 asyncio.shield 保护，让记录在取消信号到达后仍能跑完。
+        async def _adapter_finalize() -> None:
+            req_db_id = 0
+            try:
+                req_db_id = await db.record(
+                    platform=platform,
+                    model=model,
+                    request_id=None,
+                    usage=UsageAcc(**last_usage),
+                    status_code=final_status if error_msg is None else 0,
+                    error=error_msg,
+                    upstream=cfg.name,
+                    api_key_alias=api_key_alias,
+                    # v0.143：客户端入口 wire 透传 → 写 endpoint。
+                    endpoint=endpoint,
+                    agent=agent,
+                    raw_ua=raw_ua,
+                )
+            except Exception:
+                log.exception("db.record failed in adapter SSE path")
+            # v0.120：adapter SSE 路径也保存消息原文
+            if req_db_id and settings.relay_save_messages:
+                try:
+                    user_text, user_json = _extract_last_user_message(json.dumps(inbound).encode("utf-8"))
+                    await db.record_messages(
+                        req_db_id,
+                        user_text=user_text,
+                        user_json=user_json,
+                        assistant_text=parser.assembled_text() or None,
+                        assistant_json=None,  # SSE 没有 raw_response
+                    )
+                except Exception as exc:
+                    log.exception("db.record_messages failed in adapter SSE path: %s", exc)
+            try:
+                await _complete_inflight(inflight_id)
+            except Exception:
+                pass
+            # v0.89：广播 done —— 侧栏定稿。thinking/tool_use 此时已经累完，
+            # 一并推过去（payload 不大，前端按需消费）。
+            try:
+                tool_json = parser.assembled_tool_use_json() or ""
+                thinking_final = parser.assembled_thinking() or ""
+                await _broadcast_live_event(
+                    inflight_id, "done",
+                    phase="done",
+                    assistant_text=parser.assembled_text(),
+                    thinking_text=thinking_final,
+                    tool_use_json=tool_json,
+                    usage_live={
+                        "input_tokens": last_usage["input_tokens"],
+                        "output_tokens": last_usage["output_tokens"],
+                        "cache_read_input_tokens": last_usage["cache_read_input_tokens"],
+                        "cache_creation_input_tokens": last_usage["cache_creation_input_tokens"],
+                    },
+                    error=error_msg,
+                )
+            except Exception:
+                log.exception("broadcast done event failed in adapter SSE path")
+            # v0.98.1 插件钩子：post_response（adapter SSE finally 内）+
+            # request.done 事件。插件错误已由 run_hooks / emit_event 隔离。
+            try:
+                rinfo = {
+                    "platform": platform,
+                    "cfg": cfg,
+                    "model": model,
+                    "status": final_status if error_msg is None else 0,
+                    "usage": UsageAcc(**last_usage),
+                    "error": error_msg,
+                    "req_db_id": None,
+                    "upstream": cfg.name,
+                    "request_id": None,
+                    "streaming": True,
+                }
+                await run_hooks("post_response", rinfo)
+                emit_event("request.done", **rinfo)
+            except Exception:
+                log.exception("plugin post_response hooks failed in adapter SSE")
+
         client = _get_client(upstream_url)
         # v0.98.1 插件钩子：pre_upstream（adapter SSE 路径）—— 发送前最后
         # 一改。body 是重建后的 payload；插件可整体替换 body / headers。
@@ -866,89 +947,19 @@ async def _anthropic_adapter_relay_sse(
                 f"event: error\ndata: {json.dumps(_error_body(platform, str(exc)))}\n\n"
             ).encode("utf-8")
         finally:
-            req_db_id = 0
+            # v0.166：shield 保护收尾，客户端断开也能入库（见 _adapter_finalize 注释）。
             try:
-                req_db_id = await db.record(
-                    platform=platform,
-                    model=model,
-                    request_id=None,
-                    usage=UsageAcc(**last_usage),
-                    status_code=final_status if error_msg is None else 0,
-                    error=error_msg,
-                    upstream=cfg.name,
-                    api_key_alias=api_key_alias,
-                    # v0.143：客户端入口 wire 透传 → 写 endpoint。
-                    endpoint=endpoint,
-                    agent=agent,
-                    raw_ua=raw_ua,
-                )
+                await asyncio.shield(_adapter_finalize())
+            except asyncio.CancelledError:
+                log.info("%s adapter-SSE finalize cancelled during teardown", platform)
             except Exception:
-                log.exception("db.record failed in adapter SSE path")
-            # v0.120：adapter SSE 路径也保存消息原文
-            if req_db_id and settings.relay_save_messages:
-                try:
-                    user_text, user_json = _extract_last_user_message(json.dumps(inbound).encode("utf-8"))
-                    await db.record_messages(
-                        req_db_id,
-                        user_text=user_text,
-                        user_json=user_json,
-                        assistant_text=parser.assembled_text() or None,
-                        assistant_json=None,  # SSE 没有 raw_response
-                    )
-                except Exception as exc:
-                    log.exception("db.record_messages failed in adapter SSE path: %s", exc)
-            try:
-                await _complete_inflight(inflight_id)
-            except Exception:
-                pass
-            # v0.89：广播 done —— 侧栏定稿。thinking/tool_use 此时已经累完，
-            # 一并推过去（payload 不大，前端按需消费）。
-            try:
-                tool_json = parser.assembled_tool_use_json() or ""
-                thinking_final = parser.assembled_thinking() or ""
-                await _broadcast_live_event(
-                    inflight_id, "done",
-                    phase="done",
-                    assistant_text=parser.assembled_text(),
-                    thinking_text=thinking_final,
-                    tool_use_json=tool_json,
-                    usage_live={
-                        "input_tokens": last_usage["input_tokens"],
-                        "output_tokens": last_usage["output_tokens"],
-                        "cache_read_input_tokens": last_usage["cache_read_input_tokens"],
-                        "cache_creation_input_tokens": last_usage["cache_creation_input_tokens"],
-                    },
-                    error=error_msg,
-                )
-            except Exception:
-                log.exception("broadcast done event failed in adapter SSE path")
-            # v0.98.1 插件钩子：post_response（adapter SSE finally 内）+
-            # request.done 事件。插件错误已由 run_hooks / emit_event 隔离。
-            try:
-                rinfo = {
-                    "platform": platform,
-                    "cfg": cfg,
-                    "model": model,
-                    "status": final_status if error_msg is None else 0,
-                    "usage": UsageAcc(**last_usage),
-                    "error": error_msg,
-                    "req_db_id": None,
-                    "upstream": cfg.name,
-                    "request_id": None,
-                    "streaming": True,
-                }
-                await run_hooks("post_response", rinfo)
-                emit_event("request.done", **rinfo)
-            except Exception:
-                log.exception("plugin post_response hooks failed in adapter SSE")
+                log.exception("%s adapter-SSE finalize failed during teardown", platform)
 
-    response_headers = {
-        "content-type": "text/event-stream; charset=utf-8",
-        "cache-control": "no-cache",
-        "x-accel-buffering": "no",
-    }
-    await _set_inflight_phase(inflight_id, "streaming")
-    return StreamingResponse(gen(), headers=response_headers, media_type="text/event-stream")
+    # v0.199.1：修复未定义 `response_headers` 的 NameError（此前 adapter
+    # SSE 请求必炸 500）。上游在 gen() 内懒打开，headers 无法在构造期拿到；
+    # 与 cross-wire SSE 同款（见 :3408）—— 只给 media_type，SSE content-type
+    # 由 media_type 提供。上游的 hop-by-hop / 鉴权头本就不该透给客户端。
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 async def _filter_anthropic_sse(
@@ -1229,7 +1240,7 @@ def _merge_split_assistant_messages(messages) -> None:
 def _split_openai_tool_call_arguments(d: dict, opened: set) -> list:
     """linguafranca 流式转换丢 tool_calls 参数的绕行（v0.97.4）。
 
-    现象：minimax-openai（MiniMax openai 端点）等上游能正常出 tool_use，但
+    现象：f3af39d7-openai（MiniMax openai 端点）等上游能正常出 tool_use，但
     Claude Code 报「Invalid tool parameters」。根因：linguafranca 把 openai
     tool_calls 流转 anthropic 时，若**首个** chunk 就携带非空 ``arguments``
     （MiniMax / DeepSeek 这类一上来把完整参数塞进第一片的上游），会静默丢参数
@@ -2297,13 +2308,104 @@ def _strip_thinking_blocks(body: bytes) -> bytes:
     return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
 
-def _strip_disallowed_content(body: bytes) -> bytes:
+# v0.199.1：模型不支持图片时的鲁棒性降级 —— 剥图 + 提示词注入。
+# 图块在三种入站 wire 里的形态不同：
+#   anthropic-messages  → messages[].content[] 里 type=="image"
+#   openai-chat         → messages[].content[] 里 type=="image_url"
+#   openai-responses    → input[].content[] 里 type=="input_image"
+# 递归遍历（images 可能嵌在 tool_result 等子块里）。凡命中图片的 user
+# message，在其末尾注入一段提示词告诉上游「用户发了图但我们剥了」，让
+# 模型知道上下文里有缺失的视觉信息 —— 与「剥 namespace 工具」同一哲学：
+# 能继续就继续，不硬报错。返回 (changed, dropped_count)。
+_IMAGE_TYPE_HINTS = ("image", "image_url", "input_image")
+
+
+def _strip_images_with_notice_in_place(node: Any) -> tuple[bool, int]:
+    """剥掉所有图片块并在所在 block 列表注入提示词（原地）。
+
+    返回 ``(changed, dropped)``：changed=是否有任何改动；dropped=剥掉的
+    图片块总数。
+
+    统一递归规则：
+      - 列表若含 ``type`` 键的 dict（block 列表：message.content /
+        tool_result.content / input[].content 等），剥掉 ``type in
+        {image, image_url, input_image}`` 的块，剥到 ≥1 张时往**该列表**
+        尾部补一个提示 text 块；messages/input 列表（item 带 role 不带
+        type）不注入提示，只往下递归。
+      - dict 对所有 value 递归。
+    """
+    if isinstance(node, list):
+        # 直接在本层剥掉图片块（image/image_url/input_image）。
+        dropped_here = sum(
+            1 for item in node
+            if isinstance(item, dict) and item.get("type") in _IMAGE_TYPE_HINTS
+        )
+        kept: list[Any] = []
+        changed = False
+        for item in node:
+            if isinstance(item, dict) and item.get("type") in _IMAGE_TYPE_HINTS:
+                continue  # 剥掉图片块
+            c, d = _strip_images_with_notice_in_place(item)
+            changed = changed or c
+            dropped_here += d
+            kept.append(item)
+        if dropped_here:
+            # 只在 block 列表（item 带 type）注入提示词；messages/input
+            # 这类角色列表不注（它们的 content 子列表会各自注入）。剥到内容
+            # 空列表（只剩图）时也补一句，让上游至少知道发了图。
+            is_block_list = any(
+                isinstance(x, dict) and "type" in x for x in kept
+            ) or not kept
+            # 提示词块类型按所在列表的 wire 适配：openai-responses 的 input
+            # 只认 input_text，用 text 会再触发 schema 错误；其余 wire 用 text。
+            notice_type = "input_text" if any(
+                isinstance(x, dict) and x.get("type") == "input_text"
+                for x in kept
+            ) else "text"
+            if is_block_list and not any(
+                isinstance(b, dict) and b.get("type") in ("text", "input_text")
+                and "中继已剥离" in (b.get("text") or "")
+                for b in kept
+            ):
+                kept.append({"type": notice_type, "text": _IMAGE_NOTICE})
+            # 原地改回（node 可能是 messages/input 等被外部持有的列表）。
+            node[:] = kept
+        return changed or bool(dropped_here), dropped_here
+    if isinstance(node, dict):
+        changed = False
+        dropped = 0
+        for v in node.values():
+            c, d = _strip_images_with_notice_in_place(v)
+            changed = changed or c
+            dropped += d
+        return changed, dropped
+    return False, 0
+
+
+# v0.199.1：非 vision 模型时剥图 —— 判定基于目标模型是否在顶层
+# vision_models 名单里。空名单（未配置）= 全部按非 vision 处理（剥图 +
+# 提示词）。与 models.py 的 modalities 判定保持一致：命中的模型能收图，
+# 其余一律剥。
+_IMAGE_NOTICE = ("（注意：用户本次发送了图片，但当前模型不支持多模态输入，"
+                 "中继已剥离图片内容。请据此上下文继续回答；如必须查看图片"
+                 "请让用户改用支持图片的模型。）")
+
+
+def _strip_disallowed_content(
+    body: bytes, *, vision_models: list[str] | None = None, model: str | None = None,
+) -> bytes:
     """Combined single-pass version of the two strips above (v0.9).
 
     ``cache_control.scope`` removal and thinking-block removal each did a
     full JSON parse + serialize on every request. Multi-MB bodies from
-    Claude Code make that cost real, so the proxy's hot path runs both in
-    one round-trip. The standalone helpers stay for callers that need one.
+    Claude Code make that cost real, so the proxy's hot path runs in one
+    round-trip. The standalone helpers stay for callers that need one.
+
+    v0.199.1：非 vision 模型时额外剥掉图片块（三种 wire 形态）并注入
+    提示词。判定与 cross-wire 路径（_relay_cross_wire）一致：显式传入
+    ``model`` 时，模型不在 vision 名单 → 剥图；名单为空（未配置）→ 全部
+    按非 vision 剥（fail-open，图不转发就不报错）。热路径预检：绝大多数
+    请求无图，字节级子串扫一眼直接跳过整树递归。
     """
     if not body:
         return body
@@ -2313,9 +2415,58 @@ def _strip_disallowed_content(body: bytes) -> bytes:
         return body
     changed = _strip_cache_control_scope_in_place(data)
     changed = _strip_thinking_blocks_in_place(data) or changed
+    changed = _strip_unsupported_tools_in_place(data) or changed
+    # v0.199.1：剥图条件 —— 模型不在 vision 名单（或名单为空）且请求带图。
+    # 之前误写成「名单整体为空才剥」，导致配置了 vision_models 后直连路径
+    # 永不剥图（模型不在名单也照发），deepseek 仍 400。
+    if model is None:
+        # 未显式传模型时按旧语义兜底：空名单才剥（调用方一般会传 model）。
+        strip_images = not vision_models
+    else:
+        strip_images = model not in (vision_models or [])
+    if strip_images and (
+        b'"image' in body or b'"image_url' in body or b'"input_image' in body
+    ):
+        c, d = _strip_images_with_notice_in_place(data)
+        changed = changed or c
     if not changed:
         return body
     return json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+
+def _strip_unsupported_tools_in_place(data: Any) -> bool:
+    """Drop tools whose `type` the upstream OpenAI-compatible gateway rejects.
+
+    Codex (OpenAI Responses API) emits a `namespace` tool type that
+    中转站/上游（如 minnimax.chat）只认 `function` / `web_search*` /
+    `custom` / `tool_search`，遇到 `namespace` 直接 400
+    "unknown variant namespace". Stripping it lets the request through;
+    Codex degrades gracefully to its remaining (function) tools.
+    Blacklist-based: only KNOWN-bad types (e.g. Codex's `namespace`) are
+    dropped. Any other type — including future/unknown standard tool types
+    and Anthropic-style tools (no `type` field) — passes through untouched.
+    """
+    if not isinstance(data, dict):
+        return False
+    tools = data.get("tools")
+    if not isinstance(tools, list):
+        return False
+    # BLACKLIST, not whitelist: a whitelist would silently drop any new
+    # legitimate tool type and break clients later (exactly the class of bug
+    # we just hit with Anthropic tools, which have no `type` field).
+    drop_types = {"namespace"}
+    kept = []
+    for t in tools:
+        if not isinstance(t, dict):
+            kept.append(t)
+            continue
+        ttype = t.get("type")
+        if ttype is None or ttype not in drop_types:
+            kept.append(t)
+    if len(kept) == len(tools):
+        return False
+    data["tools"] = kept
+    return True
 
 
 def _extract_last_user_message(body: bytes) -> tuple[Optional[str], Optional[str]]:
@@ -2760,7 +2911,25 @@ async def _relay_cross_wire(
         )
 
     try:
+        # v0.164：Codex (openai-responses) 在 tools 里带 type=namespace 工具，
+        # linguafranca convert_request 解析工具类型时直接抛 WireConversionError
+        # "unknown variant `namespace`"。必须在转换**之前**剥掉黑名单工具类型，
+        # 否则下游对 out_payload 的 strip 永远轮不到（转换第一步就炸）。
+        _strip_unsupported_tools_in_place(inbound)
+        # v0.199.1：非 vision 模型剥图 + 提示词（判定基于 settings.vision_models，
+        # 与直连路径一致）。跨协议转换前处理，避免图片块经 linguafranca 转成
+        # anthropic image 块后仍被上游 400 "Model do not support image input"。
+        # v0.200：并入上游条目内 vision_models（cfg.vision_models）—— 同一个
+        # 模型名在不同上游可分别声明能不能吃图；命中任一名单才保留图。
+        vision = set(getattr(settings, "vision_models", None) or [])
+        vision |= set(getattr(cfg, "vision_models", None) or [])
+        if model not in vision:
+            _strip_images_with_notice_in_place(inbound)
         out_payload = convert_request(inbound, platform_wire, upstream_wire)
+        # Drop tool types the upstream OpenAI gateway rejects (Codex's
+        # `namespace`). Blacklist-only: tools without a `type` field
+        # (Anthropic/Claude) and all standard types pass through untouched.
+        _strip_unsupported_tools_in_place(out_payload)
     except WireConversionError as exc:
         log.warning("%s cross-wire request convert failed: %s", platform, exc)
         await _complete_inflight(inflight_id)
@@ -3094,6 +3263,93 @@ async def _relay_cross_wire(
     async def gen() -> "AsyncIterator[bytes]":
         nonlocal error_msg
         await _set_inflight_phase(inflight_id, "streaming")
+        # v0.166：收尾逻辑抽成独立 async 闭包，finally 里用 asyncio.shield
+        # 包裹调用 —— 客户端断开时 starlette 取消本任务，finally 内第一个
+        # await 会被再次 CancelledError 打断；shield 后取消信号被外层吞掉，
+        # 整段记录流程得以完整执行（codex 收完即断的请求也能入库）。
+        async def _cross_wire_finalize() -> None:
+            try:
+                await upstream_resp.aclose()
+            except Exception:
+                pass
+            nonlocal_usage = UsageAcc()
+            try:
+                nonlocal_usage = parser.finalize()
+            except Exception:
+                pass
+            record_id = 0
+            try:
+                record_id = await db.record(
+                    platform=platform, model=out_payload.get("model"),
+                    request_id=request_id, usage=nonlocal_usage, status_code=status,
+                    error=error_msg if error_msg else (None if status < 400 else f"upstream_{status}"),
+                    upstream=cfg.name, api_key_alias=None,
+                    # v0.143：客户端入口 wire 透传 → 写 endpoint。
+                    endpoint=client_wire,
+                    agent=agent,
+                    raw_ua=raw_ua,
+                )
+            except Exception as exc:
+                log.exception("db.record failed in cross-wire stream: %s", exc)
+            # v0.120：cross-wire SSE 路径也保存消息原文
+            if record_id and settings.relay_save_messages:
+                try:
+                    user_text, user_json = _extract_last_user_message(out_body_bytes)
+                    await db.record_messages(
+                        record_id,
+                        user_text=user_text,
+                        user_json=user_json,
+                        assistant_text=parser.assembled_text() or None,
+                        assistant_json=None,  # SSE 没有 raw_response
+                    )
+                except Exception as exc:
+                    log.exception("db.record_messages failed in cross-wire stream: %s", exc)
+            try:
+                await _complete_inflight(inflight_id)
+            except Exception as exc:
+                log.exception("_complete_inflight failed in cross-wire stream: %s", exc)
+            # v0.89：广播 done —— 侧栏定稿
+            try:
+                tool_json = parser.assembled_tool_use_json() or ""
+                thinking_final = parser.assembled_thinking() or ""
+                u = nonlocal_usage
+                await _broadcast_live_event(
+                    inflight_id, "done",
+                    phase="done",
+                    assistant_text=parser.assembled_text(),
+                    thinking_text=thinking_final,
+                    tool_use_json=tool_json,
+                    usage_live={
+                        "input_tokens": u.input_tokens,
+                        "output_tokens": u.output_tokens,
+                        "cache_read_input_tokens": u.cache_read_input_tokens,
+                        "cache_creation_input_tokens": u.cache_creation_input_tokens,
+                    },
+                    error=error_msg,
+                )
+            except Exception:
+                log.exception("broadcast done event failed in cross-wire stream")
+            # v0.98 插件钩子：post_response（跨协议流式 finally 内）+
+            # request.done 事件。插件错误已由 run_hooks / emit_event 隔离。
+            try:
+                rinfo = {
+                    "platform": platform,
+                    "cfg": cfg,
+                    "model": model,
+                    "status": status,
+                    "usage": nonlocal_usage,
+                    "error": error_msg if error_msg else (
+                        None if status < 400 else f"upstream_{status}"
+                    ),
+                    "req_db_id": None,
+                    "upstream": cfg.name,
+                    "request_id": request_id,
+                    "streaming": True,
+                }
+                await run_hooks("post_response", rinfo)
+                emit_event("request.done", **rinfo)
+            except Exception:
+                log.exception("plugin post_response hooks failed in cross-wire stream")
         try:
             async for ev in convert_stream(
                 sse_events(), upstream_wire, platform_wire,
@@ -3152,87 +3408,18 @@ async def _relay_cross_wire(
             error_msg = f"stream_error: {exc}"
             log.exception("%s cross-wire unexpected stream error", platform)
         finally:
+            # v0.166：客户端中途断开时 starlette 会 cancel 本任务（spec 2.3
+            # 走 listen_for_disconnect → cancel_scope.cancel()）。任务一旦被
+            # 取消，finally 里**第一个 await 就会立即再次抛 CancelledError**
+            # 打断 finally —— 导致 codex 等「收完即断」的客户端请求永远写不
+            # 进 DB（usage 统计漏记）。把整段收尾逻辑 shield 起来，让记录在
+            # 取消信号到达后仍能跑完。
             try:
-                await upstream_resp.aclose()
+                await asyncio.shield(_cross_wire_finalize())
+            except asyncio.CancelledError:
+                log.info("%s cross-wire finalize cancelled during teardown", platform)
             except Exception:
-                pass
-            try:
-                usage = parser.finalize()
-            except Exception:
-                usage = UsageAcc()
-            req_db_id = 0
-            try:
-                req_db_id = await db.record(
-                    platform=platform, model=out_payload.get("model"),
-                    request_id=request_id, usage=usage, status_code=status,
-                    error=error_msg if error_msg else (None if status < 400 else f"upstream_{status}"),
-                    upstream=cfg.name, api_key_alias=None,
-                    # v0.143：客户端入口 wire 透传 → 写 endpoint。
-                    endpoint=client_wire,
-                    agent=agent,
-                    raw_ua=raw_ua,
-                )
-            except Exception as exc:
-                log.exception("db.record failed in cross-wire stream: %s", exc)
-            # v0.120：cross-wire SSE 路径也保存消息原文
-            if req_db_id and settings.relay_save_messages:
-                try:
-                    user_text, user_json = _extract_last_user_message(out_body_bytes)
-                    await db.record_messages(
-                        req_db_id,
-                        user_text=user_text,
-                        user_json=user_json,
-                        assistant_text=parser.assembled_text() or None,
-                        assistant_json=None,  # SSE 没有 raw_response
-                    )
-                except Exception as exc:
-                    log.exception("db.record_messages failed in cross-wire stream: %s", exc)
-            try:
-                await _complete_inflight(inflight_id)
-            except Exception as exc:
-                log.exception("_complete_inflight failed in cross-wire stream: %s", exc)
-            # v0.89：广播 done —— 侧栏定稿
-            try:
-                tool_json = parser.assembled_tool_use_json() or ""
-                thinking_final = parser.assembled_thinking() or ""
-                u = usage
-                await _broadcast_live_event(
-                    inflight_id, "done",
-                    phase="done",
-                    assistant_text=parser.assembled_text(),
-                    thinking_text=thinking_final,
-                    tool_use_json=tool_json,
-                    usage_live={
-                        "input_tokens": u.input_tokens,
-                        "output_tokens": u.output_tokens,
-                        "cache_read_input_tokens": u.cache_read_input_tokens,
-                        "cache_creation_input_tokens": u.cache_creation_input_tokens,
-                    },
-                    error=error_msg,
-                )
-            except Exception:
-                log.exception("broadcast done event failed in cross-wire stream")
-            # v0.98 插件钩子：post_response（跨协议流式 finally 内）+
-            # request.done 事件。插件错误已由 run_hooks / emit_event 隔离。
-            try:
-                rinfo = {
-                    "platform": platform,
-                    "cfg": cfg,
-                    "model": model,
-                    "status": status,
-                    "usage": usage,
-                    "error": error_msg if error_msg else (
-                        None if status < 400 else f"upstream_{status}"
-                    ),
-                    "req_db_id": None,
-                    "upstream": cfg.name,
-                    "request_id": request_id,
-                    "streaming": True,
-                }
-                await run_hooks("post_response", rinfo)
-                emit_event("request.done", **rinfo)
-            except Exception:
-                log.exception("plugin post_response hooks failed in cross-wire stream")
+                log.exception("%s cross-wire finalize failed during teardown", platform)
 
     return StreamingResponse(
         gen(), status_code=status,
@@ -3578,7 +3765,18 @@ async def relay(
     # （分开做是两次 JSON 全量往返）。OpenCode Zen 上游不认 scope 字段，
     # Anthropic 签的 signature 跨上游也验不过。非 adapter 路径才需要：
     # adapter 路径（requires_anthropic_adapter）在前面已按协议整块重发。
-    body = _strip_disallowed_content(body)
+    # v0.199.1：非 vision 模型剥图 + 提示词（判定基于 settings.vision_models +
+    # 当前目标 model）。model 是目标上游改写后的模型（DISPATCH 用同一个值），
+    # 与 cross-wire 路径的判定口径一致。
+    # v0.200：并入上游条目内 vision_models（cfg.vision_models）—— 命中
+    # 任一（上游名单 ∪ 全局兜底名单）才保留图，否则剥图 + 提示词。
+    _vm = set(getattr(settings, "vision_models", None) or [])
+    _vm |= set(getattr(cfg, "vision_models", None) or [])
+    body = _strip_disallowed_content(
+        body,
+        vision_models=sorted(_vm),
+        model=model,
+    )
 
     # 4. Forward headers (hop-by-hop filtered). Optionally override the
     #    auth header with the configured api_key, or detect the auto sentinel.
@@ -3802,6 +4000,117 @@ async def relay(
     async def stream_iter() -> "AsyncIterator[bytes]":
         nonlocal error_msg
         await _set_inflight_phase(inf.request_id, "streaming")
+        # v0.166：与 cross-wire 的 gen() 同款修复 —— 客户端中途断开时
+        # starlette 会 cancel 本任务，finally 内第一个 await（aclose /
+        # db.record）会被再次 CancelledError 打断，导致直连路径下「收完
+        # 即断」的客户端（codex 等）请求漏记 DB。收尾逻辑抽成独立闭包，
+        # finally 用 asyncio.shield 包裹，让记录在取消信号到达后仍能跑完。
+        async def _direct_finalize() -> None:
+            try:
+                await upstream_resp.aclose()
+            except Exception:
+                pass
+            _tlog.info(
+                "STREAM END upstream=%s status=%s chunks=%d total_bytes=%d error=%s",
+                cfg.name, status, _chunk_no, _total_bytes, error_msg,
+            )
+            # Finalize parser and write the row. This MUST run for every
+            # request, but each step is independently guarded — a SQLite
+            # blip on db.record / db.record_messages must NOT prevent
+            # _complete_inflight from running, otherwise the entry gets
+            # stuck in _in_flight forever and the "实时" panel shows a
+            # ghost STREAMING row that never disappears.
+            try:
+                fin_usage = parser.finalize()
+            except Exception as exc:
+                log.warning("parser finalize error: %s", exc)
+                fin_usage = UsageAcc()
+            req_db_id = 0
+            try:
+                req_db_id = await db.record(
+                    platform=platform,
+                    model=model,
+                    request_id=request_id,
+                    usage=fin_usage,
+                    status_code=status,
+                    error=error_msg if error_msg else (None if status < 400 else f"upstream_{status}"),
+                    upstream=cfg.name,
+                    api_key_alias=api_key_alias,
+                    # v0.143：客户端入口 wire 透传 → 写 endpoint。
+                    endpoint=client_wire,
+                    agent=agent,
+                    raw_ua=raw_ua,
+                )
+            except Exception as exc:
+                log.exception("db.record failed for %s: %s", inf.request_id, exc)
+            if req_db_id and settings.relay_save_messages:
+                try:
+                    user_text, user_json = _extract_last_user_message(body)
+                    await db.record_messages(
+                        req_db_id,
+                        user_text=user_text,
+                        user_json=user_json,
+                        assistant_text=parser.assembled_text() or None,
+                        # Tool-use blocks get synthesised into a synthetic
+                        # assistant message JSON so the GUI dialog can show
+                        # what tools the model called. None for pure-text
+                        # turns — no need to clutter the row with empty JSON.
+                        assistant_json=parser.assembled_tool_use_json(),
+                        # v0.89: extended-thinking 正文以独立消息行落盘
+                        # （role='thinking'），由对话详情弹窗按 role 渲染。
+                        # 解析器只在 Anthropic 路径上累积；OpenAI 路径
+                        # 的 stub 永远返回 None —— record_messages 已经处理
+                        # 空值跳过，这里传 None 即可。
+                        thinking_text=parser.assembled_thinking(),
+                    )
+                except Exception as exc:
+                    log.exception("db.record_messages failed for %s: %s", inf.request_id, exc)
+            # _complete_inflight is the LAST step — by here we've already
+            # given up on persistent state, so wrap defensively and let the
+            # sweeper pick up anything that escapes even this.
+            try:
+                await _complete_inflight(inf.request_id)
+            except Exception as exc:
+                log.exception("_complete_inflight failed for %s: %s", inf.request_id, exc)
+            # v0.89：广播 done —— 侧栏定稿。tool_use_json 此时已累完。
+            try:
+                tool_json = parser.assembled_tool_use_json() or ""
+                u = fin_usage
+                await _broadcast_live_event(
+                    inf.request_id, "done",
+                    phase="done",
+                    assistant_text=parser.assembled_text(),
+                    thinking_text=parser.assembled_thinking() or "",
+                    tool_use_json=tool_json,
+                    usage_live={
+                        "input_tokens": u.input_tokens,
+                        "output_tokens": u.output_tokens,
+                        "cache_read_input_tokens": u.cache_read_input_tokens,
+                        "cache_creation_input_tokens": u.cache_creation_input_tokens,
+                    },
+                    error=error_msg,
+                )
+            except Exception:
+                log.exception("broadcast done event failed in stream_iter")
+            # v0.98 插件钩子：post_response（流式，流结束 finally 内）+
+            # request.done 事件。插件错误已由 run_hooks / emit_event 隔离。
+            try:
+                rinfo = {
+                    "platform": platform,
+                    "cfg": cfg,
+                    "model": model,
+                    "status": status,
+                    "usage": fin_usage,
+                    "error": error_msg,
+                    "req_db_id": req_db_id,
+                    "upstream": cfg.name,
+                    "request_id": request_id,
+                    "streaming": True,
+                }
+                await run_hooks("post_response", rinfo)
+                emit_event("request.done", **rinfo)
+            except Exception:
+                log.exception("plugin post_response hooks failed in stream_iter")
         _chunk_no = 0
         _total_bytes = 0
         _first_sse_logged = 0
@@ -3892,112 +4201,15 @@ async def relay(
             error_msg = f"stream_error: {exc}"
             log.exception("%s unexpected stream error", platform)
         finally:
+            # v0.166：与 cross-wire 的 gen() 同款 shield 修复 —— 客户端断开
+            # 时任务被 cancel，finally 内 await 会被再次 CancelledError 打断，
+            # 收尾逻辑抽到 _direct_finalize() 里 shield 保护，DB 记录必达。
             try:
-                await upstream_resp.aclose()
+                await asyncio.shield(_direct_finalize())
+            except asyncio.CancelledError:
+                log.info("%s direct-stream finalize cancelled during teardown", platform)
             except Exception:
-                pass
-            _tlog.info(
-                "STREAM END upstream=%s status=%s chunks=%d total_bytes=%d error=%s",
-                cfg.name, status, _chunk_no, _total_bytes, error_msg,
-            )
-            # Finalize parser and write the row. This MUST run for every
-            # request, but each step is independently guarded — a SQLite
-            # blip on db.record / db.record_messages must NOT prevent
-            # _complete_inflight from running, otherwise the entry gets
-            # stuck in _in_flight forever and the "实时" panel shows a
-            # ghost STREAMING row that never disappears.
-            try:
-                usage = parser.finalize()
-            except Exception as exc:
-                log.warning("parser finalize error: %s", exc)
-                usage = UsageAcc()
-            req_db_id = 0
-            try:
-                req_db_id = await db.record(
-                    platform=platform,
-                    model=model,
-                    request_id=request_id,
-                    usage=usage,
-                    status_code=status,
-                    error=error_msg if error_msg else (None if status < 400 else f"upstream_{status}"),
-                    upstream=cfg.name,
-                    api_key_alias=api_key_alias,
-                    # v0.143：客户端入口 wire 透传 → 写 endpoint。
-                    endpoint=client_wire,
-                    agent=agent,
-                    raw_ua=raw_ua,
-                )
-            except Exception as exc:
-                log.exception("db.record failed for %s: %s", inf.request_id, exc)
-            if req_db_id and settings.relay_save_messages:
-                try:
-                    user_text, user_json = _extract_last_user_message(body)
-                    await db.record_messages(
-                        req_db_id,
-                        user_text=user_text,
-                        user_json=user_json,
-                        assistant_text=parser.assembled_text() or None,
-                        # Tool-use blocks get synthesised into a synthetic
-                        # assistant message JSON so the GUI dialog can show
-                        # what tools the model called. None for pure-text
-                        # turns — no need to clutter the row with empty JSON.
-                        assistant_json=parser.assembled_tool_use_json(),
-                        # v0.89: extended-thinking 正文以独立消息行落盘
-                        # （role='thinking'），由对话详情弹窗按 role 渲染。
-                        # 解析器只在 Anthropic 路径上累积；OpenAI 路径
-                        # 的 stub 永远返回 None —— record_messages 已经处理
-                        # 空值跳过，这里传 None 即可。
-                        thinking_text=parser.assembled_thinking(),
-                    )
-                except Exception as exc:
-                    log.exception("db.record_messages failed for %s: %s", inf.request_id, exc)
-            # _complete_inflight is the LAST step — by here we've already
-            # given up on persistent state, so wrap defensively and let the
-                    # sweeper pick up anything that escapes even this.
-            try:
-                await _complete_inflight(inf.request_id)
-            except Exception as exc:
-                log.exception("_complete_inflight failed for %s: %s", inf.request_id, exc)
-            # v0.89：广播 done —— 侧栏定稿。tool_use_json 此时已累完。
-            try:
-                tool_json = parser.assembled_tool_use_json() or ""
-                u = usage
-                await _broadcast_live_event(
-                    inf.request_id, "done",
-                    phase="done",
-                    assistant_text=parser.assembled_text(),
-                    thinking_text=parser.assembled_thinking() or "",
-                    tool_use_json=tool_json,
-                    usage_live={
-                        "input_tokens": u.input_tokens,
-                        "output_tokens": u.output_tokens,
-                        "cache_read_input_tokens": u.cache_read_input_tokens,
-                        "cache_creation_input_tokens": u.cache_creation_input_tokens,
-                    },
-                    error=error_msg,
-                )
-            except Exception:
-                log.exception("broadcast done event failed in stream_iter")
-            # v0.98 插件钩子：post_response（流式，流结束 finally 内）+
-            # request.done 事件。插件错误已由 run_hooks / emit_event 隔离。
-            try:
-                rinfo = {
-                    "platform": platform,
-                    "cfg": cfg,
-                    "model": model,
-                    "status": status,
-                    "usage": usage,
-                    "error": error_msg,
-                    "req_db_id": req_db_id,
-                    "upstream": cfg.name,
-                    "request_id": request_id,
-                    "streaming": True,
-                }
-                await run_hooks("post_response", rinfo)
-                emit_event("request.done", **rinfo)
-            except Exception:
-                log.exception("plugin post_response hooks failed in stream_iter")
-
+                log.exception("%s direct-stream finalize failed during teardown", platform)
     return StreamingResponse(
         stream_iter(),
         status_code=status,

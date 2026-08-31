@@ -1,0 +1,175 @@
+<!doctype html>
+<!--
+  v0.179 生产悬浮球渲染层 —— 纯 pywebview 幽灵球（替换 GDI BallLayer 自绘）。
+
+  视觉 = v0.178 demo（scratch/webview_ball_demo/mini_ghost_ball.html）原样，
+  复刻 v0.165e GDI+ BallLayer 的 "Claude 小幽灵"（ball_layer.py _draw_ball）：
+
+    几何（相对球窗边长 s，窗口 = ball_size 方）：
+      body      x 0.13..0.87  y 0.22..0.80  上圆角(r=0.07s) 底部平
+      arms      x 0.06..0.94  y 0.47..0.60  身体两侧短臂
+      hem       body 底边 4 个下凸半圆（r=0.055s，等距），波浪下摆
+      eyes      两竖条：中心 x 0.37/0.63，y 0.35..0.52，宽 0.06s
+      颜色       body #D27C63  eye #6C402E
+    状态（由后端 ballSetState 驱动，无自动定时器/形态循环）：
+      idle      幽灵站立，静态
+      flow      上下浮动(bob=sin*2%) + 呼吸光晕(halo #D29678,
+                r=0.44..0.49s, alpha 52..88)
+      s2        绕中心 180° 倒立(脚朝天) + 脉冲外环(#D8605C alpha 60,
+                r=0.47s*0.95..1.05) + 右上红心徽标(白底红心 r 0.075s，
+                位于 +0.22s,-0.22s 偏置)
+
+  生产桥（与 GDI 版行为契约一致，用户锁定）：
+    * window.ballSetState(state) —— 后端推 idle/flow/s2。
+    * 点击球 → window.pywebview.api.ballClicked() → gui.Api.ball_clicked()
+      → pool.ball_clicked() 切 S1<->S2（侧栏收起/展开）。不做形态循环。
+    * 拖动由 Python 侧全局轮询（ball_layer2.py）负责，页面不处理。
+
+  透明：pywebview transparent=True + 窗体 BackColor=TransparencyKey=#010203
+  （ball_layer2 在 events.loaded + sleep(2) 后设）→ 球外真透桌面。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>悬浮球</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: default;
+      }
+      svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+      /* flow：整体轻微上下浮动（bob ±2%） */
+      #ball.ghost-flow { animation: bob 2.6s ease-in-out infinite; }
+      @keyframes bob {
+        0%, 100% { transform: translateY(0); }
+        50%      { transform: translateY(-2.2%); }
+      }
+      /* 呼吸光晕（flow / s2） */
+      #halo { opacity: 0; transform-origin: 50% 50%; }
+      #ball.ghost-flow #halo { opacity: 1; animation: halo-pulse 2.2s ease-in-out infinite; }
+      #ball.ghost-done #halo { opacity: 1; animation: halo-pulse 2.2s ease-in-out infinite; }
+      @keyframes halo-pulse {
+        0%, 100% { transform: scale(1);   opacity: .55; }
+        50%      { transform: scale(1.13); opacity: .9; }
+      }
+      /* s2：180° 倒立 + 脉冲外环 + 红心徽标 */
+      #ball.ghost-done #ghost-body { transform: rotate(180deg); transform-origin: 50% 50%; }
+      #ring { opacity: 0; transform-origin: 50% 50%; }
+      #ball.ghost-done #ring { opacity: 1; animation: ring-pulse 2.2s ease-in-out infinite; }
+      @keyframes ring-pulse {
+        0%, 100% { transform: scale(.96); opacity: .6; }
+        50%      { transform: scale(1.04); opacity: 1; }
+      }
+      #heart { opacity: 0; transform-box: fill-box; transform-origin: center; }
+      #ball.ghost-done #heart { opacity: 1; animation: heart-beat 1.4s ease-in-out infinite; }
+      @keyframes heart-beat {
+        0%, 100% { transform: scale(1); }
+        50%      { transform: scale(1.15); }
+      }
+    </style>
+  </head>
+  <body data-state="idle">
+    <svg id="ball" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="haloGrad" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#D29678" stop-opacity="0.5"/>
+          <stop offset="100%" stop-color="#D29678" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+
+      <!-- 呼吸光晕（flow/s2，与 GDI alpha 52..88 同向的柔光） -->
+      <circle id="halo" cx="50" cy="50" r="46" fill="url(#haloGrad)" />
+
+      <!-- 幽灵主体（含四肢 + 波浪下摆 + 竖眼），整组随状态旋转/浮动 -->
+      <g id="ghost-body">
+        <rect x="6" y="47" width="13" height="13" fill="#D27C63" />   <!-- 左臂 -->
+        <rect x="81" y="47" width="13" height="13" fill="#D27C63" />  <!-- 右臂 -->
+        <rect x="13" y="22" width="74" height="58" rx="7" fill="#D27C63" /> <!-- 身体 -->
+        <!-- 波浪下摆：4 个下凸半圆，圆心在身体底边，等距 -->
+        <circle cx="20.2" cy="80" r="5.5" fill="#D27C63" />
+        <circle cx="36.4" cy="80" r="5.5" fill="#D27C63" />
+        <circle cx="63.6" cy="80" r="5.5" fill="#D27C63" />
+        <circle cx="79.8" cy="80" r="5.5" fill="#D27C63" />
+        <!-- 眼睛（竖条） -->
+        <rect x="34" y="35" width="6" height="17" rx="1" fill="#6C402E" />
+        <rect x="60" y="35" width="6" height="17" rx="1" fill="#6C402E" />
+      </g>
+
+      <!-- s2：脉冲外环 + 红心徽标 -->
+      <circle id="ring" cx="50" cy="50" r="47" fill="none" stroke="#D8605C"
+              stroke-width="3" stroke-opacity="0.5" />
+      <g id="heart">
+        <circle cx="72" cy="28" r="7.5" fill="#ffffff" />
+        <path d="M72 30.5 C70.8 28.6 67.4 27.4 66.2 29.2 C65 31 65.4 33.6 67.6 35 C68.9 35.9 71.2 35.9 72 34.9 C72.8 35.9 75.1 35.9 76.4 35 C78.6 33.6 79 31 77.8 29.2 C76.6 27.4 73.2 28.6 72 30.5 Z"
+              fill="#FF4848" />
+      </g>
+    </svg>
+
+    <script>
+      // 生产状态机：后端 ballSetState 驱动，无自动定时器 / 形态循环。
+      // SVG：className 是 SVGAnimatedString，赋字符串不生效 → 用 setAttribute。
+      const CLS = { idle: "ghost-idle", flow: "ghost-flow", s2: "ghost-done" };
+      const ball = document.getElementById("ball");
+
+      window.ballSetState = function (state) {
+        ball.setAttribute("class", CLS[state] || CLS.idle);
+      };
+
+      // 点击球 → 生产桥（gui.Api.ball_clicked → pool 切 S1<->S2，收起/展开侧栏）。
+      // 不做形态循环。
+      window.ballClicked = function () {
+        if (window.pywebview && window.pywebview.api
+            && window.pywebview.api.ballClicked) {
+          window.pywebview.api.ballClicked();
+        }
+      };
+
+      // 拖拽：由 Electron 主进程状态机处理（electron_app/ball_main.js 的
+      // drag-start/drag-end + 12ms 光标轮询，位移≥4px 判拖动否则判点击 →
+      // TCP clicked 事件回 Python）。渲染进程只需：
+      //   mousedown（球内圆命中）→ window.ballDrag.start()
+      //   mouseup（document 级） → window.ballDrag.end()
+      // 命中判定：整窗可点（外接圆半径 50，viewBox 100 单位）。v0.203 前
+      // 用内切圆 0.48·边长，而球身/双臂可见范围横跨 x 6..94、y 22..80，
+      // 大半可见边缘都在命中圆外 —— 点到边缘无响应（且 Electron 主进程
+      // hoverTick 按窗口矩形全吞点击，两套判据不一致）。改外接圆与
+      // hoverTick 的「窗口矩形即吞」对齐：全窗点按均可识别。
+      window.ballDrag = window.ballDrag || {
+        start: function () {},
+        end: function () {},
+      };
+      var _dragCx = 0, _dragCy = 0;
+      var _dragR2 = Math.pow(50, 2); // viewBox 100 单位下的半径平方
+
+      document.getElementById("ball").addEventListener("mousedown", function (e) {
+        // viewBox 100x100 相对坐标 → 球心 (50,50)
+        var rect = e.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        var px = (e.clientX - rect.left) / rect.width * 100;
+        var py = (e.clientY - rect.top) / rect.height * 100;
+        var dx = px - 50, dy = py - 50;
+        if (dx * dx + dy * dy > _dragR2) return; // 透明四角不触发拖拽
+        _dragCx = e.clientX;
+        _dragCy = e.clientY;
+        window.ballDrag.start();
+      });
+      document.addEventListener("mouseup", function () {
+        if (_dragCx === 0 && _dragCy === 0) return;
+        _dragCx = 0; _dragCy = 0;
+        window.ballDrag.end();
+      });
+      document.addEventListener("mouseleave", function () {
+        if (_dragCx === 0 && _dragCy === 0) return;
+        _dragCx = 0; _dragCy = 0;
+        window.ballDrag.end();
+      });
+    </script>
+  </body>
+</html>

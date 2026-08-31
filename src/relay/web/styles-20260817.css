@@ -922,6 +922,60 @@ body.is-settings .nav-sub { display: flex; }
   font-weight: 600;
 }
 
+/* v0.201：平台流量卡右键菜单 —— 复用 .upstream-menu 视觉语言（同
+ * panel 底 / hairline 边 / radius-md / 阴影 / 开合动画）。单列纵向，
+ * z-index 高于卡片浮层。由 app.js 的 #agent-ctx-menu 动态挂 body。 */
+.agent-ctx-menu {
+  position: fixed;
+  z-index: 900;
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
+  opacity: 0;
+  transform: translateY(4px) scale(.98);
+  pointer-events: none;
+  transition: opacity .12s var(--ease-out), transform .12s var(--ease-out);
+}
+
+.agent-ctx-menu.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.agent-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.agent-ctx-item:hover {
+  background: var(--glass-surface-soft);
+  color: var(--text-primary);
+}
+
+.agent-ctx-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
 .status-card {
   /* v0.43：sidebar 不再是独立 panel，status-card 跟着软化——
    * 去掉 border / background / backdrop-filter，只留内容本身。 */
@@ -1275,34 +1329,18 @@ body.is-settings .nav-sub { display: flex; }
   flex-wrap: wrap;
 }
 
-.tms-eyebrow {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.tms-name {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
-  font-variant-numeric: tabular-nums;
-}
-
+/* v0.205：模型名已移除，头部只剩「总计 + 请求数」。
+   v0.206：改为以卡片中轴对称 —— 两个统计块居中排布，左右围绕中轴
+   对称分布。 */
 .tms-meta {
   display: flex;
   align-items: baseline;
+  justify-content: center;
   gap: var(--spacing-xl);
+  width: 100%;
   font-size: 12px;
   color: var(--text-secondary);
 }
-
-/* In the new layout the right-most stat ("请求数") is the last child of
- * .tms-header, so push it to the far right by claiming all the free
- * space before it. Keeps "总计" glued to the model name on the left. */
-.tms-stat.tms-stat-total:last-of-type { margin-left: auto; }
 
 .tms-stat {
   display: inline-flex;
@@ -1340,15 +1378,7 @@ body.is-settings .nav-sub { display: flex; }
   margin-bottom: 2px;
 }
 
-/* v0.10：总计数字可点击，在 全模型合计 / 用量最大模型 间切换。 */
-#tms-total {
-  cursor: pointer;
-}
-#tms-total:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
+/* v0.205：总计数字不再可点击 —— 切换随模型名一起移除，样式回归普通数字。 */
 
 /* "总计" 上方的财务大写中文（壹贰叁...），小字、灰色、低对比。
    视觉份量刻意压低，避免和下面的 26px 数字抢戏。 */
@@ -2390,15 +2420,27 @@ body[data-view-dir="up"] .view:not([hidden]) {
   color: #fff;
   border-color: transparent;
 }
-/* 竖状图：body 固定高。 */
+/* v0.203：竖状图窗口二极（24h / 3d）—— 只在竖状图模式显示；与「饼图/
+   竖状图」切换钮之间留 6px 视觉间隙（border-left 已按相邻按钮去掉）。 */
+.agent-hours-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  margin-left: 6px;
+}
+.agent-hours-group[hidden] {
+  display: none;
+}
+/* 竖状图：body 固定高，卡片不随平台数拉伸 —— 列表区溢出时滚动。 */
 #card-agent-body {
   position: relative;
-  height: 200px;
+  height: 250px;
   padding: 0;
   overflow: hidden;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
 }
 /* 列表：恢复自然高度（.card-body 默认样式），不走 flex 居中。 */
 .glass-card.agent-view-list #card-agent-body {
@@ -2409,10 +2451,47 @@ body[data-view-dir="up"] .view:not([hidden]) {
   align-items: initial;
   justify-content: initial;
 }
-#card-agent-body svg {
+/* v0.203：柱状图 SVG 固定高度（JS 写死 px），宽度自适应，不压缩。 */
+#card-agent-body svg.ag-chart-svg {
   display: block;
   width: 100%;
-  height: 100%;
+  flex: none;
+}
+/* v0.202/0.203：索引列表 —— HTML 列表，body 内 flex-column 布局下占满
+   剩余高度（flex:1 + min-height:0），超长时滚动，不拉长卡片。 */
+#card-agent-body .ag-legend-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 8px 6px 10px;
+}
+#card-agent-body .ag-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+#card-agent-body .ag-legend-row:hover {
+  background: var(--glass-surface-soft);
+}
+#card-agent-body .ag-legend-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+/* 文字等宽优先、中文回退雅黑，tabular-nums 对齐数字。 */
+#card-agent-body .ag-legend-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 #card-agent-body line.ag-grid {
   stroke: var(--hairline);
@@ -2422,11 +2501,6 @@ body[data-view-dir="up"] .view:not([hidden]) {
   fill: var(--text-secondary);
   font-size: 10px;
   font-weight: 600;
-}
-#card-agent-body text.ag-label {
-  fill: var(--text-secondary);
-  font-size: 10px;
-  font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
 }
 .stats-chart-host {
   position: relative;
@@ -2678,7 +2752,7 @@ body.card-resizing-both * {
 /* 无持久化高度的卡：只保留默认 grid 行高（--ov-h 未设置时不强行给值，
    否则所有卡都变成固定高度。默认只有拖过高度的卡才有 --ov-h）。
    --ov-h 写在 .card-body 上（图表容器随高度缩放），整卡高度 = 标题 + body。
-   !important：压过 #card-agent-body {height:200px} 这类 ID 规则；
+   !important：压过 #card-agent-body {height:250px} 这类 ID 规则；
    :not(.agent-view-list)：平台流量卡在列表模式下保持自然高度（不裁剪行）。 */
 .view[data-view="overview"] .grid .glass-card .card-body {
   height: auto;
@@ -3114,13 +3188,13 @@ body.card-resizing-both * {
 .settings-view {
   display: flex;
   flex-direction: column;
-  /* v0.193：设置页整体缩放，v0.194 缩小 10%（1.2× → 1.08×）。
-   * 非标准的 zoom 属性在 Chromium / WebView2 上等价于整页 layout 缩放
-   * （与 transform: scale 不同 —— zoom 参与布局计算，父容器 .main 的
-   * overflow-y:auto 会自然接管滚动，缩放后的内容不会撑爆窗口；只改字号
-   * 会到处漏 padding/gap/控件大小，用户要的是"所有元素整体缩放"，zoom
-   * 一行解决）。仅作用于 .settings-view 根容器，不影响其它视图。 */
-  zoom: 1.08;
+  /* v0.193：设置页整体放大 1.2×。非标准的 zoom 属性在 Chromium / WebView2
+   * 上等价于整页 layout 缩放（与 transform: scale 不同 —— zoom 参与
+   * 布局计算，父容器 .main 的 overflow-y:auto 会自然接管滚动，1.2×
+   * 后的内容不会撑爆窗口；只放大字会到处漏 padding/gap/控件大小，
+   * 用户要的是"所有元素整体调大"，zoom 一行解决。 仅作用于 .settings-view
+   * 根容器，不影响其它视图。 */
+  zoom: 1.2;
 }
 .settings-section {
   padding: var(--spacing-lg) 0;
@@ -3245,6 +3319,32 @@ body.card-resizing-both * {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
+}
+
+/* 更新日志子项（开发者模式）—— 纵向堆叠：标题在上、内容在下；
+   覆盖 .settings-item 默认的横向 space-between 布局。 */
+.settings-item#prefs-changelog-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--spacing-xs);
+}
+.settings-changelog {
+  width: 100%;
+  box-sizing: border-box;
+  max-height: 320px;
+  min-height: 180px;
+  overflow-y: auto;
+  resize: vertical;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--panel-alt);
+  padding: var(--spacing-sm) var(--spacing-md);
 }
 
 /* v0.113n：存储管理区块 —— 操作按钮行 + 清理天数弹窗。
@@ -4463,6 +4563,75 @@ select:focus {
 
 .cfg-chip-remove:hover { color: var(--quota-exhausted); }
 
+/* v0.200：新建上游「允许的模型」逐行渲染的列表容器。放进 .cfg-chips
+ * （flex wrap），自身占满整行（flex-basis:100%），内部纵向堆叠行。 */
+.cfg-model-list {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 0;
+}
+
+/* 空列表时整行收掉（flex-basis:100% 会占满一行，把下方输入框顶下去，
+ * 视觉上多一块空白）。:empty 只在没有任何模型行时生效。 */
+#create-model-list:empty {
+  flex-basis: 0;
+  padding: 0;
+  gap: 0;
+}
+
+/* v0.200：每行 = 模型名 + 「支持图片输入」勾选框 + 移除钮。独立占一行
+ * （父 .cfg-model-list 纵向堆叠）。样式沿用 .cfg-chip 的配色/圆角。 */
+.cfg-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-basis: 100%;
+  padding: 4px 6px 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.cfg-model-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.cfg-model-vision {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cfg-model-vision-cb {
+  accent-color: var(--accent, #4c9aff);
+  cursor: pointer;
+}
+
+.cfg-row-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.cfg-row-remove:hover { color: var(--quota-exhausted); }
+
 /* v0.190：支持图片的模型 chip 列表容器。继承自 .settings-item-control
  * （display:flex 单行、flex:none、无 wrap），chip 一多就横向溢出看不全。
  * 这里覆盖成可换行：flex:1 占满标题与保存按钮之间的空间、min-width:0 允许
@@ -4867,6 +5036,26 @@ select:focus {
 }
 .upstream-models-table tbody tr:last-child td { border-bottom: none; }
 .upstream-models-table tbody tr:hover td { background: var(--panel-alt); }
+
+/* v0.204：上游弹窗「分布调用竖状图」—— 表格下方区块。host 复用
+   .stats-chart-host 的 svg 容器规则（.md-svg absolute / .md-tip / 空态），
+   这里只补区块间距 + 小节标题。 */
+.upstream-models-chart {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+.upstream-models-chart-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.upstream-models-chart-host {
+  position: relative;
+  min-height: 200px;
+  overflow: hidden;
+}
 
 /* v0.120：链接上游明细 modal 的「属于上游」头部 + 聚合统计 + 成员分块。
    复用既有 .cfg-linked-chip（紫底 + 🔗 图标）显示虚拟名/成员名。 */
@@ -5613,10 +5802,6 @@ body.overview-no-frame .view[data-view="overview"] .glass-card::before {
   max-width: 760px;
   margin: 8px auto 32px auto;
   padding: 0 24px;
-  /* v0.194：配置页整体缩小 10%。与 .settings-view 同用 zoom（Chromium /
-   * WebView2 上等价整页 layout 缩放），仅作用于 .config-page 根容器，
-   * 不影响其它视图。 */
-  zoom: 0.9;
 }
 .config-page .cfg-help { line-height: 1.7; font-size: 13.5px; color: var(--text-primary); }
 /* —— 段落 —— */

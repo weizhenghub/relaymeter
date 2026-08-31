@@ -4,17 +4,19 @@
 
 <p align="center">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
-  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
-</p>
-&nbsp;&nbsp;
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">  
+</p>  
+&nbsp;&nbsp; 
+<b>A local relay for all AI coding agents. Translates between Anthropic / OpenAI protocols and meters token usage across every request, platform, and upstream.</b>
 
-**1. Token metering**<br>
-&nbsp;&nbsp;Meters the token usage of every request packet passing through the relay.<br>
-Break down consumption by platform, model, or upstream, and optionally save raw message bodies to a local database.<br>
-**2. Protocol conversion**<br>
-&nbsp;&nbsp;Converts between incompatible client and upstream protocols<br>
-(Anthropic Messages, OpenAI Chat Completions, OpenAI Responses — any-to-any).<br>
-**3. Live streams**<br>
+
+**1. Token metering**  
+&nbsp;&nbsp;Meters the token usage of every request packet passing through the relay. Break down consumption by platform, model, or upstream,
+and optionally save raw message bodies to a local database.  
+**2. Protocol conversion**  
+&nbsp;&nbsp;Converts between incompatible client and upstream protocols
+(Anthropic Messages, OpenAI Chat Completions, OpenAI Responses — any-to-any).  
+**3. Live streams**  
 &nbsp;&nbsp;Watch the in-flight thinking and output text streams in the live-stream sidebar.
 
 
@@ -24,33 +26,33 @@ Break down consumption by platform, model, or upstream, and optionally save raw 
 
 
 ## Why you need it
-**1. You run several agents (Claude Code, Codex, OpenClaw…) against several model providers (Anthropic, MiniMax, DeepSeek, ollama…).**<br>
-&nbsp;&nbsp;Their protocols differ — some speak Anthropic, some speak OpenAI. On an Anthropic-only client you can't use an OpenAI-only upstream:<br>
-the provider rejects the payload, and the client can't parse the response either.<br>
-**2. You have multiple upstreams and models, and you want to switch model or upstream per task — without editing config files on a pile of platforms.**<br>
-**3. You use one upstream provider across several platforms and want to know how many tokens it consumed in total. But no tool except the provider's own web page gives you a unified view of total token consumption.**<br>
-**4. Many coding-agent platforms are a black box while coding — they don't expose the thinking stream, sometimes not even the text stream. You can't see what's being produced, or whether it's still running or already hung.**<br>
-**5. You just want to admire how many tokens you can burn.**
+**1. You run several agents (Claude Code, Codex, OpenClaw…) against several model providers (Anthropic, MiniMax, DeepSeek, ollama…).
+&nbsp;&nbsp;Their protocols differ — some speak Anthropic, some speak OpenAI. On an Anthropic-only client you can't use an OpenAI-only upstream:
+the provider rejects the payload, and the client can't parse the response either.  
+2. You have multiple upstreams and models, and you want to switch model or upstream per task — without editing config files on a pile of platforms.  
+3. You use one upstream provider across several platforms and want to know how many tokens it consumed in total. But no tool except the provider's own web page gives you a unified view of total token consumption.  
+4. Many coding-agent platforms are a black box while coding — they don't expose the thinking stream, sometimes not even the text stream. You can't see what's being produced, or whether it's still running or already hung.  
+5. You just want to admire how many tokens you can burn.**  
 
 ## What RelayMeter can do
 
 **• Click to switch to the model you want:**
-<p style="margin-left:10%"><img src="img_1.png" alt="" width="480"></p>
+<img src="img_1.png" alt="" style="width: 60%;margin-left: 5%;" />  
 
-**• View traffic stats across platforms:**
-<p style="margin-left:10%"><img src="img_13.png" alt="" width="420"></p>
+**• View traffic stats across platforms:**  
+<img src="img_13.png" alt="" style="width: 60%;margin-left: 5%;" />
 
 **• Inspect raw message bodies right in history**
-<p style="margin-left:10%"><img src="output2.gif" alt="" width="480"></p>
+<img src="output2.gif" alt="" style="width: 70%;margin-left: 5%;" />  
 
-**• Rich charts:**
-<p style="margin-left:10%"><img src="output3.gif" alt="" width="640"></p>
+**• Rich charts:**  
+<img src="output3.gif" alt="" style="width: 60%;margin-left: 5%;" />  
 
-**• Stream-status indicator animations**
-<p style="margin-left:10%"><img src="output4.gif" alt="" width="560"></p>
+**• Stream-status indicator animations**  
+<img src="output4.gif" alt="" style="width: 60%;margin-left: 5%;" />  
 
-**• Open the live-stream sidebar to watch streaming content and tool calls in real time**
-<p style="margin-left:10%"><img src="output.gif" alt="" width="320"></p>
+**• Open the live-stream sidebar to watch streaming content and tool calls in real time**  
+<img src="output.gif" alt="" style="width: 40%;margin-left: 5%;" />    
 
 **• Plus a floating-ball sidebar control, passthrough mode, cross-protocol conversion, stream-platform detection, and more.**
 <br><br>
@@ -63,22 +65,12 @@ the provider rejects the payload, and the client can't parse the response either
 ### 1. Install
 
 ```bash
-git clone https://github.com/weizhenghub/relaymeter.git
+git clone https://github.com/<your-org>/relaymeter.git
 cd relaymeter
 python -m pip install -e .
 ```
 
 Python 3.11+ recommended. Runs on Windows / macOS / Linux. The desktop GUI needs a pywebview-supported system WebView backend (Windows ships WebView2, macOS ships WKWebView, Linux needs `webkit2gtk-4.1`).
-
-> **Floating-ball / live-panel window (Electron)** — the floating sidebar ball and the live-panel window are Electron renderers, not WebView. To enable them, install the Electron runtime after cloning:
-
-```bash
-cd src/relay/electron_app
-npm ci          # or npm install; downloads the Electron binary into node_modules
-cd ../..
-```
-
-Without this step the main dashboard still works, but the floating ball and live-panel window won't appear (the relay logs `electron.exe not found`).
 
 ### 2. Launch
 
@@ -101,15 +93,27 @@ curl http://127.0.0.1:8088/healthz   # → {"ok": true}
 curl http://127.0.0.1:8088/stats     # total tokens per platform
 curl http://127.0.0.1:8088/live      # in-flight requests
 ```
-### 4. Link a model provider in the relay
-**Upstreams -> New upstream:**
-<p style="margin-left:10%"><img src="img_15.png" alt="" width="440"></p>
+### 4. Link a model provider in the relay  
+**Upstreams -> New upstream:**  
+<img src="img_15.png" alt="" style="width: 60%;margin-left: 5%;" />    
 You can create multiple models; press Enter to confirm each one.
+
+Advanced options (billing / multipliers / quotas / protocol adapter, collapsible):
+
+| Field | Description |
+|---|---|
+| Billing unit | Per-request / Per-token |
+| Token billing fields | `input_tokens` (input) / `output_tokens` (output) / `cache_read_input_tokens` (cache hit read) / `cache_creation_input_tokens` (cache write) |
+| Model multipliers | Models not listed count as 1× |
+| 5h / weekly / monthly quota | Empty = unlimited |
+| OpenCode Go protocol adapter | opencode-go only: auto x-api-key, lowercase models, strip thinking |
+
+Note: optional; shown at the bottom of the upstream detail card. The "Test" and "Connectivity test" buttons at the bottom let you verify an upstream before creating it.
 
 ### 5. Point your agents at the relay
 The relay offers two modes:
 
-**Conversion mode**
+**Conversion mode**  
 In conversion mode, model and upstream selection are fully controlled by the relay. All requests from coding clients land at the relay first; the relay takes over and forwards them to the upstream selected inside it. On the client side you only need to point the URL at the relay and set api-key and model to the `auto` placeholder.
 
 ```
@@ -185,10 +189,10 @@ The request rewritten through the relay:
 
 
 ### 6. Start using
-Pick a model:
-<p style="margin-left:10%"><img src="img_16.png" alt="" width="520"></p>
-Start using:
-<p style="margin-left:10%"><img src="img_17.png" alt="" width="720"></p>
+Pick a model:  
+<img src="img_16.png" alt="" style="width: 60%;margin-left: 5%;" />    
+Start using:  
+<img src="img_17.png" alt="" style="width: 60%;margin-left: 5%;" />    
 
 
 ```mermaid

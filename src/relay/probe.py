@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from typing import Any, Optional
 
 import httpx
@@ -28,6 +29,62 @@ from .config import (
 # 判定"端点存在"的状态码：404/405 = 没这个端点；其余（含 400/401/422/429）
 # 都说明端点存在（只是 key/model 不对）。200 = 完全可用。
 _ENDPOINT_MISSING = (404, 405)
+
+# 404 响应体里的"模型名不存在"特征 —— 这类 404 不是端点缺失，而是占位
+# 模型名被严格校验模型名的上游（DeepSeek V4 官方、token.sensenova.cn 等）
+# 拒绝。命中时端点其实存在，只差真实模型名。
+_MODEL_NOT_FOUND_RE = re.compile(
+    r"model[ _-]?not[ _-]?found|model[ _-]?is[ _-]?not[ _-]?found|"
+    r"model[ _-]?not[ _-]?exist|not[ _-]?found.*model|"
+    r"model.*(?:not[ _-]?available|doesn'?t exist|unknown)",
+    re.IGNORECASE,
+)
+
+
+def _is_model_missing(st: Optional[int], body: str) -> bool:
+    """404 且 body 明示"模型名不存在" → 端点存在但模型名不对。"""
+    if st not in _ENDPOINT_MISSING:
+        return False
+    if not body:
+        return False
+    if _MODEL_NOT_FOUND_RE.search(body):
+        return True
+    try:
+        d = json.loads(body)
+    except Exception:
+        return False
+    msg = ""
+    if isinstance(d, dict):
+        err = d.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("type") or ""
+        elif isinstance(err, str):
+            msg = err
+        else:
+            msg = d.get("message") or ""
+    return bool(_MODEL_NOT_FOUND_RE.search(msg))
+
+
+# 用户配置 URL 的完整端点形态（base 末段即端点本身）。
+_FULL_ENDPOINT_TAILS = (
+    "/v1/chat/completions",
+    "/v1/messages",
+    "/v1/responses",
+    "/v1/embeddings",
+    "/v1/completions",
+)
+
+
+def _models_root(base: str) -> str:
+    """base 已含完整端点时剥出根 URL（打 /v1/models 用）。
+
+    ``https://token.sensenova.cn/v1/chat/completions`` →
+    ``https://token.sensenova.cn``。否则原样返回。
+    """
+    for tail in _FULL_ENDPOINT_TAILS:
+        if base.endswith(tail):
+            return base[: -len(tail)].rstrip("/")
+    return base
 
 # 连通性测试的最小请求 max_tokens。v0.96.1：不能用 1 —— 思考型上游
 # （DeepSeek V4 官方端点等）响应开头是 thinking 块，1 个 token 全被思考
@@ -123,7 +180,7 @@ def _extract_reply(wire: str, body: str) -> tuple[Optional[str], str]:
 
 
 async def probe_upstream(
-    url: str, api_key: str, timeout: float = 8.0,
+    url: str, api_key: str, timeout: float = 15.0,
     emit: Optional[Any] = None,
     model: Optional[str] = None,
     prober: Optional[str] = None,
@@ -194,11 +251,16 @@ async def probe_upstream(
 
     await log(f"开始探测 {base}")
 
+    # 保持默认 trust_env（读系统代理/环境代理）—— 访问国外上游时需要走
+    # 梯子。不要强制直连。
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         # 1) GET /v1/models —— 认证方式 + 协议线索 + 模型列表 + key 有效性
         await log("步骤 1/2：模型列表与认证方式（GET /v1/models，两种头各试一次）")
+        # v0.208：base 已含完整端点时（如 .../v1/chat/completions）打在根，
+        # 否则 join_endpoint 会拼出 .../chat/completions/models 这种 404 路径。
+        models_url = join_endpoint(_models_root(base), "/v1/models")
         for style in ("bearer", "x-api-key"):
-            st, txt = await _req(client, "GET", join_endpoint(base, "/v1/models"),
+            st, txt = await _req(client, "GET", models_url,
                                  _auth_headers(style, key), None)
             if st == 200:
                 auth_style = style
@@ -224,11 +286,24 @@ async def probe_upstream(
         # 最后才回退占位名 relay-probe —— 严格校验模型名的上游不至于
         # 因占位名被 400 而误判端点"不可达"。
         model = model or (models[0] if models else "relay-probe")
-        for style in styles:
+
+        async def post_probe(url: str, body: dict, style: str):
+            """发最小请求探测端点；占位模型名被拒（404 model-missing）时
+            新建 client + 换真实模型名重试一次（v0.208：复用一个 client
+            连发会让部分网关对"404→重试"挂限流，第二次超时）。"""
             hdrs = _auth_headers(style, key)
+            st, txt = await _req(client, "POST", url, hdrs, body)
+            if _is_model_missing(st, txt) and models:
+                await log(f"  POST {url.split('/')[-2]}/{url.split('/')[-1]} ({style}): {st}（模型名被拒，换真实模型名重试）")
+                body = dict(body, model=models[0])
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c2:
+                    st, txt = await _req(c2, "POST", url, hdrs, body)
+            return st, txt
+
+        for style in styles:
             oai_body = {"model": model, "max_tokens": 1,
                         "messages": [{"role": "user", "content": "hi"}]}
-            st, _ = await _req(client, "POST", join_endpoint(base, "/v1/chat/completions"), hdrs, oai_body)
+            st, txt = await post_probe(join_endpoint(base, "/v1/chat/completions"), oai_body, style)
             if st is not None and st not in _ENDPOINT_MISSING:
                 wire = WIRE_OPENAI_CHAT
                 endpoint = "/v1/chat/completions"
@@ -242,7 +317,7 @@ async def probe_upstream(
 
             ant_body = {"model": model, "max_tokens": 1,
                         "messages": [{"role": "user", "content": "hi"}]}
-            st2, _ = await _req(client, "POST", join_endpoint(base, "/v1/messages"), hdrs, ant_body)
+            st2, txt2 = await post_probe(join_endpoint(base, "/v1/messages"), ant_body, style)
             if st2 is not None and st2 not in _ENDPOINT_MISSING:
                 wire = WIRE_ANTHROPIC_MESSAGES
                 endpoint = "/v1/messages"
@@ -321,34 +396,36 @@ async def _suggest_after_fail(
         probe = await probe_upstream(base, key, model=model or None, emit=log)
     except Exception as exc:  # noqa: BLE001
         await log(f"（反向探测异常：{exc}）")
-        return
+        return False
     pw = probe.get("wire")
     pa = probe.get("auth_style")
     if not pw:
         await log("⚠ 反向探测未能识别协议 —— 请检查 URL 是否可达、路径是否正确。")
-        return
+        return False
     if pw != configured_wire:
         hint_auth = f"、鉴权方式改成 {pa}" if pa and pa != configured_style else ""
         await log(
             f"⚠ 反向探测发现该端点的实际协议是 {pw}（你配置的是 {configured_wire}）。"
             f"建议把协议改成 {pw}{hint_auth} 后重试。"
         )
-        return
+        return False
     if pa and pa != configured_style:
         await log(
             f"⚠ 协议匹配（{pw}），但鉴权方式不对：实际是 {pa}"
             f"（你配置的是 {configured_style}）。"
         )
-        return
+        return False
     if probe.get("key_valid"):
         await log(
             f"✓ 反向探测用真实模型名验证通过 —— 协议 {pw} 与 key 均正确；"
             f"若连通性仍失败，请检查模型名是否正确。"
         )
+        return True
     else:
         await log(
             f"⚠ 协议匹配（{pw}），但 key 未通过验证 —— 请检查 API key 是否正确。"
         )
+        return False
 
 
 async def connectivity_test(
@@ -409,6 +486,7 @@ async def connectivity_test(
         }
 
     await log(f"POST {join_endpoint(base, endpoint)}")
+    # 保持默认 trust_env（读系统代理）—— 国外上游需要走梯子。
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         hdrs = _auth_headers(style, key)
         st, txt = await _req(client, "POST", join_endpoint(base, endpoint), hdrs, body)
@@ -428,7 +506,14 @@ async def connectivity_test(
     # v0.95+（协议鲁棒）：按用户配置失败后，反向探测真实协议/鉴权，
     # 输出纠错建议（best-effort，日志进 evidence 并实时推页面）。
     async def fail_return(st, extra=None):
-        await _suggest_after_fail(base, key, model, wire, style, log)
+        # v0.208：若反向探测已用真实模型名验证通过（协议/key 都对），
+        # 说明配置只差模型名 —— 汇总成明确结论。
+        real_model_ok = await _suggest_after_fail(base, key, model, wire, style, log)
+        if real_model_ok:
+            await log(
+                f"✗ 配置的协议/鉴权/URL 均正确，但模型名 {model!r} 在该上游"
+                f"不存在 —— 请填写真实模型名后重试。"
+            )
         # 原始请求文本必须是 evidence 最后一条（前端取最后一条打印）。
         evidence.append(request_text)
         emit_event(
@@ -481,5 +566,9 @@ async def connectivity_test(
         502: "（上游网关错误）",
         503: "（上游不可用）",
     }.get(st, "")
+    # v0.208：404 且响应体明示"模型名不存在" → 是模型名问题不是端点问题，
+    # 覆盖通用 404 hint，别把用户引到"检查 URL"上。
+    if st == 404 and _is_model_missing(st, txt):
+        hint = "（模型名不存在：该上游严格校验模型名，请填写真实模型名）"
     await log(f"✗ 上游返回 {st}{hint}")
     return await fail_return(st)

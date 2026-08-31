@@ -226,6 +226,13 @@ def join_endpoint(base_url: str, endpoint: str) -> str:
 
     与 proxy._anthropic_messages_url 同语义，但通用到任意端点
     （chat/completions、responses 等）。
+
+    v0.207 补充：**base 已含完整 endpoint → 原样返回**。用户在新建上游
+    时可能直接把完整端点 URL 填进 base（如
+    ``https://token.sensenova.cn/v1/chat/completions``），此前会再拼一层
+    ``/v1/chat/completions`` 得到 ``.../chat/completions/v1/chat/completions``
+    上游 404。与主线 proxy（``_normalize_api_path`` 的 ``return ""`` 分支）
+    同语义：base 以 endpoint（或去掉 /v1 前缀后的端点）结尾即视为已含。
     """
     base = base_url.rstrip("/")
     m = _ENDPOINT_VERSION_PREFIX.match(endpoint)
@@ -233,6 +240,13 @@ def join_endpoint(base_url: str, endpoint: str) -> str:
     if m and _BASE_VERSION_SEG.match(last):
         # 剥掉 endpoint 的 /vN/（m.end() 落在 "messages" 处），保留前导 /
         endpoint = "/" + endpoint[m.end():]
+    # v0.207：base 已含完整端点 → 直接返回，不再重复拼接。
+    # endpoint 去掉前导 /v1 后的裸形态（/chat/completions、/messages…）也认
+    # —— base 可能是 ``.../v1/chat/completions``（带 /v1）或
+    # ``.../v1beta/chat/completions``（去 /v1 后仍以 /chat/completions 结尾）。
+    bare = endpoint[len("/v1"):] if endpoint.startswith("/v1/") else endpoint
+    if base.endswith(endpoint) or (bare and base.endswith(bare)):
+        return base
     return base + endpoint
 
 
@@ -314,6 +328,13 @@ class PlatformConfig(BaseModel):
     # （deepseek 系推断 4 挡，否则 off/enabled 两档）。值 ∈ {off, low,
     # medium, high, max}。upstreams.json 里写 thinking_options: [...]。
     thinking_options: list[str] = []
+    # v0.200 该上游支持图片输入的模型名（裸模型名，OpenCode 认模型 id）。
+    # 空列表 = 该上游无多模态模型（或未声明）。剥图判定合并
+    # cfg.vision_models ∪ settings.vision_models（全局兜底名单）：
+    # 目标模型命中任一才不剥图，否则剥图 + 注入提示词。存上游条目内，
+    # 同一个模型名跨上游可分别声明（比全局名单更精确）。新建上游 GUI
+    # 的「允许的模型」每行勾选框写这个字段。
+    vision_models: list[str] = []
     # v0.11.18 高级切换（实验性）—— 客户端没显式指定模型（model 为空或
     # "auto"）时，先让弱模型判定该请求应走弱还是强模型，再路由：
     #   advanced_switch        开启后启用
@@ -577,7 +598,7 @@ class Settings(BaseSettings):
     # 模糊优先强模型，否则保守用弱；learning 是"历史学习改进"预留开关。
     advanced_switch: bool = False
     # 三个模型的 (upstream, model) 对 —— 同名模型可能属于多个上游
-    # （同名模型可能归属多个上游），必须靠 upstream 精确定位。
+    # （如 f3af39d7 / e1701fa6 都是 MiniMax-M3），必须靠 upstream 精确定位。
     advanced_weak_upstream: Optional[str] = None
     advanced_weak_model: Optional[str] = None
     advanced_strong_upstream: Optional[str] = None
@@ -1614,6 +1635,16 @@ def add_upstream(
     if not isinstance(allowed, list) or not all(isinstance(m, str) for m in allowed):
         return False, "allowed_models 必须是字符串列表"
 
+    # v0.200 该上游支持图片输入的模型名（裸模型名）。须是字符串列表，
+    # 建议是 allowed_models 的子集（不强校验 —— 允许手填）。
+    vision_v = payload.get("vision_models", None)
+    if vision_v is not None:
+        if not isinstance(vision_v, list) or not all(isinstance(m, str) for m in vision_v):
+            return False, "vision_models 必须是字符串列表"
+        vision_clean = [m.strip() for m in vision_v if m.strip()]
+    else:
+        vision_clean = None
+
     mults = payload.get("model_multipliers") or {}
     if not isinstance(mults, dict):
         return False, "model_multipliers 必须是对象"
@@ -1727,6 +1758,10 @@ def add_upstream(
             new_entry["token_fields"] = token_fields_raw
         if auth_header_clean is not None:
             new_entry["auth_header"] = auth_header_clean
+        # v0.200 该上游支持图片输入的模型名。非空才落盘（空 = 未声明，
+        # 加载时默认 []）。
+        if vision_clean:
+            new_entry["vision_models"] = vision_clean
         # v0.12 协议声明（None 不落盘，加载时按平台段推断）
         if wire_v is not None:
             new_entry["wire"] = wire_v

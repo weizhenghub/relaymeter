@@ -142,6 +142,19 @@ class PanelPool:
         # v0.145：宽度补间动画序号 —— 新一轮动画/宽度再变化时 seq+1，旧动画
         # 线程检测到序号不符即静默退出（新线程从当前实际宽起步覆盖）。
         self._width_anim_seq: int = 0
+        # v0.184.2：补间动画在飞标志 —— 收起时球帽翻转延迟到动画结束（串行动画
+        # 顺序），期间重入 _apply_geometry（主窗 move/resize 触发）不得提前 flush。
+        self._resize_anim_active: bool = False
+        # v0.184.2：延迟球帽翻转 —— 展开→收起（S2 或流清空）时先缩回球帽，
+        # 动画结束后再 ghostSetState（_flush_deferred_ball_state 落地）。
+        self._deferred_ball_state: Optional[str] = None
+        # v0.198.1：延迟收起渲染 —— 收起（S2 / 流清空）时**先**把窗口缩成球帽，
+        # 动画结束后再 ghostSetExpanded(false) + set_expanded(false)。否则收起动画
+        # 一开始就 ghostSetExpanded(false) 会触发 CSS `body.collapsed #ghost-cap
+        # { flex: 0 0 100% }`，把球帽 SVG 拉满整个侧栏窗口 —— 出现"球先放大到
+        # 侧栏大小再收缩"。动画期间保持展开布局（球帽恒 56px 左上、面板被窗口
+        # 收缩自然压没），由 _flush_deferred_render 统一落地。
+        self._deferred_expanded_render: Optional[bool] = None
         # v0.136：浮动位置缓存 —— 侧栏被拖离磁吸区后（docked_getter=False），
         # 隐藏再显示时需要恢复到用户拖到的位置而不是(-32000,-32000)屏外。
         self._float_pos: Optional[tuple[int, int]] = None
@@ -338,6 +351,23 @@ class PanelPool:
                 _logger.exception("PanelPool.start failed")
                 # 失败时不抛 —— GUI 仍能跑，只是并发功能缺失。
 
+    # v0.203：设置页「实时流侧栏」开关切换时重载容器渲染层 —— Electron
+    # webContents.reload 重新加载 ghost_panel.html（HTML/CSS 改动：红叉、
+    # 命中区等即时生效），不重建窗口（always_one_window 引用稳定，测试与
+    # 运行中 show/hide 行为不受影响）。
+    def reload_container(self) -> None:
+        """重载 always_one 容器窗口的渲染层（不销毁窗口本体）。"""
+        with self._lock:
+            w = self.always_one_window
+        # 池从未 start（测试环境 / 窗口已关）→ 无窗可重载，静默 no-op。
+        if w is None:
+            return
+        try:
+            w.reload()
+            _logger.info("reload_container reloaded always_one renderer")
+        except Exception:
+            _logger.debug("reload_container reload failed", exc_info=True)
+
     def stop(self) -> None:
         """退出：取消所有 timer，destroy 所有窗口。"""
         with self._lock:
@@ -408,16 +438,28 @@ class PanelPool:
         """把当前 _expanded 落到渲染层 + 主进程 + 几何（同帧下发）：
         ghostSetExpanded（侧栏 surface 显隐）+ set_expanded（hover 停启 /
         吞点击），随后 _relayout 驱动 resize/move。收起/展开过渡由
-        _anim_resize 宽高同变补间。"""
+        _anim_resize 宽高同变补间。
+
+        v0.198.1：**展开立即渲染，收起延迟渲染**。展开（True）面板要立刻
+        出来，同帧 ghostSetExpanded(true)；收起（False）把面板隐藏延迟到收起
+        动画 on_done（_flush_deferred_render）一起做 —— 否则动画一开始就
+        ghostSetExpanded(false) 会让球帽被 CSS 拉满窗，出现"球先放大到侧栏
+        大小再收缩"。"""
         w = self.always_one_window
         if w is None:
             return
         expanded = self._expanded
         self._ensure_op_worker()
-        self._enqueue_op(
-            lambda ww=w, on=expanded: ww.evaluate_js(
-                f"ghostSetExpanded({str(on).lower()})"))
-        self._enqueue_op(lambda ww=w, on=expanded: ww.set_expanded(on))
+        if expanded:
+            # 展开：立即显示面板 + 停 hover（球帽 + 侧栏同帧出现，动画扩窗）。
+            self._deferred_expanded_render = None
+            self._enqueue_op(lambda ww=w: ww.evaluate_js("ghostSetExpanded(true)"))
+            self._enqueue_op(lambda ww=w: ww.set_expanded(True))
+        else:
+            # 收起：渲染层延迟到窗口缩成球帽后再落地（见 _flush_deferred_render）。
+            # 期间 body 保持展开布局 —— 球帽恒 56px 左上，面板被窗口收缩压没，
+            # 不会出现"球帽被拉满窗"。
+            self._deferred_expanded_render = False
         self._relayout()
 
     def refresh_ball_visibility(self) -> None:
@@ -447,6 +489,7 @@ class PanelPool:
         if w is None or not self.always_one_visible:
             return
         self._width_anim_seq += 1
+        self._resize_anim_active = False  # 隐藏 = 取消在飞动画，标记复位
         self._ensure_op_worker()
         self._enqueue_op(lambda ww=w: ww.hide())
         self._enqueue_op(lambda ww=w: ww.move(-32000, -32000))
@@ -625,6 +668,32 @@ class PanelPool:
         self._ensure_op_worker()
         self._enqueue_op(lambda ww=w, j=f"ghostSetState('{mode}')": ww.evaluate_js(j))
 
+    def _flush_deferred_render(self) -> None:
+        """落地延迟的收起渲染层变化：先隐藏面板（ghostSetExpanded(false) +
+        set_expanded(false)），再翻转球帽（ghostSetState）。
+
+        v0.184.2 起作 _anim_resize 的 on_done（收起动画收尾后）以及无动画
+        路径（起始即已收起 / 首次几何 / 打断后重入）调用；v0.198.1 扩展为
+        同时落地面板隐藏 —— 保证串行动画顺序「先窗口缩成球帽，再隐藏面板
+        + 翻转球帽」，不再把球帽拉满窗。"""
+        with self._lock:
+            expanded_render = self._deferred_expanded_render
+            self._deferred_expanded_render = None
+            state = self._deferred_ball_state
+            self._deferred_ball_state = None
+        w = self.always_one_window
+        if w is None:
+            return
+        self._ensure_op_worker()
+        if expanded_render is not None:
+            on = bool(expanded_render)
+            self._enqueue_op(
+                lambda ww=w, o=on: ww.evaluate_js(
+                    f"ghostSetExpanded({str(o).lower()})"))
+            self._enqueue_op(lambda ww=w, o=on: ww.set_expanded(o))
+        if state is not None:
+            self._set_ball_state(state)
+
     def ball_clicked(self, *args) -> None:
         """球帽被点击（Electron drag-end 无位移 → clicked 事件）→ 切 S1↔S2。
 
@@ -634,8 +703,9 @@ class PanelPool:
         _clear_rid / set_float_ball 各处统一判定）。仅球模式有效。
 
         行为细节：
-          * S1 → S2：球帽→done；若当前有 rid 且 _expanded=True（之前因流展开）
-            则同时收回容器成球帽；否则保持收回态。S2 期间来新流只切 done 不展。
+          * S1 → S2：若当前有 rid 且 _expanded=True（之前因流展开）—— 先执行
+            **收起逆动画**回球帽，动画结束再翻转成 done（串行动画顺序，不两套
+            同时做）；否则直接翻转 done。S2 期间来新流只切 done 不展。
           * S2 → S1：球帽→flow；若当前有 rid 则立即展开成「球帽+侧栏」；否则保
             持收回态、等下个 rid 触发自动展开。
         """
@@ -647,9 +717,8 @@ class PanelPool:
             if self._all_hidden:
                 return
             self._show_sidebar_on_stream = not self._show_sidebar_on_stream
-            new_state = "flow" if self._show_sidebar_on_stream else "done"
-            self._set_ball_state(new_state)
-            # 几何按当前 S1/S2 + rid 状态重算
+            # 球帽形态由 _sync_geometry_to_mode 统一判定（展开→收起时延迟翻转
+            # 到收起动画结束后，保证串行动画顺序，不再提前 flip）。
             self._sync_geometry_to_mode()
             _logger.info("ball_clicked → S%s expanded=%s rids=%s",
                          1 if self._show_sidebar_on_stream else 2,
@@ -674,6 +743,7 @@ class PanelPool:
         if w is None:
             return
         with self._lock:
+            prev_expanded = self._expanded
             has_stream = bool(self._rids) and not self._all_hidden
             target_expanded = False
             ball_state: Optional[str] = None
@@ -695,7 +765,16 @@ class PanelPool:
                 target_expanded = False
                 ball_state = "done"
             self._expanded = target_expanded
-        if ball_state is not None:
+            # v0.184.2 串行动画：展开→收起（切 S2 / 流清空 / 磁吸转球）时，
+            # 球帽翻转延迟到收起补间动画结束后再做 —— 先「侧栏逆动画回球」，
+            # 再「翻转球帽」。其余形态（展开 flow / 已收起切 done）仍立即翻转。
+            defer_flip = (
+                ball_state == "done"
+                and prev_expanded
+                and not target_expanded
+            )
+            self._deferred_ball_state = ball_state if defer_flip else None
+        if ball_state is not None and not defer_flip:
             self._set_ball_state(ball_state)
         self._apply_expanded_state()
 
@@ -1086,7 +1165,7 @@ class PanelPool:
         cols = min(max(self._js_width_cols, 1), self._max_cols)
         return cols * self._panel_width
 
-    def _anim_resize(self, w, to_w: int, to_h: int) -> None:
+    def _anim_resize(self, w, to_w: int, to_h: int, *, on_done: Optional[Callable] = None) -> None:
         """v0.184：窗口宽高**同变**补间动画（延展/收窄/展开/收起平滑，不瞬跳）。
 
         从窗口**当前实际宽高**起，ease-out（x^4）曲线分 32 步（v0.149 从
@@ -1099,6 +1178,11 @@ class PanelPool:
         启动 / 宽高再次变化时 _width_anim_seq+1，旧线程检测到序号不符即
         静默退出；新线程从最新实际宽高起步，覆盖中间态。动画不依赖 _lock
         （线程不持有 pool 锁），隐藏窗口的 resize 是 no-op 无害。
+
+        v0.184.2：on_done —— 动画**正常收尾**（含起始即已到目标尺寸的早退
+        路径）后调用，用于把延迟的球帽翻转落地（串行动画顺序：先收侧栏逆
+        动画回球，再翻转）。被新一轮动画接管 / 隐藏打断时**不**调用（新状
+        态接管结果，_deferred_ball_state 由后续 _apply_geometry flush）。
         """
         seq = self._width_anim_seq + 1
         self._width_anim_seq = seq
@@ -1109,10 +1193,13 @@ class PanelPool:
             cur_w, cur_h = to_w, to_h
         if abs(to_w - cur_w) < 2 and abs(to_h - cur_h) < 2:
             self._enqueue_op(lambda ww=w, cw=to_w, ch=to_h: self._resize_safe(ww, cw, ch))
+            if on_done is not None:
+                on_done()
             return
 
         steps = 32
         dt = 0.022
+        self._resize_anim_active = True
 
         def _ease_out(x: float) -> float:
             x = max(0.0, min(1.0, x))
@@ -1133,6 +1220,11 @@ class PanelPool:
             # 收尾精调（浮点累计误差归零）
             self._enqueue_op(
                 lambda ww=w, cw=to_w, ch=to_h: self._resize_safe(ww, cw, ch))
+            try:
+                if on_done is not None:
+                    on_done()
+            finally:
+                self._resize_anim_active = False
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1265,8 +1357,18 @@ class PanelPool:
                 if first:
                     self._enqueue_op(
                         lambda ww=w, cw=width, ch=h: self._resize_safe(ww, cw, ch))
+                    self._flush_deferred_render()
                 else:
-                    self._anim_resize(w, width, h)
+                    # 收起动画收尾后再隐藏面板 + 翻转球帽（串行动画顺序）；
+                    # 无延迟渲染时 _flush_deferred_render 是 no-op。
+                    self._anim_resize(w, width, h,
+                                      on_done=self._flush_deferred_render)
+            else:
+                # 尺寸未变（含收起动画在飞期间的主窗 move/resize 重入）：无新
+                # 动画。补间不在飞时落地延迟渲染 —— 收起已到位 / 动画被打断
+                # 后恢复都能正确补上面板隐藏 + 球帽翻转。
+                if not self._resize_anim_active:
+                    self._flush_deferred_render()
             self._enqueue_op(lambda ww=w, x=xx, y=yy: ww.move(xx, yy))
             return True
         # ---- 磁吸模式 ----
@@ -1368,6 +1470,7 @@ class PanelPool:
             # 折叠后残留的 resize op 会把侧栏又弹出来。_width_anim_seq+1 让
             # _anim_resize._run 下一迭代检测到序号不符即静默退出。
             self._width_anim_seq += 1
+            self._resize_anim_active = False  # 折叠 = 取消在飞动画，标记复位
             w = self.always_one_window
             self._ensure_op_worker()
             self._enqueue_op(lambda ww=w: ww.hide())

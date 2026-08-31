@@ -60,6 +60,18 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 # 与 relay.db / upstreams.json 同根，统一管理。
 _APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Relay"
 _WEBVIEW_DATA_DIR = _APP_DATA_DIR / "webview-data"
+# Electron 主窗 userData 目录：localStorage 必须跨重启保留，不能像面板丢 tmp。
+# 换引擎（WebView2 -> Chromium）后旧 localStorage 不迁移，首次启动为新状态，
+# 之后由 Electron 维护（relay-gui-prefs-v1 等）。
+_ELECTRON_MAIN_DATA_DIR = _APP_DATA_DIR / "electron-data"
+
+
+def _using_electron_main() -> bool:
+    """Phase 1 安全网：RELAY_GUI_ELECTRON_MAIN=0 时回退旧 pywebview 主窗路径。
+
+    默认开（用户已选 Electron 主窗）。仅用于排障回退，不用作常驻分支。
+    """
+    return os.environ.get("RELAY_GUI_ELECTRON_MAIN", "1") != "0"
 
 # How often the Python polling thread rebuilds the snapshot dict.
 # JS also polls every 500 ms (matches the Tk version's `after(500, ...)`)
@@ -699,6 +711,65 @@ class Api:
             n = 30
         return tui.fetch_model_daily(self._app.settings.relay_db, days=n)
 
+    def _upstream_cfgs_for_stats(self) -> list[dict[str, object]]:
+        """组装 stats_* 用的上游 cfg 列表（含虚拟 cfg）—— 与 snapshot 里
+        fetch_by_upstream_with_costs / fetch_by_upstream_model 同口径，保证
+        stats_upstream_model_daily 的过滤结果跟弹窗表格一致。
+        """
+        real = [
+            {
+                "name": c.name,
+                "quota_5h": c.quota_5h,
+                "model_multipliers": c.model_multipliers,
+                "allowed_models": c.allowed_models,
+                "billing_unit": c.billing_unit,
+                "token_fields": c.token_fields,
+            }
+            for c in self._app.settings.upstreams_for()
+        ]
+        try:
+            return resolve_links(real)
+        except Exception:
+            return real
+
+    def stats_agent_hourly(self, hours: int = 24) -> dict:
+        """v0.203 统计页：平台(agent) 按小时调用分布 —— 柱状图模式数据源。
+
+        与 ``fetch_agent_by_hour`` 同步：``{agents, hours, series,
+        items}``；``agents`` 每项 ``{agent, total, color}``（按 total 降序，
+        稳定色板），``series`` 每 agent 一条小时序列（0 补齐，升序）。
+        窗口仅允许 24h / 72h（前端二极按钮 24h/3d）。
+        """
+        from . import tui
+
+        try:
+            n = max(24, min(72, int(hours)))
+        except (TypeError, ValueError):
+            n = 24
+        return tui.fetch_agent_by_hour(self._app.settings.relay_db, hours=n)
+
+    def stats_upstream_model_daily(self, upstream: str, days: int = 30) -> dict:
+        """v0.204 统计页：单上游按模型 × 日调用分布 —— 「上游统计」卡弹窗
+        竖状图数据源。
+
+        与 ``fetch_upstream_model_daily`` 同步：``{models, days, series,
+        items}``；``upstream`` 支持真实 / 虚拟 cfg 名，虚拟自动展开成员。
+        ``upstreams`` 列表从 Settings 组装（含虚拟 cfg，同 snapshot 口径）。
+        """
+        from . import tui
+
+        try:
+            n = max(1, min(365, int(days)))
+        except (TypeError, ValueError):
+            n = 30
+        upstreams = self._upstream_cfgs_for_stats()
+        return tui.fetch_upstream_model_daily(
+            self._app.settings.relay_db,
+            upstream=str(upstream or ""),
+            upstreams=upstreams,
+            days=n,
+        )
+
     def passthrough_overview(self, range: str = "30d") -> dict:
         """透传模式总览：代理 HTTP /api/passthrough/overview。
 
@@ -921,18 +992,51 @@ class Api:
         )
 
     def start_server(self) -> dict:
-        """Start the uvicorn subprocess. No-op when anything already
-        answers on the port — spawning a second uvicorn against a bound
-        port just produces a child that dies with ``WinError 10048``
-        and leaves the UI stuck on 已停止."""
+        """启动即接管(全清)：开始前先清理端口。
+
+        用户口令是「每次启动中继要先清理端口」。旧行为在端口上已有
+        监听者时直接 no-op 返回，把 GUI 连到一个配置不符的外部中继
+        （stale .env / upstreams.json），切上游就 404。现在按 owner 分流：
+
+        * owner == SELF —— 我们自己的 child 还在，纯监控，不重启。
+        * owner == EXTERNAL —— 端口是别的进程占的，先 `_takeover`
+          杀干净再起自己的（跟重启按钮的 cold-path 同一套逻辑）。
+        * owner == NONE —— 看起来空闲，但仍同步查一次端口（healthz 探测
+          失败会把"端口上挂着非健康监听者"判成 none），有监听者就接管，
+          没有才直接起新的。
+
+        接管失败（提权 / 跨会话 / 守护进程 respawn）时返回可读错误并
+        记进 status["error"]，UI 能看见，而不是静默起一个撞 10048
+        就死的新进程把顶栏卡在 已停止。
+        """
+        port = self._app.settings.port
         status = self.get_status()
-        if status["running"]:
+        if status["running"] and status["owner"] == OWNER_SELF:
+            # 我们自己的 child 还在 —— 纯监控，不重启。
             return status
-        try:
-            self._app.server.start()
-        except Exception:
-            pass
-        return self.get_status()
+        takeover_error: Optional[str] = None
+        if status["owner"] == OWNER_EXTERNAL:
+            # 端口是别的进程占的，先 `_takeover` 杀干净再起自己的。
+            takeover_error = self._takeover_external_listener(port)
+        else:
+            # owner == NONE：可能端口上仍挂着非健康监听者（/healthz 探测
+            # 失败把 owner 判成 none）。跟 restart_server 的 cold path 一
+            # 样，直接同步查一次端口，有监听者就接管 —— 否则 spawn 会撞
+            # WinError 10048，child 秒死，顶栏卡在 已停止。
+            _pid_cache.pop(port, None)
+            if _do_listener_lookup(port) is not None:
+                takeover_error = self._takeover_external_listener(port)
+        if takeover_error is None:
+            try:
+                self._app.server.start()
+            except Exception as exc:
+                log.exception("server.start() failed in start_server")
+                takeover_error = f"start_failed: {exc}"
+        _pid_cache.pop(port, None)
+        status = self.get_status()
+        if takeover_error:
+            status["error"] = takeover_error
+        return status
 
     def stop_server(self) -> dict:
         """Stop the uvicorn subprocess we started. Returns the updated
@@ -1011,77 +1115,67 @@ class Api:
     # ------------------------------------------------------------------
 
     def apply_upstream(self, platform: str, name: str, model: str | None = None) -> dict:
-        """Switch the active upstream for ``platform`` to ``name``.
+        """切换上游/模型 = **GUI 直接落盘 + 无条件全量重启 8088**。
 
-        POSTs to the relay's ``/api/upstreams/{platform}/select`` endpoint
-        so the running uvicorn process picks up the switch without a
-        restart. Optional ``model`` (v0.65) — the sidebar dropdown lists
-        every (upstream, model) pair separately, so the chosen model
-        arrives with the switch and gets persisted in the same call.
+        用户要求（v0.19x）：选完新模型后，无论是否有在途请求/流，不理会
+        当前任何状态，直接杀掉后端进程再重启；重启是**整个 8088** 的重启，
+        且切换状态**完全由 GUI 控制，后端不自控制**。
 
-        Returns the relay's JSON body.
+        所以不再 POST 给运行中的后端做热切换（``/api/upstreams/{platform}/
+        select``）—— 后端忙 / 正在流式时那趟请求会超时（旧 1.5s timeout），
+        JS 侧据此把重启一起跳掉 = 「切了但没重启」。改为：
+
+        1. **GUI 直接写 upstreams.json**：active + model override 都在这边
+           落盘（``upstreams_file.set_active`` + ``set_upstream_model_cfg``）。
+           本地文件写不依赖后端是否空闲，流式 / 在途请求都拦不住。
+        2. **无条件全量重启**：``restart_server`` 杀掉 8088 端口占用者
+           （不管谁占的，自己的 child / 外部进程一视同仁）再拉起全新后端。
+           新进程从 GUI 写好的磁盘状态冷启动；在途请求/流直接掐断，
+           不等优雅排空。
+
+        Returns ``{"ok": True, "selected": name}`` on success,
+        ``{"ok": False, "error": "..."}`` on write/validation/restart failure。
         """
         if platform not in PLATFORMS:
             return {"platform": platform, "name": name, "ok": False,
                     "error": f"unknown platform: {platform}"}
-        # The control router mounts under ``/api`` (see
-        # ``routers/api.py``: ``APIRouter(prefix="/api")``). Omitting it
-        # here silently 404'd every upstream switch.
-        url = (
-            f"{self._app.settings.base_url}"
-            f"/api/upstreams/{platform}/select"
-        )
-        payload: dict = {"name": name}
-        if model is not None:
-            payload["model"] = model
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        # ---- 1) GUI 落盘：active + model override ----
+        # 先叠一份磁盘最新上游到当前 settings —— 与后端 /select 的 v0.197 修复
+        # 同款：新建/删除上游走 GUI 桥写 upstreams.json，但 self._app.settings
+        # 缓存可能还没刷新（尤其"建完立刻切"），set_active 找不到新条目会
+        # KeyError。只 overlay 上游列表 + active，不重建 Settings，不动运行时状态。
         try:
-            with urllib.request.urlopen(req, timeout=1.5) as r:
-                raw = r.read().decode("utf-8") or "{}"
-        except urllib.error.HTTPError as exc:
-            # v0.93：默认 urllib.HTTPError.strerror 只给 "Bad Request"，没有 FastAPI
-            # 的 {"detail": ...} 字段。把响应体读出来一起报，前端 alert 能告诉用户
-            # 真正的失败原因（model 不在 allowed_models / 平台未识别 / 上游没找到）。
-            body = ""
-            try:
-                body = exc.read().decode("utf-8", "replace")
-            except Exception:
-                pass
-            return {"platform": platform, "name": name, "ok": False,
-                    "error": f"HTTP{exc.code}: {exc.reason or 'request failed'} | {body}".strip()}
-        except urllib.error.URLError as exc:
-            err_msg = str(exc)
-            if "timed out" in err_msg:
-                return {"platform": platform, "name": name, "ok": False,
-                        "error": "后端未响应（正在重启或未运行），请稍后重试"}
-            return {"platform": platform, "name": name, "ok": False,
-                    "error": f"连接失败: {err_msg}"}
-        except Exception as exc:
-            return {"platform": platform, "name": name, "ok": False,
-                    "error": str(exc)}
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            parsed = {"ok": False, "error": "invalid relay response"}
-        # Mirror on the local Settings so the GUI's get_status() reflects
-        # the change without re-querying the relay.
-        try:
-            self._app.settings.set_active(platform, name)
-        except KeyError:
-            return {"platform": platform, "name": name, "ok": False,
-                    "error": f"upstream {name!r} not in {platform!r} config"}
-        # Re-bind so the in-memory model field is current (the relay may
-        # have just persisted it).
-        if model is not None and parsed.get("ok", True):
             from .upstreams_file import apply_to_settings
             apply_to_settings(self._app.settings, self._app.settings.relay_upstreams_file)
-        return parsed
+        except Exception:
+            pass
+        try:
+            self._app.settings.set_active(platform, name)
+        except KeyError as exc:
+            return {"platform": platform, "name": name, "ok": False,
+                    "error": f"upstream {name!r} not in {platform!r} config: {exc}"}
+        if model is not None:
+            ok, msg = set_upstream_model_cfg(self._app.settings, platform, name, model)
+            if not ok:
+                return {"platform": platform, "name": name, "ok": False,
+                        "error": msg}
+        from .upstreams_file import set_active as _persist_active
+        if not _persist_active(self._app.settings.relay_upstreams_file, platform, name):
+            return {"platform": platform, "name": name, "ok": False,
+                    "error": "无法写入 upstreams.json（文件缺失/损坏）"}
+        # 让 GUI 进程的 Settings 与磁盘一致（下次 poll/status 直接反映新切换）。
+        try:
+            reload_settings()
+            self._app.settings = get_settings()
+        except Exception as exc:
+            return {"platform": platform, "name": name, "ok": True,
+                    "warning": f"已写入但 reload 失败: {exc}"}
+        # ---- 2) 无条件全量重启 8088（杀占用者 + 起新后端）----
+        status = self.restart_server()
+        if status.get("error"):
+            return {"platform": platform, "name": name, "ok": False,
+                    "error": status["error"]}
+        return {"platform": platform, "name": name, "ok": True, "selected": name}
 
     def probe_upstream(self, url: str, api_key: str, model: str = "") -> dict:
         """v0.12 新建上游自动探测 —— POST 到中继 /api/probe_upstream。
@@ -1633,6 +1727,41 @@ class Api:
             pass
         return {"ok": True, "path": new}
 
+    def get_changelog(self) -> dict:
+        """设置页「开发者模式 → 更新日志」：返回 docs/CHANGELOG.txt 全文（只读）。
+
+        纯本地读文件，不依赖中继运行。返回 ``{"ok": True, "text": ...}``；
+        文件缺失/读取失败返回 ``{"ok": False, "error": ...}``（前端显示占位）。
+        """
+        try:
+            from relay.config import _project_root
+            path = _project_root() / "docs" / "CHANGELOG.txt"
+            text = path.read_text(encoding="utf-8", errors="replace")
+            return {"ok": True, "text": text}
+        except Exception as exc:
+            return {"ok": False, "error": f"读取更新日志失败：{exc}"}
+
+    def save_changelog(self, text: str) -> dict:
+        """设置页「开发者模式 → 更新日志」：把编辑后的全文写回 docs/CHANGELOG.txt。
+
+        直接覆盖写文件（utf-8）。返回 ``{"ok": True}``；失败返回
+        ``{"ok": False, "error": ...}``。不做 diff/备份 —— CHANGELOG 是
+        版本化文档，旧内容在 git 里有完整历史。
+        """
+        try:
+            if not isinstance(text, str):
+                return {"ok": False, "error": "内容必须是字符串"}
+            from relay.config import _project_root
+            path = _project_root() / "docs" / "CHANGELOG.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # ⚠ newline="" 必须显式传：Windows 上 write_text 默认会把 \n 翻译成
+            # \r\n，把整个文件从项目统一的 LF 行尾变成 CRLF（git 全文件 diff）。
+            # textarea 传回的换行就是 \n（浏览器统一），newline="" 原样落盘。
+            path.write_text(text, encoding="utf-8", newline="")
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": f"保存更新日志失败：{exc}"}
+
     def get_advanced_switch(self) -> dict:
         """#高级切换：返回当前配置 + 可用模型清单 + 三类调用统计。
 
@@ -1920,9 +2049,20 @@ class Api:
     def set_live_panel(self, enabled: bool) -> dict:
         try:
             enabled = bool(enabled)
+            changed = bool(getattr(self._app.settings, "relay_gui_live_panel", False)) != enabled
             self._app.settings.relay_gui_live_panel = enabled
             from relay.config import update_env_var
             update_env_var("RELAY_GUI_LIVE_PANEL", "1" if enabled else "0")
+            # v0.203：开关值真变化时重载容器窗口 —— 渲染层 ghost_panel.html
+            # 重新加载（HTML/CSS 改动即时生效）。之前只 show/hide，旧内容
+            # 残留，用户反馈「关闭再打开实时流侧栏没有重载悬浮球」。
+            if changed:
+                pool = getattr(self._app, "_panel_pool", None)
+                if pool is not None:
+                    try:
+                        pool.reload_container()
+                    except Exception:
+                        _logger.debug("set_live_panel reload_container failed", exc_info=True)
             try:
                 if enabled:
                     # v0.97：打开开关 = 重新展示 → 强制 dock 贴右。
@@ -2624,26 +2764,16 @@ class Api:
                 "name": msg,
                 "warning": f"已写入但 reload 失败: {exc}",
             }
-        # 同步中继进程内存里的 settings：GUI reload 只刷 GUI 进程的
-        # _settings 缓存，中继 fork 时的 settings 快照还停在 fork 时
-        # 的 upstreams.json 状态，里面没有刚写入的新条目。用户紧接着
-        # 顶栏下拉切到这条新上游时，前端发 /api/upstreams/.../select
-        # → 中继进程的 set_active 找不到 → HTTP404 no upstream named。
-        # 这里发个本地刷新请求让中继也 reload settings。中继进程拒接
-        # 时静默吞掉（不影响 add_upstream 本身已成功的事实）。
-        try:
-            import urllib.request as _ur
-            base = getattr(self._app.settings, "base_url", "") or "http://127.0.0.1:8088"
-            req = _ur.Request(
-                f"{base}/api/upstreams/refresh",
-                data=b"{}",
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with _ur.urlopen(req, timeout=2.0) as r:
-                _ = r.read()
-        except Exception:
-            pass
+        # ---- 2) 无条件全量重启 8088（杀占用者 + 起新后端）----
+        # 新建上游后也走与切换相同的重启机制（v0.19x 用户要求）：GUI
+        # 已把新条目落盘，重启后后端冷启动直接看到它。不再依赖旧的
+        # /api/upstreams/refresh 热刷新 —— 那趟 POST 只有 2s 超时且
+        # 静默吞错，后端忙 / 正在流式时刷新失败，新上游在中继进程内
+        # 存里看不到，顶栏下拉切到它就 404。全量重启不存在这个窗口：
+        # 在途请求/流直接掐断，重启时中继状态完全由 GUI 控制。
+        status = self.restart_server()
+        if status.get("error"):
+            return {"ok": False, "name": msg, "error": status["error"]}
         return {"ok": True, "name": msg}
 
     def remove_upstream(
@@ -2716,6 +2846,15 @@ class Api:
         new state (``True`` when now maximised) so JS can swap icons."""
         try:
             win = self._app.window
+            # Electron 主窗：native 恒 None，走 RPC is_maximized / maximize /
+            # restore（main_main.js），替代 GetWindowPlacement 探测。
+            native = getattr(win, "native", None)
+            if native is None and hasattr(win, "is_maximized"):
+                if win.is_maximized():
+                    win.restore()
+                    return False
+                win.maximize()
+                return True
             # pywebview's Window has ``maximize`` / ``restore`` but no
             # ``is_maximized`` getter on the WinForms backend. Probe via
             # ``GetWindowPlacement`` instead so the button can flip its
@@ -2933,33 +3072,51 @@ class App:
         self._poll_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
-        # Build the webview window. ``js_api=Api(self)`` exposes Api
-        # methods to JS as ``window.pywebview.api.<method>``.
+        # Build the main window. ``js_api=Api(self)`` exposes Api methods to
+        # JS as ``window.pywebview.api.<method>``.
+        #
+        # Phase 1（Electron 主窗）：主窗跑在独立 electron.exe 进程树
+        # （main_main.js），由 ElectronAppDriver 驱动；前端 window.pywebview
+        # 形状由 main_preload.js（gen_preload.py 生成）保持，app.js 93+ 个
+        # _call wrapper 零改动。RELAY_GUI_ELECTRON_MAIN=0 时回退旧 pywebview。
         self.api = Api(self)
         index_url = (_WEB_DIR / "index.html").as_uri()
+        self._using_electron_main = _using_electron_main()
+        if self._using_electron_main:
+            from .electron_window import ElectronAppDriver, ElectronMainWindow
 
-        self.window = webview.create_window(
-            title="RelayMeter",
-            url=index_url,
-            js_api=self.api,
-            width=1180,
-            height=900,
-            background_color=_hex_bg(self.theme_name),
-            # Frameless = no OS title bar / borders. The HTML/CSS layer
-            # below builds its own glass title bar at the top. Drag is
-            # delegated to pywebview's ``easy_drag`` handler — WebView2
-            # does NOT reliably honour ``-webkit-app-region: drag`` on
-            # body-level elements, and easy_drag already intercepts
-            # mousedown on any non-interactive region (everything that
-            # isn't a button / input / nav-item). The existing
-            # light/dark body is already full-bleed, so removing the
-            # system chrome is what makes the GUI feel like "one piece
-            # of glass" rather than an app sitting inside a Windows
-            # window.
-            frameless=True,
-            resizable=True,
-            easy_drag=True,
-        )
+            self.window = ElectronMainWindow(
+                url=index_url,
+                theme_bg=_hex_bg(self.theme_name),
+                width=1180,
+                height=900,
+                api_handler=self.api,
+                user_data_dir=str(_ELECTRON_MAIN_DATA_DIR),
+            )
+            self._driver = ElectronAppDriver(window=self.window)
+        else:
+            self.window = webview.create_window(
+                title="RelayMeter",
+                url=index_url,
+                js_api=self.api,
+                width=1180,
+                height=900,
+                background_color=_hex_bg(self.theme_name),
+                # Frameless = no OS title bar / borders. The HTML/CSS layer
+                # below builds its own glass title bar at the top. Drag is
+                # delegated to pywebview's ``easy_drag`` handler — WebView2
+                # does NOT reliably honour ``-webkit-app-region: drag`` on
+                # body-level elements, and easy_drag already intercepts
+                # mousedown on any non-interactive region (everything that
+                # isn't a button / input / nav-item). The existing
+                # light/dark body is already full-bleed, so removing the
+                # system chrome is what makes the GUI feel like "one piece
+                # of glass" rather than an app sitting inside a Windows
+                # window.
+                frameless=True,
+                resizable=True,
+                easy_drag=True,
+            )
         # Push the initial theme once the page DOM is ready.
         self.window.events.loaded += self._on_loaded
         # Stop the server cleanly on window close.
@@ -3011,6 +3168,10 @@ class App:
 
         def _screen_getter():
             try:
+                # Electron 主窗：native 恒 None，走 get_screen RPC（主屏 DIP 尺寸）。
+                if self._using_electron_main:
+                    w, h = self.window.get_screen()
+                    return (w, h) if w > 0 and h > 0 else (0, 0)
                 import webview as _wv
                 s = _wv.screen
                 w = int(getattr(s, "width", 0) or 0)
@@ -3597,20 +3758,22 @@ class App:
         避免每次 LoadImageW 泄漏 GDI 句柄。进程退出时由 OS 回收。
         """
         try:
-            if getattr(self, "_taskbar_hicon", None):
-                hicon = self._taskbar_hicon
-            else:
-                import tempfile
+            # ico 文件路径提前算好 —— Electron 主窗 set_icon 在 hicon 已缓存
+            # 的后续调用里也要用，不能只在「首次生成 hicon」分支里定义。
+            import tempfile
 
+            ico_path = Path(tempfile.gettempdir()) / "relay_app_icon.ico"
+            if not ico_path.exists():
                 from .icon import write_ico
 
-                ico_path = Path(tempfile.gettempdir()) / "relay_app_icon.ico"
                 try:
-                    if not ico_path.exists():
-                        write_ico(ico_path)
+                    write_ico(ico_path)
                 except Exception:
                     _logger.warning("window icon gen failed", exc_info=True)
                     return
+            if getattr(self, "_taskbar_hicon", None):
+                hicon = self._taskbar_hicon
+            else:
                 user32 = ctypes.windll.user32
                 user32.LoadImageW.restype = ctypes.wintypes.HANDLE
                 user32.LoadImageW.argtypes = [
@@ -3635,8 +3798,19 @@ class App:
             user32 = ctypes.windll.user32
             applied = 0
             for win in (self.window, getattr(self, "panel_window", None)):
+                if win is None:
+                    continue
                 native = getattr(win, "native", None)
                 if native is None:
+                    # Electron 主窗：native 恒 None，走 set_icon RPC
+                    # （main_main.js win.setIcon）；侧栏/球也是 Electron
+                    # （native None）但无 set_icon -> 跳过。
+                    if hasattr(win, "set_icon"):
+                        try:
+                            win.set_icon(str(ico_path))
+                            applied += 1
+                        except Exception:
+                            _logger.debug("window set_icon failed", exc_info=True)
                     continue
                 try:
                     hwnd = native.Handle.ToInt32()
@@ -3668,6 +3842,13 @@ class App:
                 pool.refresh_ball_visibility()
         except Exception:
             _logger.debug("ball eager activate failed", exc_info=True)
+        # v0.184a：SSE 订阅线程提前到主窗 loaded 就起（幂等，_on_panel_loaded
+        # 里也会再起）。Electron 主窗迁移后 _on_panel_loaded 曾有竞态漏触发，
+        # 悬浮球下侧栏因此不再弹出 —— 这里兜底保证 /live/stream 订阅必达。
+        try:
+            self._start_live_panel_stream()
+        except Exception:
+            _logger.debug("live panel SSE eager start failed", exc_info=True)
         try:
             self.window.evaluate_js(f"setTheme('{self.theme_name}')")
             _logger.info("_on_loaded setTheme OK")
@@ -3878,6 +4059,13 @@ class App:
             )
             _stop_thread.start()
             _stop_thread.join(timeout=3.0)
+            # Electron 主窗：先 fire-and-forget 发 quit，让 electron 自己
+            # app.quit() 退出 —— 别 os._exit 留下孤儿 electron 进程。
+            if self._using_electron_main:
+                try:
+                    self.window.quit_async()
+                except Exception:
+                    pass
             _logger.info("frozen quit: exiting")
             os._exit(0)
         # v0.94: signal the teardown so the sidebar's FormClosing handler
@@ -4371,8 +4559,11 @@ class App:
                     self.settings, "relay_gui_live_panel_auto_extend", True))
                 max_cols = 6
                 try:
-                    import webview as _wv
-                    sw = int(getattr(_wv.screen, "width", 0) or 0)
+                    if self._using_electron_main:
+                        sw, _ = self.window.get_screen()
+                    else:
+                        import webview as _wv
+                        sw = int(getattr(_wv.screen, "width", 0) or 0)
                     if sw > 0:
                         avail = max(400, sw - (self.window.x + self.window.width) - 4)
                         max_cols = max(1, avail // 400)
@@ -4671,11 +4862,18 @@ class App:
         # v0.141：private_mode=False + storage_path —— 否则 WebView2 用临时
         # profile，localStorage 每次重启清空，「关闭顶部调试栏」等 prefs 设置
         # 关了重启又自己开（用户实测反馈）。固定目录后数据跨重启保留。
-        webview.start(
-            debug=self.diag,
-            private_mode=False,
-            storage_path=str(_WEBVIEW_DATA_DIR),
-        )
+        if self._using_electron_main:
+            # Electron 主窗：driver.start() 阻塞到 electron.exe 进程退出
+            # （hide→tray 时窗口隐藏但进程活着，只有真退出/崩溃才返回 ——
+            # 语义对齐 webview.start()）。
+            _boot_tick("calling electron driver.start")
+            self._driver.start()
+        else:
+            webview.start(
+                debug=self.diag,
+                private_mode=False,
+                storage_path=str(_WEBVIEW_DATA_DIR),
+            )
         _boot_tick("webview.start returned — window closed")
         # webview.start() returns once the WinForms message loop exits,
         # which only happens when the window is *actually* destroyed
@@ -4813,33 +5011,6 @@ def _force_replace_stale_gui() -> bool:
     return False
 
 
-def _bootstrap_portable_assets() -> None:
-    """v0.195：便携附件包（frozen onefile + 旁置 relay_assets/）自动发现。
-
-    PyInstaller onefile 解开后 ``__file__`` 指向临时解包目录，Electron 运行时
-    （electron.exe，约 244MB）与 ball/panel 渲染资产无法冻结进 exe，必须落在
-    exe 同目录的 ``relay_assets/``（由 build_release.py 组装）。启动时检测到
-    relay_assets 就把 RELAY_ELECTRON_EXE / RELAY_ELECTRON_APP_ROOT 指过去，
-    使悬浮球 + 实时面板在便携形态下可用；源码态（非 frozen）无旁置目录，
-    完全不影响原有逻辑。
-    """
-    try:
-        exe_dir = Path(sys.executable).resolve().parent
-    except Exception:
-        return
-    assets = exe_dir / "relay_assets"
-    if not assets.is_dir():
-        return
-    elec_exe = assets / "electron" / "electron.exe"
-    if elec_exe.is_file():
-        os.environ["RELAY_ELECTRON_EXE"] = str(elec_exe)
-        _logger.info("portable: RELAY_ELECTRON_EXE=%s", elec_exe)
-    app_root = assets / "electron_app"
-    if app_root.is_dir():
-        os.environ["RELAY_ELECTRON_APP_ROOT"] = str(app_root)
-        _logger.info("portable: RELAY_ELECTRON_APP_ROOT=%s", app_root)
-
-
 def run() -> None:
     """Console-script entry point: ``relay-gui``."""
     import argparse
@@ -4862,16 +5033,6 @@ def run() -> None:
     # v0.107: 每次启动都在 stderr 打进度（PyCharm 控制台可见，无需 --diag），
     # 用来定位启动变慢 —— 尤其单实例接管 / force-replace 的耗时。
     _boot_tick("run() entered")
-
-    # v0.195: 便携附件包（frozen onefile + 旁置 relay_assets/）自动发现。
-    # PyInstaller onefile 解开后 __file__ 指向临时解包目录，web 资产可从
-    # _MEIPASS/relay/web 取；但 Electron 运行时（electron.exe 244MB）和
-    # ball/panel 渲染资产无法冻结进 exe，必须落在 exe 旁的 relay_assets/。
-    # 启动时检测 exe 同目录若有 relay_assets，就指向它（设 RELAY_ELECTRON_EXE
-    # / RELAY_ELECTRON_APP_ROOT），使悬浮球 + 实时面板在便携形态下可用。
-    # 源码态（非 frozen）无旁置目录，完全不影响原有逻辑。
-    if getattr(sys, "frozen", False):
-        _bootstrap_portable_assets()
 
     # Diagnostic logging is opt-in (--diag). A frozen bridge in a
     # PyCharm-launched ``python main.py`` run can still be diagnosed by

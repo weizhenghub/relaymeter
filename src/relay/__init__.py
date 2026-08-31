@@ -1,6 +1,6 @@
 """Token consumption relay for Claude Code / Codex / OpenClaw."""
 
-__version__ = "0.99"
+__version__ = "0.99.2"
 
 # v0.117+ 把对插件作者/横向模块开发者**永久稳定**的 API 集中 re-export。
 # 详见 docs/architecture/STABILITY.md。插件作者可以：

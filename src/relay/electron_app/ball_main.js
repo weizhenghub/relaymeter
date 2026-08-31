@@ -104,6 +104,12 @@ function handleCall(m) {
       case "move": win.setPosition(int(a[0]), int(a[1])); reply(m.seq, true, null); break;
       case "resize": win.setSize(int(a[0]), int(a[1])); reply(m.seq, true, null); break;
       case "set_topmost": win.setAlwaysOnTop(!!a[0]); reply(m.seq, true, null); break;
+      case "reload":
+        // v0.203：重载渲染层 —— 设置页切「实时流侧栏」开关时重载
+        // ghost_panel.html（HTML/CSS 改动即时生效，不重建窗口）。
+        win.webContents.reload();
+        reply(m.seq, true, null);
+        break;
       case "set_ignore": setIgnore(!!a[0]); reply(m.seq, true, null); break;
       case "set_expanded":
         // v0.184：展开态（球+侧栏 / 磁吸 dock）—— 停 hover 穿透循环 + 全窗口

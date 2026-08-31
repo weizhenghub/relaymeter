@@ -334,6 +334,12 @@ def _coerce_entry(platform: Optional[str], entry: Any, index: int, path: Path) -
         # v0.98.3: 插件适配器标识（元数据）。None = 未指定。
         adapter=_opt_str("adapter"),
         thinking_options=thinking_options,
+        # v0.200 该上游支持图片输入的模型名（裸模型名）。容错：非字符串
+        # 项丢弃，缺失 = 空列表（该上游无多模态声明）。
+        vision_models=[
+            s.strip() for s in (entry.get("vision_models") or [])
+            if isinstance(s, str) and s.strip()
+        ],
         # v0.12 协议声明（docs/wire-dispatch-plan.md §3）。fail-open：未知
         # wire / auth_style 一律 warn + 当未声明（None），加载时按平台段推断。
         # v0.98：KNOWN_WIRES + 插件注册的 wire（extra_wires()）都算已知。
@@ -640,6 +646,9 @@ def seed_from_settings(settings, path: str | os.PathLike[str] | None = None) -> 
                     ("default_model", c.default_model),
                     ("billing_unit", c.billing_unit),
                     ("token_fields", c.token_fields or None),
+                    # v0.200 该上游支持图片输入的模型名。空列表不落盘
+                    # （加载时默认 []，与未声明一致）。
+                    ("vision_models", c.vision_models or None),
                     # v0.12 协议声明（None 不落盘，加载时按入口推导）
                     ("wire", c.wire),
                     ("endpoint", c.endpoint),

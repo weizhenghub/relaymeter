@@ -79,6 +79,12 @@
         cursor: grab;
         user-select: none;
         -webkit-user-select: none;
+        /* v0.203：侧栏收缩时窗口从「球帽+侧栏」缩回 56px 球帽宽，surface
+           flex 宽趋 0，但本区绝对定位不参与 flex 收缩 → 红叉按钮（right:
+           6px 相对本区）会被挤到球帽区上，形成「收缩过程中悬浮球上短暂
+           出现关闭按钮」。overflow:hidden 让本区随 surface 变窄时把超出的
+           红叉裁掉 —— 球帽上再也不会露出关闭按钮。 */
+        overflow: hidden;
       }
       #panel-drag-region:active { cursor: grabbing; }
       #panel-drag-region .win-ctrl-close { position: absolute; top: 4px; right: 6px; }

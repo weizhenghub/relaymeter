@@ -107,6 +107,10 @@ def fetch_totals(db_path: str, since: float | None = None) -> dict[str, dict[str
     其他 platform 字符串（``"openclaw"`` / ``"opendaw"`` 这类历史遗留
     拼写错乱）一律丢弃 —— 不污染平台分布卡。要看完整平台分布请走
     ``fetch_by_upstream`` 这种全列 GROUP BY 的入口。
+
+    另：endpoint == platform 的行（v0.203 起）直接丢 —— 这是拒绝路径
+    （proxy_legacy ``endpoint=platform`` 占位）才会写出的失败行，从未
+    进入任何 wire，不参与平台分布。
     """
     # 三种协议端点 固定的 key 集合 —— 即便 DB 里没有 openai-responses 行，
     # 也保留这一行 0 占位（用户视觉一致、且后续真有 Responses API 接入
@@ -127,6 +131,7 @@ def fetch_totals(db_path: str, since: float | None = None) -> dict[str, dict[str
         for row in c.execute(
             f"""
             SELECT platform,
+                   endpoint AS raw_endpoint,
                    COALESCE(NULLIF(endpoint, ''), platform) AS endpoint,
                    COUNT(*) AS requests,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -142,6 +147,14 @@ def fetch_totals(db_path: str, since: float | None = None) -> dict[str, dict[str
             ep = str(row["endpoint"])
             # 未知 platform（openclaw / opendaw / 拼写错乱等）直接丢。
             if p not in PLATFORMS:
+                continue
+            # v0.203：raw endpoint 字面等于 platform 的行直接丢 —— 这类
+            # 行只有「拒绝路径」（proxy_legacy 的 endpoint=platform 占位）
+            # 会写出来，从未进入任何 wire，是未完成的失败请求（如 502
+            # 未知key）。此前它们经 COALESCE 折叠成裸 "openai" 桶，在平台
+            # 分布卡上多出一行。NULL（迁移前存量）不受影响，仍折叠进
+            # platform 桶。
+            if row["raw_endpoint"] is not None and str(row["raw_endpoint"]) == p:
                 continue
             if p == "anthropic":
                 # 所有 anthropic 行（无论 endpoint）折叠到 'anthropic'。
@@ -1958,6 +1971,233 @@ def fetch_model_daily(
         return out
 
     # 稳定色板（dark/light 下都清晰）：橙/青/紫/粉/蓝/绿/红 循环。
+    MODEL_PALETTE = [
+        "#f59e0b", "#06b6d4", "#8b5cf6", "#ec4899",
+        "#3b82f6", "#22c55e", "#ef4444", "#f97316",
+        "#14b8a6", "#a855f7", "#eab308", "#64748b",
+    ]
+    models_out: list[dict[str, object]] = []
+    series_out: dict[str, list[dict[str, int]]] = {}
+    items_out: list[dict[str, object]] = []
+    for idx, m in enumerate(ordered):
+        color = MODEL_PALETTE[idx % len(MODEL_PALETTE)]
+        models_out.append({"model": m, "total": model_totals[m], "color": color})
+        ser: list[dict[str, int]] = []
+        for cal in calendar:
+            day_ts = int(cal["ts"])
+            cval = cell.get(m, {}).get(day_ts, {"requests": 0, "total_tokens": 0})
+            ser.append({"date": cal["date"], "total_tokens": cval["total_tokens"]})
+            if cval["total_tokens"] or cval["requests"]:
+                items_out.append({
+                    "model": m,
+                    "date": cal["date"],
+                    "requests": cval["requests"],
+                    "total_tokens": cval["total_tokens"],
+                })
+        series_out[m] = ser
+
+    days_out: list[dict[str, object]] = []
+    for i, cal in enumerate(calendar):
+        day_total = sum(series_out[m][i]["total_tokens"] for m in ordered)
+        days_out.append({"date": cal["date"], "ts": cal["ts"], "total": day_total})
+
+    out["models"] = models_out
+    out["days"] = days_out
+    out["series"] = series_out
+    out["items"] = items_out
+    return out
+
+
+def fetch_agent_by_hour(
+    db_path: str,
+    *,
+    hours: int = 24,
+) -> dict[str, object]:
+    """v0.203：按平台(agent) × 小时桶的调用分布 —— 「30天按平台流量」卡
+    柱状图模式的数据源。
+
+    时间桶对齐 ``fetch_by_hour``（UTC 小时界，``(CAST(ts AS INT) / 3600)
+    * 3600``）。按 agent 拆行，产出：
+
+    - ``agents``: ``[{agent, total, color}]`` —— 每个出现过的 agent + 其
+      窗口内 total_tokens 合计 + 稳定色（按出现顺序取自 MODEL_PALETTE）。
+    - ``hours``: ``[unix_ts, ...]`` —— 固定小时日历（0 补齐，升序）。
+    - ``series``: ``{agent: [{hour, total_tokens}, ...]}`` —— 每 agent 一
+      条序列（0 补齐）。
+    - ``items``: ``[{agent, hour, requests, total_tokens}]`` —— 明细。
+
+    空 DB / 无 agent 行 → 空结构。agent 为 NULL/空串 归入 ``AGENT_UNKNOWN``
+    （与 fetch_aggregate_by_dim 同口径）。
+    """
+    out: dict[str, object] = {
+        "agents": [],
+        "hours": [],
+        "series": {},
+        "items": [],
+    }
+    if not Path(db_path).exists() or hours <= 0:
+        return out
+    hours = min(max(24, int(hours)), 72)  # 只允许 24h / 3d
+
+    now = int(time.time())
+    # 对齐到整点小时界：SQL 的 hour_bucket 是 ``(ts/3600)*3600``，日历必须
+    # 与之同界，否则 (cutoff + k*3600) 永远不会命中任何桶 → items 全空。
+    cutoff = (now // 3600) * 3600 - (hours - 1) * 3600
+
+    # 固定小时日历（升序：最早 → 当前整点小时），空桶留待 0 补齐。
+    hour_list = [cutoff + k * 3600 for k in range(hours)]
+
+    key_expr = f"COALESCE(NULLIF(agent, ''), '{AGENT_UNKNOWN}')"
+    sql = (
+        f"SELECT {key_expr} AS agent, "
+        "(CAST(ts AS INT) / 3600) * 3600 AS hour_bucket, "
+        "COUNT(*) AS requests, "
+        "COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) "
+        "  + COALESCE(SUM(cache_read_input_tokens), 0) "
+        "  + COALESCE(SUM(cache_creation_input_tokens), 0) AS total_tokens "
+        "FROM requests WHERE ts >= ? "
+        "GROUP BY agent, hour_bucket"
+    )
+
+    # agent → hour_bucket → {requests, total_tokens}
+    cell: dict[str, dict[int, dict[str, int]]] = {}
+    agent_totals: dict[str, int] = {}
+    with _connect(db_path) as c:
+        for row in c.execute(sql, (cutoff,)).fetchall():
+            a, bucket = str(row["agent"]), int(row["hour_bucket"])
+            cell.setdefault(a, {})[bucket] = {
+                "requests": int(row["requests"] or 0),
+                "total_tokens": int(row["total_tokens"] or 0),
+            }
+            agent_totals[a] = agent_totals.get(a, 0) + cell[a][bucket]["total_tokens"]
+
+    if not agent_totals:
+        return out
+
+    ordered = sorted(agent_totals, key=lambda a: agent_totals[a], reverse=True)
+    ordered = [a for a in ordered if agent_totals[a] > 0]
+    if not ordered:
+        return out
+
+    # 与 fetch_model_daily 同款稳定色板（dark/light 下都清晰）。
+    MODEL_PALETTE = [
+        "#f59e0b", "#06b6d4", "#8b5cf6", "#ec4899",
+        "#3b82f6", "#22c55e", "#ef4444", "#f97316",
+        "#14b8a6", "#a855f7", "#eab308", "#64748b",
+    ]
+    agents_out: list[dict[str, object]] = []
+    series_out: dict[str, list[dict[str, int]]] = {}
+    items_out: list[dict[str, object]] = []
+    for idx, a in enumerate(ordered):
+        color = MODEL_PALETTE[idx % len(MODEL_PALETTE)]
+        agents_out.append({"agent": a, "total": agent_totals[a], "color": color})
+        ser: list[dict[str, int]] = []
+        for h in hour_list:
+            cval = cell.get(a, {}).get(h, {"requests": 0, "total_tokens": 0})
+            ser.append({"hour": h, "total_tokens": cval["total_tokens"]})
+            if cval["total_tokens"] or cval["requests"]:
+                items_out.append({
+                    "agent": a,
+                    "hour": h,
+                    "requests": cval["requests"],
+                    "total_tokens": cval["total_tokens"],
+                })
+        series_out[a] = ser
+
+    out["agents"] = agents_out
+    out["hours"] = hour_list
+    out["series"] = series_out
+    out["items"] = items_out
+    return out
+
+
+def fetch_upstream_model_daily(
+    db_path: str,
+    *,
+    upstream: str,
+    upstreams: list[dict[str, object]],
+    days: int = 30,
+) -> dict[str, object]:
+    """v0.204：单个上游 × 模型的按日调用分布 —— 「上游统计」卡弹窗
+    「分布调用竖状图」数据源。
+
+    结构与 ``fetch_model_daily`` 对齐：``{models, days, series, items}``，
+    只是按 ``upstream`` 过滤（虚拟 cfg 展开成成员真实名，跨成员同名
+    model 累加 —— 口径与 ``fetch_by_upstream_model`` 一致），且只算
+    token 消耗（不含 cost —— 弹窗表格已有加权 cost，柱状图只要 tokens）。
+
+    - ``models``: ``[{model, total, color}]`` —— 该上游窗口内出现过的
+      模型 + total_tokens 合计 + 稳定色（MODEL_PALETTE）。
+    - ``days``: ``[{date, ts, total}]`` —— 固定日历（0 补齐）。
+    - ``series``: ``{model: [{date, total_tokens}]}`` —— 每模型一条序列。
+    - ``items``: ``[{model, date, requests, total_tokens}]`` —— 明细。
+
+    ``upstream`` 必须能在 ``upstreams``（已含虚拟 cfg）里命中，否则返回
+    空结构。
+    """
+    out: dict[str, object] = {
+        "models": [],
+        "days": [],
+        "series": {},
+        "items": [],
+    }
+    if not Path(db_path).exists() or days <= 0:
+        return out
+    # 找出该 cfg（真实 / 虚拟），展开真实名列表。
+    cfg = None
+    for u in upstreams:
+        if u.get("name") == upstream:
+            cfg = u
+            break
+    if cfg is None:
+        return out
+    real_names = _resolve_names(cfg)
+    if not real_names:
+        return out
+
+    now = int(time.time())
+    today_start = (now // 86400) * 86400
+    cutoff = today_start - (days - 1) * 86400
+
+    calendar: list[dict[str, object]] = []
+    for offset in range(days - 1, -1, -1):
+        day_ts = today_start - offset * 86400
+        calendar.append({
+            "date": time.strftime("%Y-%m-%d", time.gmtime(day_ts)),
+            "ts": day_ts,
+        })
+
+    placeholders = ",".join("?" for _ in real_names)
+    sql = (
+        f"SELECT COALESCE(NULLIF(model, ''), '(无)') AS model, "
+        f"(CAST(ts AS INT) / 86400) * 86400 AS day_bucket, "
+        f"COUNT(*) AS requests, "
+        f"COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) "
+        f"  + COALESCE(SUM(cache_read_input_tokens), 0) "
+        f"  + COALESCE(SUM(cache_creation_input_tokens), 0) AS total_tokens "
+        f"FROM requests WHERE upstream IN ({placeholders}) AND ts >= ? "
+        f"GROUP BY model, day_bucket"
+    )
+
+    cell: dict[str, dict[int, dict[str, int]]] = {}
+    model_totals: dict[str, int] = {}
+    with _connect(db_path) as c:
+        for row in c.execute(sql, (*real_names, cutoff)).fetchall():
+            m, bucket = str(row["model"]), int(row["day_bucket"])
+            cell.setdefault(m, {})[bucket] = {
+                "requests": int(row["requests"] or 0),
+                "total_tokens": int(row["total_tokens"] or 0),
+            }
+            model_totals[m] = model_totals.get(m, 0) + cell[m][bucket]["total_tokens"]
+
+    if not model_totals:
+        return out
+
+    ordered = sorted(model_totals, key=lambda m: model_totals[m], reverse=True)
+    ordered = [m for m in ordered if model_totals[m] > 0]
+    if not ordered:
+        return out
+
     MODEL_PALETTE = [
         "#f59e0b", "#06b6d4", "#8b5cf6", "#ec4899",
         "#3b82f6", "#22c55e", "#ef4444", "#f97316",

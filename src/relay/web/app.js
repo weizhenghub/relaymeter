@@ -146,6 +146,11 @@
     // v0.188 支持图片的模型（/models/api.json modalities）。
     getVisionModels()     { return this._call("get_vision_models"); },
     setVisionModels(p)    { return this._call("set_vision_models", [p]); },
+    // v0.164+：更新日志 —— 读/写 docs/CHANGELOG.txt（开发者模式设置组）。
+    // 之前渲染层直接 api.getChangelog()/api.saveChangelog() 但本地 wrapper
+    // 从未定义，pywebview 下该功能实际静默抛错，此处补齐。
+    getChangelog()        { return this._call("get_changelog"); },
+    saveChangelog(text)   { return this._call("save_changelog", [text]); },
     // Frameless window controls — Python side is snake_case; routed
     // through ``_call`` so the same bridge-missing guard covers them.
     windowMinimize()       { return this._call("window_minimize"); },
@@ -167,11 +172,14 @@
     // v0.65: optional ``model`` parameter — the sidebar dropdown lists
     // every (upstream, model) pair separately, so the picked model rides
     // along with the switch and Python persists both at once.
+    // v0.???: 切换 = GUI 落盘 + 桥内无条件全量重启 8088（taskkill 最长 10s +
+    // 起新后端）。默认 3s 轮询超时会掐断重启，必须传 20000（与 restart 同档）。
     async applyUpstream(platform, name, model = null) {
       return this._call(
         "apply_upstream",
         [platform, name, model],
-        { ok: false, error: "bridge unavailable" }
+        { ok: false, error: "bridge unavailable" },
+        20000
       );
     },
     // v0.65: 单独写 model 字段。``model=null`` 清除映射。
@@ -241,11 +249,15 @@
     },
     // v0.46："新建上游" 表单背后。payload 字段见 Python add_upstream，
     // 校验失败 Python 端返 {ok:false, error:"..."}。
+    // v0.19x：新建后 Python 侧也会全量重启 8088（taskkill 最长 10s +
+    // 起新后端），默认 3s 轮询超时会掐断重启 —— 必须传 20000（与切换
+    // apply_upstream / 手动 restart 同档）。
     async createUpstream(platform, payload) {
       return this._call(
         "create_upstream",
         [platform, payload],
-        { ok: false, error: "bridge unavailable" }
+        { ok: false, error: "bridge unavailable" },
+        20000
       );
     },
     // v0.12：新建上游自动探测（wire/端点/认证/模型/key 有效性）。
@@ -318,6 +330,14 @@
     // v0.153：单模型 30 天调用分布 —— 按 model × 日聚合（GUI 桥直读 relay.db）。
     statsModelDaily(days) {
       return this._call("stats_model_daily", [days], { error: "bridge_unavailable" });
+    },
+    // v0.203：平台流量按小时分布 —— 按 agent × 小时聚合（GUI 桥直读 relay.db）。
+    statsAgentHourly(hours) {
+      return this._call("stats_agent_hourly", [hours], { error: "bridge_unavailable" });
+    },
+    // v0.204：单上游按模型 × 日聚合 —— 「上游统计」卡弹窗竖状图数据源。
+    statsUpstreamModelDaily(upstream, days) {
+      return this._call("stats_upstream_model_daily", [upstream, days], { error: "bridge_unavailable" });
     },
     // 完全透传模式桥接
     getPassthroughMode() {
@@ -481,6 +501,41 @@
   // finally 里把 isRestarting 落回 false、清掉 lastStatusSig 强制下一次
   // renderStatus 全量重画，并主动拉一次 status/snapshot——不然要等到下
   // 一个 500ms tick 才恢复,过渡态会看起来卡住。
+  // 重启/切换后的全量重渲：清掉所有视图 sig → 拉最新 snapshot+status → 重渲。
+  // restartRelay()（顶栏重启）与 applyUpstreamDirect()（切换=GUI 落盘+桥内
+  // 重启）共用 —— 切换现在由 apply_upstream 桥内部完成全量重启，不再走
+  // restartRelay，但都要在同一份"重启后刷新"逻辑里落地新状态。
+  async function refreshAfterRestart() {
+    // v0.93：清掉**所有**视图 sig —— 不只 lastStatusSig。restart 之后
+    // active_per_platform 必然变化，sidebar / 上游页 / 卡片都得重建。
+    // 之前只清 lastStatusSig 靠 500ms tick 顺带渲染，但切换 active 这条
+    // 路径上 tick 偶尔会被节流 / 跳过，用户看到"切换器变了其它没变"。
+    lastStatusSig = null;
+    lastSidebarSig = null;
+    lastUpstreamsSig = null;
+    lastActivePerPlatform = {};
+    autoswitchToasts.clear();
+    _quotaBarsCache = null;
+    _quotaBarsOwner = null;
+    document.querySelectorAll(".status-dot").forEach(dot => {
+      dot.classList.remove("dot-restarting");
+    });
+    // 主动拉一次 snapshot + status 并全量重渲，不等 500ms tick。
+    try {
+      const [snap, status] = await Promise.all([api.snapshot(), api.status()]);
+      if (snap) lastSnap = snap;
+      if (status) lastStatus = status;
+      renderAll(lastSnap, lastStatus);
+      renderSidebar(lastSnap, lastStatus);
+      renderSidebarQuota(lastSnap);
+      renderUpstreamsView($("card-upstreams-detail-body"), lastSnap, lastStatus);
+      renderActiveView(lastSnap, lastStatus);
+      if (status) renderStatus(status);
+    } catch (e) {
+      console.error("refreshAfterRestart failed:", e);
+    }
+  }
+
   async function restartRelay() {
     if (isRestarting) return;
     isRestarting = true;
@@ -512,34 +567,7 @@
       alert("重启失败：" + restartErr);
     } finally {
       isRestarting = false;
-      // v0.93：清掉**所有**视图 sig —— 不只 lastStatusSig。restart 之后
-      // active_per_platform 必然变化，sidebar / 上游页 / 卡片都得重建。
-      // 之前只清 lastStatusSig 靠 500ms tick 顺带渲染，但切换 active 这条
-      // 路径上 tick 偶尔会被节流 / 跳过，用户看到"切换器变了其它没变"。
-      lastStatusSig = null;
-      lastSidebarSig = null;
-      lastUpstreamsSig = null;
-      lastActivePerPlatform = {};
-      autoswitchToasts.clear();
-      _quotaBarsCache = null;
-      _quotaBarsOwner = null;
-      document.querySelectorAll(".status-dot").forEach(dot => {
-        dot.classList.remove("dot-restarting");
-      });
-      // 主动拉一次 snapshot + status 并全量重渲，不等 500ms tick。
-      try {
-        const [snap, status] = await Promise.all([api.snapshot(), api.status()]);
-        if (snap) lastSnap = snap;
-        if (status) lastStatus = status;
-        renderAll(lastSnap, lastStatus);
-        renderSidebar(lastSnap, lastStatus);
-        renderSidebarQuota(lastSnap);
-        renderUpstreamsView($("card-upstreams-detail-body"), lastSnap, lastStatus);
-        renderActiveView(lastSnap, lastStatus);
-        if (status) renderStatus(status);
-      } catch (e) {
-        console.error("restartRelay post-refresh failed:", e);
-      }
+      await refreshAfterRestart();
       // 顶栏按钮恢复可用（不管 restart 成不成功）
       if (btn) btn.disabled = false;
       if (btnRestart) btnRestart.disabled = false;
@@ -607,8 +635,10 @@
     }
     const up = snap.by_upstream || {};
     const entries = Object.entries(up);
+    // v0.204：空状态不再显示「暂无请求」占位 —— 用户要求删掉该字段，
+    // 无上游时卡片留白。
     if (!entries.length) {
-      body.innerHTML = '<div class="card-empty">暂无请求</div>';
+      body.innerHTML = "";
       return;
     }
     // 当前激活的 upstream 集合。只取 anthropic 平台的 active，openai
@@ -965,10 +995,24 @@
     try { localStorage.setItem(AGENT_VIEW_KEY, v); } catch (_) {}
   }
 
+  // v0.201：平台流量卡隐藏的平台 —— localStorage 持久化。值为隐藏那一刻
+  // 的 by_agent 快照 {requests, tokens}，用于「新流量」判定（该平台总量
+  // 增长 / 原本缺席现出现 → 自动解除隐藏）。tokens = in+out+cache 三字段
+  // 合计，与卡内显示口径一致。
+  const AGENT_HIDDEN_KEY = "agent-hidden-v1";
+  let agentHidden = {};   // {rawAgent: {requests, tokens}}
+  function loadAgentHidden() {
+    try { agentHidden = JSON.parse(localStorage.getItem(AGENT_HIDDEN_KEY)) || {}; } catch (_) { agentHidden = {}; }
+  }
+  function saveAgentHidden() {
+    try { localStorage.setItem(AGENT_HIDDEN_KEY, JSON.stringify(agentHidden)); } catch (_) {}
+  }
+
   // 旧的纯列表渲染（v0.159/0.162 逐行徽标 + meta）。保留与竖状图并行。
   function renderAgentList(body, snap) {
     const totals = snap.by_agent || {};
-    const entries = Object.entries(totals);
+    // v0.201：过滤被隐藏的平台（隐藏集由右键菜单维护）。
+    const entries = Object.entries(totals).filter(([k]) => !agentHidden[k]);
     if (!entries.length) {
       body.innerHTML = '<div class="card-empty">暂无请求</div>';
       return;
@@ -1003,6 +1047,9 @@
 
   // 竖状图渲染（v0.xxx）。Y = tokens（in+out+cache），柱色 agent 色，
   // 柱顶标值，点击柱 → 编辑 modal。
+  // v0.202/0.203：柱下方改成「索引 → 完整模型名 + tokens」列表，每行一个
+  // （点击行 = 编辑 modal，右键 = 隐藏菜单，与列表模式一致）。列表放 HTML
+  // 里（不是 SVG）→ 超长时容器内滚动，绝不拉长卡片。
   function renderAgentChart(body, snap) {
     const totals = snap.by_agent || {};
     const entries = Object.entries(totals).map(([k, v]) => ({
@@ -1012,7 +1059,8 @@
       requests: v.requests || 0,
       total: (v.input_tokens || 0) + (v.output_tokens || 0)
         + (v.cache_read_input_tokens || 0) + (v.cache_creation_input_tokens || 0),
-    })).filter(d => d.total > 0 || d.requests > 0);
+    // v0.201：过滤被隐藏的平台（隐藏集由右键菜单维护）。
+    })).filter(d => !agentHidden[d.raw] && (d.total > 0 || d.requests > 0));
     if (!entries.length) {
       body.innerHTML = '<div class="card-empty">暂无请求</div>';
       return;
@@ -1022,23 +1070,27 @@
     body.innerHTML = "";
     const size = _statsHostSize(body);
     const w = Math.max(200, size.w || 320);
+    // 图表区高度固定（不随平台数涨）：柱状图 + 可滚动列表共享，列表超长
+    // 时滚动，卡片保持默认高（不拉伸）。
     const h = Math.max(180, size.h || 200);
-    const padL = 4, padR = 4, padT = 18, padB = 34;
+    const padL = 4, padR = 4, padT = 12;
 
     const iw = w - padL - padR;
-    const ih = h - padT - padB;
+    const chartH = Math.max(80, h - padT - 92);   // 余量给列表区
+    const maxV = d3.max(entries, d => d.total) || 1;
+    const y = d3.scaleLinear().domain([0, maxV * 1.08]).range([chartH, 0]);
     const x = d3.scaleBand()
       .domain(entries.map((_, i) => i))
       .range([0, iw])
       .paddingInner(0.28)
       .paddingOuter(0.1);
-    const maxV = d3.max(entries, d => d.total) || 1;
-    const y = d3.scaleLinear().domain([0, maxV * 1.08]).range([ih, 0]);
 
+    // 柱状图 SVG：固定高度，viewBox 精确对应（不缩放压缩）。
     const svg = d3.select(body).append("svg")
-      .attr("viewBox", `0 0 ${w} ${h}`)
+      .attr("class", "ag-chart-svg")
+      .attr("viewBox", `0 0 ${w} ${padT + chartH + 4}`)
       .attr("preserveAspectRatio", "xMidYMid meet")
-      .attr("width", "100%").attr("height", "100%");
+      .attr("width", "100%").attr("height", (padT + chartH + 4) + "px");
     const g = svg.append("g").attr("transform", `translate(${padL},${padT})`);
 
     // 横网格线（4 档）。
@@ -1046,14 +1098,14 @@
       .attr("x1", 0).attr("x2", iw).attr("y1", d => y(d)).attr("y2", d => y(d))
       .attr("class", "ag-grid");
 
-    // 柱 + 顶部数值 + 平台名（长名截断，悬停 tooltip 看全名 + 请求数）。
+    // 柱 + 顶部数值。悬停 tooltip 看全名 + 请求数。
     g.selectAll("rect.ag-bar").data(entries).enter().append("rect")
       .attr("class", "ag-bar")
       .attr("data-agent-row", d => d.raw)
       .attr("x", (_, i) => x(i))
       .attr("width", x.bandwidth())
       .attr("y", d => y(d.total))
-      .attr("height", d => Math.max(0, ih - y(d.total)))
+      .attr("height", d => Math.max(0, chartH - y(d.total)))
       .attr("rx", 3)
       .style("fill", d => d.color)
       .style("fill-opacity", 0.85)
@@ -1068,13 +1120,41 @@
       .attr("y", d => y(d.total) - 4)
       .text(d => fmtTokens(d.total));
 
-    g.selectAll("text.ag-label").data(entries).enter().append("text")
-      .attr("class", "ag-label")
-      .attr("data-i18n-keep", "")
-      .attr("text-anchor", "middle")
-      .attr("x", (_, i) => x(i) + x.bandwidth() / 2)
-      .attr("y", ih + 16)
-      .text(d => (d.name.length > 10 ? d.name.slice(0, 9) + "…" : d.name));
+    // v0.202/0.203：索引列表 —— HTML（非 SVG），每行「序号. 模型名 ·
+    // tokens」。溢出时容器滚动，不拉长卡片。行挂 data-agent-row → 点击
+    // 打开编辑 modal、右键弹隐藏菜单（与列表模式同一套事件委托）。
+    const list = document.createElement("div");
+    list.className = "ag-legend-list";
+    list.innerHTML = entries.map((it, i) => {
+      const swatch = `<span class="ag-legend-swatch" style="background:${escape(it.color)}"></span>`;
+      const label = `<span class="ag-legend-text" data-i18n-keep>${i + 1}. ${escape(it.name)} · ${fmtTokens(it.total)}</span>`;
+      return `<div class="ag-legend-row" data-agent-row="${attr(it.raw)}" title="点击编辑显示名 / 颜色 / 显示模式">${swatch}${label}</div>`;
+    }).join("");
+    body.appendChild(list);
+  }
+
+  // v0.201：隐藏平台的新流量扫描 —— 在 renderAgent 里、拿到最新 by_agent
+  // 后跑。总览卡有 sig 短路，但任一新请求必改 recent[0].id / by_hour 末桶
+  // → sig 变 → 重渲染，所以新流量到达后下一 tick 就会判定。判定规则：
+  //   * 该平台还没出现在 by_agent（隐藏时缺席 / 之后仍缺席）→ 保持隐藏。
+  //   * requests 或 tokens 任一超过隐藏那一刻的快照 → 有新流量 → 解除隐藏。
+  // fetch_agent_totals（tui.py）连纯 error 请求也计入 requests，所以「0
+  // token 纯报错」也算新流量。
+  function sweepHidden(snap) {
+    const totals = (snap && snap.by_agent) || {};
+    let changed = false;
+    for (const k of Object.keys(agentHidden)) {
+      const cur = totals[k];
+      const prev = agentHidden[k];
+      if (!cur) continue;   // 还没出现 = 保持隐藏
+      const curT = (cur.input_tokens || 0) + (cur.output_tokens || 0)
+        + (cur.cache_read_input_tokens || 0) + (cur.cache_creation_input_tokens || 0);
+      if ((cur.requests || 0) > (prev.requests || 0) || curT > (prev.tokens || 0)) {
+        delete agentHidden[k];
+        changed = true;
+      }
+    }
+    if (changed) saveAgentHidden();
   }
 
   function renderAgent(body, snap) {
@@ -1082,6 +1162,8 @@
       body.innerHTML = '<div class="card-empty">暂无数据</div>';
       return;
     }
+    // v0.201：先扫隐藏态（新流量 → 自动解除隐藏），再按当前隐藏集过滤渲染。
+    sweepHidden(snap);
     const view = getAgentCardView();
     // 卡级 class 控制 body 高度：list → 自然高度，chart → 200px。
     const card = body.closest(".glass-card");
@@ -1293,34 +1375,125 @@
     if (lastSnap) renderAll(lastSnap, lastStatus);
   });
 
-  // 总览卡事件委托：点某行（或徽标）→ 打开编辑 modal。
+  // 总览卡事件委托：点某行（或徽标）→ 打开编辑 modal。v0.201：右键菜单
+  // 开着时（ctx menu 被触发即设了标志）不弹编辑 modal —— 菜单项点击已
+  // stopPropagation，这里再兜一层防右键顺带弹 modal。
+  let agentCtxMenuOpen = false;
   document.addEventListener("click", function (e) {
     const tEl = e.target;
     if (!tEl || !tEl.closest) return;
     const row = tEl.closest("[data-agent-row]");
     if (!row) return;
+    if (agentCtxMenuOpen) return;
     const raw = row.getAttribute("data-agent-row");
     if (!raw) return;
     openAgentAliasModal(raw);
   });
 
+  // -------------------------------------------------------------------------
+  // v0.201：平台流量卡右键菜单 —— 右键平台行（列表）/ 柱（图表）弹「隐藏
+  // 该平台」，点击隐藏；该平台有新流量时自动解除（sweepHidden）。单个
+  // 复用 div 挂 body，position:fixed，视口内 clamp。
+  // -------------------------------------------------------------------------
+  let _agentCtxMenu = null;
+  function _agentCtxEnsure() {
+    if (_agentCtxMenu) return _agentCtxMenu;
+    const m = document.createElement("div");
+    m.id = "agent-ctx-menu";
+    m.className = "agent-ctx-menu";
+    m.hidden = true;
+    m.innerHTML = `
+      <button type="button" class="agent-ctx-item" data-agent-ctx-hide>
+        <span class="agent-ctx-icon" aria-hidden="true">🙈</span>
+        <span data-i18n-keep>隐藏该平台</span>
+      </button>`;
+    document.body.appendChild(m);
+    _agentCtxMenu = m;
+    return m;
+  }
+  function _agentCtxOpen(x, y, raw) {
+    const m = _agentCtxEnsure();
+    agentCtxMenuOpen = true;
+    m._agentCtxRaw = raw;
+    m.hidden = false;
+    void m.offsetWidth;                    // 强制 reflow，落地初始态
+    m.classList.add("open");
+    const r = m.getBoundingClientRect();
+    // 视口内 clamp：贴右下角时向上/向左翻。
+    m.style.left = Math.round(Math.max(4, Math.min(x, window.innerWidth - r.width - 8))) + "px";
+    m.style.top = Math.round(Math.max(4, Math.min(y, window.innerHeight - r.height - 8))) + "px";
+  }
+  function _agentCtxClose(now) {
+    const m = _agentCtxMenu;
+    if (!m || m.hidden) { agentCtxMenuOpen = false; return; }
+    if (m._ctxCloseTimer) return;          // 已在收起中，幂等
+    m.classList.remove("open");
+    if (now) { m.hidden = true; m._ctxCloseTimer = null; agentCtxMenuOpen = false; return; }
+    m._ctxCloseTimer = setTimeout(() => {
+      m._ctxCloseTimer = null;
+      m.hidden = true;
+      agentCtxMenuOpen = false;
+    }, 160);
+  }
+  // 右键平台行 / 柱 → 弹菜单。也关掉任何已开的菜单（换目标）。
+  document.addEventListener("contextmenu", function (e) {
+    const tEl = e.target;
+    const row = (tEl && tEl.closest) ? tEl.closest("[data-agent-row]") : null;
+    if (!row) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const raw = row.getAttribute("data-agent-row");
+    if (!raw) return;
+    if (_agentCtxMenu && !_agentCtxMenu.hidden) {
+      _agentCtxMenu.hidden = true;
+      agentCtxMenuOpen = false;
+    }
+    _agentCtxOpen(e.clientX, e.clientY, raw);
+  });
+  // 菜单项点击 → 记录隐藏快照 + 重绘。
+  document.addEventListener("click", function (e) {
+    const item = (e.target && e.target.closest) ? e.target.closest("[data-agent-ctx-hide]") : null;
+    if (!item) return;
+    e.stopPropagation();
+    const m = _agentCtxMenu;
+    const raw = m && m._agentCtxRaw;
+    if (!raw) return;
+    const cur = (lastSnap && lastSnap.by_agent && lastSnap.by_agent[raw]) || {};
+    agentHidden[raw] = {
+      requests: cur.requests || 0,
+      tokens: (cur.input_tokens || 0) + (cur.output_tokens || 0)
+        + (cur.cache_read_input_tokens || 0) + (cur.cache_creation_input_tokens || 0),
+    };
+    saveAgentHidden();
+    _agentCtxClose(true);
+    if (lastSnap) renderAll(lastSnap, lastStatus);
+  });
+  // 关闭：点外部（即时收，不残留遮挡后续点击） / 滚动 / Esc / resize。
+  document.addEventListener("click", function (e) {
+    if (!agentCtxMenuOpen) return;
+    const m = _agentCtxMenu;
+    if (!m) return;
+    if (e.target.closest && e.target.closest("#agent-ctx-menu")) return;
+    _agentCtxClose(true);
+  });
+  document.addEventListener("scroll", function () { if (agentCtxMenuOpen) _agentCtxClose(); }, true);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && agentCtxMenuOpen) { e.preventDefault(); _agentCtxClose(true); }
+  });
+  window.addEventListener("resize", function () { if (agentCtxMenuOpen) _agentCtxClose(true); });
+
   // v0.40 性能：spotlight 每 500ms 跑一次，但 99% 的 tick 期间 model
   // 数据完全没变。7 个 setText + 3 个 style.width 在 idle 状态下是
   // 纯浪费，且每次都触发一次 layout。sig 只覆盖显示相关的字段。
   //
-  // v0.9：修复"总token 不动"。旧实现里 tms-total 是**用量最大的那
-  // 一个模型**的累计（top.total）——当某个大模型（如 MiniMax-M3）长
-  // 期占榜首时，其它上游（如 opencode-go）的消耗永远盖不过它，顶部
-  // "总计" 就冻住了，跟"上游状态"里 per-upstream 的累计 tokens 严重
-  // 不一致。现在总计/请求数/三段进度条都改成**全模型合计**（真正的
-  // 中继总消耗，会随任意上游增长），tms-name 仍保留"用量最大的模型"
-  // 这个高亮。sig 里拿掉 ``snap.ts`` —— 数字没变就不用重渲染。
+  // v0.9：总计/请求数/三段进度条都是**全模型合计**（真正的中继总消耗，
+  // 会随任意上游增长），避免"总token 冻住"——旧实现曾显示用量最大的
+  // 单一模型累计，被大模型长期占榜。sig 只覆盖显示相关的字段，数字没变
+  // 就不用重渲染（v0.40 性能：每 500ms tick 免掉 7 个 setText + 3 个
+  // style.width 的 layout）。
   let lastSpotlightSig = null;
-  // v0.10：点击 spotlight 的"总计"数字在两种口径间切换：
-  //   "all" = 全模型合计（中继总消耗）
-  //   "top" = 用量最大的模型（tms-name 高亮的那一个）
-  // 请求数跟着同一口径走。sig 里带上 mode，切模式立即重渲染。
-  let spotlightMode = "all";
+  // v0.205：模型名与「总计 / 最大模型」切换一并移除 —— 没有锚点展示
+  // "最大模型"口径，卡片固定为全模型合计。
 
   // -------------------------------------------------------------------------
   // v0.100：总览入场动画 —— 每次进入「总览」主页，spotlight 数字与进度条
@@ -1494,42 +1667,30 @@
       root.hidden = true;
       return;
     }
-    // ``by_model`` is already sorted DESC by total tokens (see
-    // ``tui.fetch_by_model``), so the first entry is the heaviest.
-    // Single pass: find the top model AND accumulate relay-wide totals.
-    let topName = null, top = null;
+    // v0.205：模型名已移除 —— 不再需要找 top model，只累计全模型合计。
     let sumInput = 0, sumOutput = 0, sumCache = 0, sumReq = 0;
-    for (const [name, v] of Object.entries(models)) {
-      const t = (v.input_tokens || 0) + (v.output_tokens || 0) + (v.cache_tokens || 0);
-      if (!top || t > top.total) { topName = name; top = { ...v, total: t }; }
+    for (const [, v] of Object.entries(models)) {
       sumInput += v.input_tokens || 0;
       sumOutput += v.output_tokens || 0;
       sumCache += v.cache_tokens || 0;
       sumReq += v.requests || 0;
     }
     const grandTotal = sumInput + sumOutput + sumCache;
-    if (!topName || grandTotal <= 0) { root.hidden = true; return; }
-    // v0.10：按当前口径取展示值。进度条（输入/输出/缓存占比）保持全
-    // 模型合计 —— 它是比例不是总量，跟口径无关。
-    const shownTotal = spotlightMode === "top" ? (top.total || 0) : grandTotal;
-    const shownReq   = spotlightMode === "top" ? (top.requests || 0) : sumReq;
+    if (grandTotal <= 0) { root.hidden = true; return; }
     // v0.154：sig 带语言 —— 切语言后即使数字不变也要重渲染，否则
     // tms-total-cn 会停留在中文大写数字（walker 对非字典中文不翻译）。
-    const sig = spotlightMode + "|" + I18N.lang + "|" + topName + "|" + shownReq + "|" + shownTotal;
+    const sig = I18N.lang + "|" + sumReq + "|" + grandTotal;
     if (sig === lastSpotlightSig) return;
     lastSpotlightSig = sig;
     // 递增代际：使上一轮入场动画的 rAF 帧立即失效（它可能还在把旧的
     // 数字/条写回 DOM）。
     spotlightAnimGen++;
     root.hidden = false;
-    setText("tms-name",     topName);
-    setText("tms-requests", fmtNum(shownReq));
-    setText("tms-total",    fmtTokens(shownTotal));
+    setText("tms-requests", fmtNum(sumReq));
+    setText("tms-total",    fmtTokens(grandTotal));
     // v0.154：中文大写数字是简体中文界面专属设计元素 —— 非 zh（含 zh-TW/
     // ja/ko）用西文逗号格式，避免其它语言界面出现「柒贰伍…」。
-    setText("tms-total-cn", I18N.lang === "zh" ? toFormalCn(shownTotal) : fmtTokens(shownTotal));
-    const labelEl = $("tms-total-label");
-    if (labelEl) labelEl.textContent = spotlightMode === "top" ? "最大模型" : "总计";
+    setText("tms-total-cn", I18N.lang === "zh" ? toFormalCn(grandTotal) : fmtTokens(grandTotal));
     setText("tms-input-val",  fmtTokens(sumInput));
     setText("tms-output-val", fmtTokens(sumOutput));
     setText("tms-cache-val",  fmtTokens(sumCache));
@@ -1560,25 +1721,6 @@
       return mode === "passthrough" ? ptOverviewToSnap(ptOverviewCache) : mergeSnap(snap, ptOverviewCache);
     }
     return null;
-  }
-
-  // v0.10：单击"总计"数字切换 全模型合计 / 用量最大模型。切换后立即
-  // 用最近一次快照重渲染，不用等下一个 poll tick。
-  function wireSpotlightToggle() {
-    const el = $("tms-total");
-    if (!el) return;
-    const flip = () => {
-      spotlightMode = spotlightMode === "all" ? "top" : "all";
-      const ov = lastSnap ? getCurrentOverviewData(lastSnap) : null;
-      if (ov) renderTopModelSpotlight(ov);
-    };
-    el.addEventListener("click", flip);
-    el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        flip();
-      }
-    });
   }
 
   function renderModels(body, snap) {
@@ -1849,7 +1991,7 @@
   // 统计卡，默认不显示（getCardsConfig 只默认开快照卡）。
   const CARD_DEFS = [
     { key: "hourly", title: "Token 消耗 · 近 24h", cls: "card-chart-row" },
-    { key: "upstream", title: "上游状态", cls: "" },
+    { key: "upstream", title: "上游统计", cls: "" },
     { key: "today", title: "今日用量", cls: "" },
     { key: "platform", title: "协议分布", cls: "" },
     { key: "agent", title: "平台流量", cls: "" },
@@ -1901,6 +2043,21 @@
         `<div class="stats-md-bar-label">单模型 30 天调用分布</div>` +
         `<div class="stats-md-bar-chips" data-md-chips="1"></div>` +
         `<select class="stats-md-select" data-md-sel="1" aria-label="选择模型"></select>` +
+        `</div>`;
+    }
+    // v0.203：stats-agent 嵌入卡 —— 标题右补「饼图/竖状图 + 24h/3d」切换，
+    // 与 stats 页那张卡同款（文档级委托统一处理，这里只管 markup）。
+    if (key === "stats-agent") {
+      inner = `<div class="card-title card-title-with-action">` +
+        `<span>${def.title}</span>` +
+        `<span class="agent-view-toggle">` +
+        `<button type="button" class="agent-view-btn agent-md-btn active" data-agent-mode="pie">饼图</button>` +
+        `<button type="button" class="agent-view-btn agent-md-btn" data-agent-mode="chart">竖状图</button>` +
+        `<span class="agent-hours-group" hidden>` +
+        `<button type="button" class="agent-view-btn agent-md-btn active" data-agent-hours="24">24h</button>` +
+        `<button type="button" class="agent-view-btn agent-md-btn" data-agent-hours="72">3d</button>` +
+        `</span></span>` +
+        `<button type="button" class="card-close-btn" data-close-card="${key}" title="移除卡片" aria-label="移除卡片">×</button>` +
         `</div>`;
     }
     inner += `<div class="${bodyCls2}" id="card-${key}-body">` +
@@ -3169,13 +3326,85 @@
   // dim/range/模式选择器解耦（agent 字段只存在于转换库）。TTL 30s，避免
   // 每 500ms poll tick 反复打桥。渲染前把原始 agent 名经 agentDisplayName
   // 映射成显示名（与总览「平台流量」卡片一致）。
-  let agentStatsCache = null;
+  //
+  // v0.203：卡标题加「饼图 / 竖状图」二分切换。竖状图模式走新端点
+  // statsAgentHourly —— 按 agent × 小时聚合（与「单模型 30 天调用分布」
+  // 同款多色叠柱），窗口二极 24h / 3d（小时粒度）。饼图模式仍走
+  // statsAggregate 30d。两种数据各自 TTL 缓存，互不复用。
+  let agentMode = "pie";           // v0.203：饼图 | 竖状图
+  let agentStatsCache = null;      // 饼图：statsAggregate 30d
   let agentStatsFetchedAt = 0;
+  let agentHourlyCache = null;     // 竖状图：statsAgentHourly
+  let agentHourlyFetchedAt = 0;
+  let agentHourlyHours = 24;       // 竖状图窗口：24 / 72
   const AGENT_STATS_TTL = 30000;
+
+  // 卡标题里的二分切换：文档级委托，数据区与两个视图（stats 页 / 总览
+  // 嵌入卡）共用一套按钮，点任意一套全局同步。
+  let agentModeWired = false;
+  function wireAgentModeButtons() {
+    if (agentModeWired) return;
+    agentModeWired = true;
+    document.addEventListener("click", (e) => {
+      const modeBtn = e.target.closest(".agent-md-btn[data-agent-mode]");
+      if (modeBtn) {
+        e.stopPropagation();
+        agentMode = modeBtn.dataset.agentMode === "chart" ? "chart" : "pie";
+        document.querySelectorAll(".agent-md-btn[data-agent-mode]")
+          .forEach(b => b.classList.toggle("active", b === modeBtn));
+        renderAgentMode();
+        return;
+      }
+      const rangeBtn = e.target.closest(".agent-md-btn[data-agent-hours]");
+      if (rangeBtn) {
+        e.stopPropagation();
+        agentHourlyHours = rangeBtn.dataset.agentHours === "72" ? 72 : 24;
+        document.querySelectorAll(".agent-md-btn[data-agent-hours]")
+          .forEach(b => b.classList.toggle("active", b === rangeBtn));
+        agentHourlyCache = null;   // 换窗口 → 强制重新拉
+        agentHourlyFetchedAt = 0;
+        renderAgentMode();
+      }
+    });
+  }
+
+  function renderAgentMode() {
+    // stats 页 body 是 #stats-host-agent，总览嵌入卡 body 是 createCardEl
+    // 生成的 #card-stats-agent-body —— 两种都要刷。同时清掉
+    // renderOverviewStatsCard 的 statsRendered 短路标记，否则 TTL 内切
+    // 模式会被「数据没变」挡住不重绘。
+    document.querySelectorAll('[data-card="stats-agent"] .card-body').forEach(body => {
+      delete body.dataset.statsRendered;
+      renderStatsAgent(body);
+    });
+  }
+
+  function _hourLabel(ts) {
+    const d = new Date(ts * 1000);
+    const hh = String(d.getHours()).padStart(2, "0");
+    return d.getDate() + "日" + hh + "时";
+  }
 
   async function renderStatsAgent(host) {
     if (!host) return;
     const now = Date.now();
+    if (agentMode === "chart") {
+      // 竖状图模式：按小时拉 agent×hour 聚合（24h / 3d，用户自选窗口）。
+      if (!agentHourlyCache || now - agentHourlyFetchedAt > AGENT_STATS_TTL) {
+        try {
+          const d = await api.statsAgentHourly(agentHourlyHours);
+          if (d && !d.error) { agentHourlyCache = d; agentHourlyFetchedAt = now; }
+          else if (d && d.error) { statsError(host, d.error); return; }
+        } catch (err) {
+          console.error("[agent] statsAgentHourly failed", err);
+          return;
+        }
+      }
+      if (!agentHourlyCache) { statsEmpty(host, "暂无数据"); return; }
+      renderStatsAgentChart(host, agentHourlyCache);
+      return;
+    }
+    // 饼图模式：30d agent 聚合（原逻辑）。
     if (!agentStatsCache || now - agentStatsFetchedAt > AGENT_STATS_TTL) {
       try {
         const d = await api.statsAggregate("agent", "30d", 0, "relay");
@@ -3194,6 +3423,168 @@
         : [],
     };
     renderPie(data, host);
+  }
+
+  // v0.203：平台流量竖状图 —— 多色叠柱（同「单模型 30 天调用分布」的
+  // renderStatsModelDailyChart 模式）。横轴小时桶，每根柱按 agent 自底
+  // 向上叠色，tooltip 显示该小时每平台 tokens + 合计。agent 显示名经
+  // agentDisplayName 映射，色用后端 MODEL_PALETTE 稳定色。
+  let agLastHoverIdx = 0;
+  let agHoverVisible = false;
+
+  function renderStatsAgentChart(host, data) {
+    if (!host || !data || !data.hours || !data.hours.length ||
+        !data.agents || !data.agents.length) {
+      host.innerHTML = '<div class="card-empty">暂无数据</div>';
+      agHoverVisible = false;
+      return;
+    }
+    const hours = data.hours;
+    const n = hours.length;
+    const series = data.agents.map(a => ({
+      name: agentDisplayName(a.agent),
+      color: a.color,
+      values: (data.series[a.agent] || []).map(s => s.total_tokens),
+    }));
+
+    let svgHost = host.querySelector(".md-svg");
+    if (!svgHost) {
+      host.innerHTML = "";
+      svgHost = document.createElement("div");
+      svgHost.className = "md-svg";
+      svgHost.style.cssText = "position:absolute;inset:0;";
+      host.appendChild(svgHost);
+    } else {
+      svgHost.innerHTML = "";
+    }
+    const size = _statsHostSize(host);
+    const w = Math.max(300, size.w || 640);
+    const h = Math.max(240, size.h || 240);
+
+    const padL = 46, padR = 12, padT = 16, padB = 26;
+    const iw = w - padL - padR;
+    const ih = h - padT - padB;
+    const x = d3.scaleBand().domain(hours.map((_, i) => i)).range([0, iw]).paddingInner(0.14).paddingOuter(0.02);
+    const maxV = d3.max(series, s => d3.max(s.values) || 0) || 1;
+    const y = d3.scaleLinear().domain([0, maxV * 1.06]).range([ih, 0]);
+
+    const svg = d3.select(svgHost).append("svg")
+      .attr("viewBox", `0 0 ${w} ${h}`)
+      .attr("preserveAspectRatio", "xMidYMid meet")
+      .attr("width", "100%").attr("height", "100%");
+    const g = svg.append("g").attr("transform", `translate(${padL},${padT})`);
+
+    // Y 轴刻度（4 档，缩写）。
+    const yTicks = y.ticks(4);
+    g.selectAll("line.ygrid").data(yTicks).enter().append("line")
+      .attr("x1", 0).attr("x2", iw).attr("y1", d => y(d)).attr("y2", d => y(d))
+      .attr("class", "md-grid");
+    g.selectAll("text.ytick").data(yTicks).enter().append("text")
+      .attr("x", -6).attr("y", d => y(d)).attr("dy", "0.32em")
+      .attr("text-anchor", "end").style("font-size", "10px")
+      .text(d => fmtTokens(d));
+
+    // X 轴：首/中/尾三个小时标签（「7日14时」短式）。
+    const labelIdx = [0, Math.floor((n - 1) / 2), n - 1];
+    labelIdx.forEach(i => {
+      g.append("text").attr("x", x(i) + x.bandwidth() / 2).attr("y", ih + 16)
+        .attr("text-anchor", "middle").style("font-size", "10px")
+        .text(_hourLabel(hours[i]));
+    });
+
+    // 多 agent 叠柱：每根柱拆 N 段，自底向上累加。
+    series.forEach((s, si) => {
+      hours.forEach((_, di) => {
+        const v = s.values[di] || 0;
+        if (v <= 0) return;
+        let acc = 0;
+        for (let k = 0; k < si; k++) acc += series[k].values[di] || 0;
+        const y0 = y(acc), y1 = y(acc + v);
+        g.append("rect")
+          .attr("x", x(di)).attr("width", x.bandwidth())
+          .attr("y", y1).attr("height", Math.max(0, y0 - y1))
+          .attr("fill", s.color).attr("fill-opacity", 0.85);
+      });
+    });
+
+    // 浮动 tooltip —— 复用 model-daily 的 .md-tip 样式（深色半透明底）。
+    let tip = host.querySelector(".md-tip");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "md-tip";
+      tip.style.display = "none";
+      host.appendChild(tip);
+    }
+    const showTip = (i, evt) => {
+      agLastHoverIdx = i;
+      agHoverVisible = true;
+      const rows = series
+        .map(s => ({ name: s.name, color: s.color, v: s.values[i] || 0 }))
+        .filter(r => r.v > 0);
+      const total = rows.reduce((a, r) => a + r.v, 0);
+      const lines = [`<div class="md-tip-date">${_hourLabel(hours[i])}</div>`];
+      if (rows.length > 1) {
+        rows.forEach(r => {
+          lines.push(
+            `<div class="md-tip-row"><span class="md-tip-dot" style="background:${r.color}"></span>` +
+            `<span class="md-tip-name">${escape(r.name)}</span>` +
+            `<span class="md-tip-val">${_modelDailyFmt(r.v)}</span></div>`
+          );
+        });
+        lines.push(`<div class="md-tip-total">${t("合计")} ${_modelDailyFmt(total)}</div>`);
+      } else if (rows.length === 1) {
+        lines.push(
+          `<div class="md-tip-row"><span class="md-tip-dot" style="background:${rows[0].color}"></span>` +
+          `<span class="md-tip-name">${escape(rows[0].name)}</span>` +
+          `<span class="md-tip-val">${_modelDailyFmt(rows[0].v)}</span></div>`
+        );
+      } else {
+        lines.push(`<div class="md-tip-empty">${t("无数据")}</div>`);
+      }
+      tip.innerHTML = lines.join("");
+      tip.style.display = "block";
+      const hostRect = host.getBoundingClientRect();
+      const svgRect = svg.node().getBoundingClientRect();
+      const tipRect = tip.getBoundingClientRect();
+      const scale = svgRect.width / w;
+      const offX = svgRect.left - hostRect.left;
+      const offY = svgRect.top - hostRect.top;
+      const barCenter = x(i) + x.bandwidth() / 2;
+      const cx = offX + (padL + barCenter) * scale;
+      const cy = offY + padT * scale + 4;
+      let left = cx + 10;
+      if (left + tipRect.width + 8 > hostRect.width) left = cx - tipRect.width - 10;
+      left = Math.max(4, Math.min(left, hostRect.width - tipRect.width - 4));
+      let top = cy;
+      if (top + tipRect.height + 4 > hostRect.height) top = hostRect.height - tipRect.height - 4;
+      tip.style.left = left + "px";
+      tip.style.top = top + "px";
+    };
+    const hideTip = () => {
+      agHoverVisible = false;
+      tip.style.display = "none";
+    };
+
+    // 透明 hit-rect 覆盖整张图，捕获鼠标任意位置。
+    g.append("rect")
+      .attr("class", "md-hit")
+      .attr("x", 0).attr("y", 0).attr("width", iw).attr("height", ih)
+      .attr("fill", "transparent")
+      .on("mousemove mouseenter", function (evt) {
+        const [mx] = d3.pointer(evt, this);
+        const bw = x.bandwidth();
+        let best = 0, bestDist = Infinity;
+        for (let k = 0; k < n; k++) {
+          const center = x(k) + bw / 2;
+          const d = Math.abs(center - mx);
+          if (d < bestDist) { bestDist = d; best = k; }
+        }
+        showTip(best, evt);
+      })
+      .on("mouseleave", hideTip);
+
+    // 重渲染恢复：鼠标若仍在图区，立即按上次 idx 重画 tip。
+    if (agHoverVisible) showTip(agLastHoverIdx, null);
   }
 
   let statsWired = false;
@@ -3660,9 +4051,13 @@
       return;
     }
     if (kind === "agent") {
-      // agent 数据自带 30s TTL；仅在数据刷新时重绘。
-      const agFresh = agentStatsCache && (now - agentStatsFetchedAt < AGENT_STATS_TTL);
-      if (agFresh && body.dataset.statsRendered === String(agentStatsFetchedAt)) return;
+      // agent 数据自带 30s TTL；仅在数据刷新时重绘。v0.203：短路 key 必须
+      // 区分模式 —— 竖状图用 hourly 缓存时间戳，饼图用聚合缓存时间戳，
+      // 否则切模式会被「数据没变」挡住不重绘。
+      const agTs = agentMode === "chart" ? agentHourlyFetchedAt : agentStatsFetchedAt;
+      const agCache = agentMode === "chart" ? agentHourlyCache : agentStatsCache;
+      const agFresh = agCache && (now - agTs < AGENT_STATS_TTL);
+      if (agFresh && body.dataset.statsRendered === String(agTs)) return;
       if (!overviewStatsInflight["agent"]) {
         overviewStatsInflight["agent"] = (async () => {
           await renderStatsAgent(body);
@@ -3670,7 +4065,7 @@
       }
       await overviewStatsInflight["agent"].catch(() => {});
       overviewStatsInflight["agent"] = null;
-      body.dataset.statsRendered = String(agentStatsFetchedAt);
+      body.dataset.statsRendered = String(agentMode === "chart" ? agentHourlyFetchedAt : agentStatsFetchedAt);
       return;
     }
     if (kind === "model-daily") {
@@ -4376,9 +4771,13 @@
   // 情况。数据同步从 lastSnap.by_upstream_model 里取（gui.py 已经把它
   // 塞进 snapshot），不需要 bridge round-trip，所以不像 openRequestDetail
   // 那样是 async。
+  //
+  // v0.204：表格下方追加「分布调用竖状图」—— 按模型 × 日叠柱（同统计页
+  // 「单模型 30 天调用分布」）。该部分数据不走 snapshot，单独 bridge 拉
+  // stats_upstream_model_daily，所以 openUpstreamModels 升级成 async。
   // -------------------------------------------------------------------
 
-  function openUpstreamModels(name) {
+  async function openUpstreamModels(name) {
     const overlay = $("upstream-models-overlay");
     const title = $("upstream-models-title");
     const body = $("upstream-models-body");
@@ -4404,8 +4803,17 @@
     } else {
       body.innerHTML = renderPlainUpstreamHTML(name, snap);
     }
+    // v0.204：竖状图容器（表格下方）。异步拉数据后渲染。
+    const chartWrap = document.createElement("div");
+    chartWrap.className = "upstream-models-chart";
+    chartWrap.innerHTML =
+      `<div class="upstream-models-chart-head">${t("分布调用竖状图")}</div>` +
+      `<div class="upstream-models-chart-host stats-chart-host">` +
+      `<div class="card-empty">${t("加载中…")}</div></div>`;
+    body.appendChild(chartWrap);
     overlay.hidden = false;
     document.body.classList.add("modal-open");
+    await renderUpstreamModelDailyChart(name, chartWrap.querySelector(".upstream-models-chart-host"));
   }
 
   // 虚拟 cfg 的 modal 内容：顶部「属于上游」+ 聚合统计 + 按成员分块模型表。
@@ -4528,6 +4936,36 @@
     document.addEventListener("keydown", (ev) => {
       if (ev.key === "Escape" && !overlay.hidden) closeUpstreamModelsModal();
     });
+  }
+
+  // v0.204：上游弹窗「分布调用竖状图」—— 按模型 × 日叠柱，视觉与统计页
+  // renderStatsModelDailyChart 一致（同样的 SVG / Y 轴 / tooltip / hit-rect
+  // 模式），只是数据源换成 stats_upstream_model_daily（单上游过滤）。
+  async function renderUpstreamModelDailyChart(name, host) {
+    if (!host) return;
+    let data;
+    try {
+      data = await api.statsUpstreamModelDaily(name, 30);
+    } catch (err) {
+      console.error("[upstream] statsUpstreamModelDaily failed", err);
+      host.innerHTML = '<div class="card-empty">' + t("暂无数据") + "</div>";
+      return;
+    }
+    if (!data || data.error) {
+      host.innerHTML = '<div class="card-empty">' + t("暂无数据") + "</div>";
+      return;
+    }
+    if (!data.models || !data.models.length || !data.days || !data.days.length) {
+      host.innerHTML = '<div class="card-empty">' + t("暂无数据") + "</div>";
+      return;
+    }
+    const days = data.days.map(d => d.date);
+    const series = data.models.map(m => ({
+      name: m.model,
+      color: m.color,
+      values: (data.series[m.model] || []).map(s => s.total_tokens),
+    }));
+    renderStatsModelDailyChart(host, days, series, data.items || []);
   }
 
   // -------------------------------------------------------------------
@@ -5015,6 +5453,22 @@
       </span>`;
   }
 
+  // v0.200：新建上游「允许的模型」逐行渲染 —— 每行一个模型名 + 勾选框
+  // 「支持图片输入」+ 删除按钮。data-model 存裸模型名；checkbox 勾选态
+  // 在提交时收集成 vision_models 写进上游条目。
+  function allowedModelRow(model, vision) {
+    const checked = vision ? " checked" : "";
+    return `
+      <div class="cfg-model-row" data-model="${attr(model)}">
+        <span class="cfg-model-name" title="${escape(model)}">${escape(model)}</span>
+        <label class="cfg-model-vision">
+          <input type="checkbox" class="cfg-model-vision-cb"${checked} />
+          <span>支持图片输入</span>
+        </label>
+        <button class="cfg-row-remove" type="button" title="移除">×</button>
+      </div>`;
+  }
+
   // v0.119：链接上游（合并统计）chip。data-peer 存被链接的上游名，
   // 提交时按同名 .cfg-linked-chip 收集成 list[str] 写到
   // api.updateUpstreamQuota payload.linked_upstreams。
@@ -5035,7 +5489,7 @@
     const peers = [];
     const plat = platform || "";
     // v0.120：跨平台搜索 —— 允许链接不同平台但同名的上游
-    // （如 anthropic/minimax ↔ openai/minimax）。
+    // （如 anthropic/e1701fa6 ↔ openai/e1701fa6）。
     // v0.119 原版仅搜同平台，导致跨平台同名 cfg 无法链接。
     const allPlats = snap.upstreams || {};
     for (const [p, ups] of Object.entries(allPlats)) {
@@ -6066,6 +6520,7 @@
       // v0.113r：弹窗 / 配置表单
       "请求详情": "Request detail",
       "按模型拆分详情": "Breakdown by model",
+      "分布调用竖状图": "Daily call chart",
       "快捷切换编辑器": "Quick switch editor",
       "新建上游": "New upstream",
       "预设配置": "Preset",
@@ -6500,6 +6955,7 @@
       "无鉴权": "無驗證",
       "请求详情": "請求詳情",
       "按模型拆分详情": "按模型拆分詳情",
+      "分布调用竖状图": "分佈調用豎狀圖",
       "快捷切换编辑器": "快速切換編輯器",
       "新建上游": "新建上游",
       "预设配置": "預設設定",
@@ -6926,6 +7382,7 @@
       "无鉴权": "認証なし",
       "请求详情": "リクエスト詳細",
       "按模型拆分详情": "Breakdown by model",
+      "分布调用竖状图": "Daily call chart",
       "快捷切换编辑器": "Quick switch editor",
       "新建上游": "上流を新規作成",
       "预设配置": "プリセット",
@@ -7352,6 +7809,7 @@
       "无鉴权": "인증 없음",
       "请求详情": "요청 상세",
       "按模型拆分详情": "Breakdown by model",
+      "分布调用竖状图": "Daily call chart",
       "快捷切换编辑器": "Quick switch editor",
       "新建上游": "업스트림 새로 만들기",
       "预设配置": "프리셋",
@@ -8515,6 +8973,21 @@
               <button type="button" class="btn btn-ghost" id="prefs-vision-save" data-i18n="保存">保存</button>
             </div>
           </div>
+
+          <!-- 更新日志：开发者模式子项 —— 开启开发者模式后在设置页最底部直接
+               展示 docs/CHANGELOG.txt 全文；关闭则整块隐藏。内容由后端桥
+               api.getChangelog() 异步填充（renderSettingsChangelog），可直接
+               编辑，经 api.saveChangelog() 写回 docs/CHANGELOG.txt。 -->
+          <div class="settings-item settings-item-nested" id="prefs-changelog-row" ${prefs.developerMode ? "" : "hidden"}>
+            <div class="settings-item-info">
+              <div class="settings-item-title" data-i18n="更新日志">更新日志</div>
+              <div class="settings-item-hint" data-i18n="中继版本更新记录（可直接编辑，保存后写回 docs/CHANGELOG.txt）">中继版本更新记录（可直接编辑，保存后写回 docs/CHANGELOG.txt）</div>
+            </div>
+            <textarea class="settings-changelog" id="prefs-changelog-box" spellcheck="false"></textarea>
+            <div class="settings-item-control settings-storage-actions">
+              <button type="button" class="btn btn-ghost" id="prefs-changelog-save" data-i18n="保存">保存</button>
+            </div>
+          </div>
         </div>
 
       </div>
@@ -8522,6 +8995,8 @@
     // v0.190：开发者模式子项 —— 在 prefs body 整体渲染完成后异步填充
     // vision chip 列表。容器已在开发者模式组里（HTML 模板），此处不重写。
     renderSettingsVision(body, snap);
+    // 更新日志：异步拉取 docs/CHANGELOG.txt 全文填入 #prefs-changelog-box。
+    renderSettingsChangelog(body);
     wireSettingsPrefs(body, snap);
     // v0.113u：syncLivePanelMgmtGroup 紧跟 wireSettingsPrefs —— 让「外
     // 观」组实时栏开关初始状态与 snapshot 同步，避免「实时栏管理」组首
@@ -8639,6 +9114,9 @@
         // 只随开发者模式显隐。
         const visionRow = body.querySelector("#prefs-vision-row");
         if (visionRow) rows.push(visionRow);
+        // 更新日志子项 —— 只随开发者模式显隐。
+        const changelogRow = body.querySelector("#prefs-changelog-row");
+        if (changelogRow) rows.push(changelogRow);
         for (const r of rows) if (r) r.hidden = !devMode.checked;
         // autoswitch pool：开发者模式关 → 强 hidden；开着且 autoswitch 关 → hidden；
         // 开着且 autoswitch 开 → visible。
@@ -9789,15 +10267,53 @@
       });
       box._visionClickBound = true;
     }
-    // 保存按钮 —— 同样按 prefs body 维度找；该按钮每次重写都是新节点，
-    // 但 prefs body 是稳定的，按 body 维度的 _visionSaveBound 标记复用监听器，
-    // 避免重复绑定导致多次保存。
-    const saveBtn = prefsBody.querySelector("#prefs-vision-save");
-    if (saveBtn && !prefsBody._visionSaveBound) {
-      saveBtn.addEventListener("click", onSaveVisionModels);
-      prefsBody._visionSaveBound = true;
+    // 保存按钮 —— 事件委托挂稳定的 prefs body 容器（不直接绑按钮）。
+    // 旧实现直接给按钮绑定 + 容器键 _visionSaveBound：离开设置页回来
+    // innerHTML 重写换掉按钮节点、容器键不随 innerHTML 重置 → 新按钮
+    // 永不绑定 → 死钮（与更新日志保存同款 bug）。委托后按钮换不换都能命中。
+    if (!prefsBody._visionDelegated) {
+      prefsBody.addEventListener("click", (e) => {
+        if (e.target.closest("#prefs-vision-save")) onSaveVisionModels();
+      });
+      prefsBody._visionDelegated = true;
     }
     applyLang();
+  }
+
+  async function renderSettingsChangelog(prefsBody) {
+    if (!prefsBody) return;
+    const ta = prefsBody.querySelector("#prefs-changelog-box");
+    if (!ta) return;  // 开发者模式关 / 视图未渲染到该容器 —— 静默 return
+    // 保存按钮 —— 事件委托挂到稳定的 prefs body 容器上（不直接绑按钮）。
+    // 旧实现：直接给按钮 addEventListener + 容器键 _changelogSaveBound。
+    // 离开设置页再回来（renderSettingsPrefs 重写 innerHTML）会换掉按钮
+    // 节点，但容器键还在 → 新按钮永不绑定 →「点了没反应」。委托到容器
+    // 后按钮换不换都能命中；且放在 getChangelog 之前 —— 读取失败提前
+    // return 也不会丢绑定（旧代码失败分支在绑定前 return，按钮同样成死钮）。
+    if (!prefsBody._changelogDelegated) {
+      prefsBody.addEventListener("click", (e) => {
+        if (!e.target.closest("#prefs-changelog-save")) return;
+        const box = prefsBody.querySelector("#prefs-changelog-box");
+        if (!box) return;
+        api.saveChangelog(box.value).then(async (res) => {
+          if (res && res.ok) {
+            await alertModal("已保存", "更新日志已写回 docs/CHANGELOG.txt。");
+          } else {
+            await alertModal("保存失败", (res && res.error) || "bridge 不可达");
+          }
+        });
+      });
+      prefsBody._changelogDelegated = true;
+    }
+    const data = await api.getChangelog();
+    if (!data || data.ok !== true) {
+      ta.value = (data && data.error) || "（无法读取更新日志）";
+      return;
+    }
+    // 直接赋 textarea.value —— CHANGELOG 里任何 < > & 都按纯文本处理。
+    ta.value = data.text;
+    // 更新日志通常在页面最底部，默认滚到最顶（最新版本在最前）。
+    ta.scrollTop = 0;
   }
 
   async function onSaveVisionModels() {
@@ -10234,20 +10750,25 @@
           const chipBox = $("create-chips");
           if (chipBox) {
             chipBox.querySelectorAll(".cfg-chip").forEach(ch => ch.remove());
+            chipBox.querySelectorAll(".cfg-model-row").forEach(r => r.remove());
           }
           if (modelSel) modelSel.focus();
           return;
         }
         if (pmf) pmf.style.display = "none";
         // v0.95：预设可自带允许模型列表（如 deepseek 官方两个模型），
-        // 选中后自动填成 chips。清掉上次预设遗留的 chips，输入框保持末尾。
+        // 选中后自动填成逐行模型列表。清掉上次预设遗留的行，输入框保持末尾。
+        // v0.200：预设可带 visionModels（支持图片输入的模型名），这些模型
+        // 行默认勾选「支持图片输入」。
         if (p.models && p.models.length) {
           const chipBox = $("create-chips");
           if (chipBox) {
             chipBox.querySelectorAll(".cfg-chip").forEach(ch => ch.remove());
-            const input = chipBox.querySelector("#create-chip-input");
+            chipBox.querySelectorAll(".cfg-model-row").forEach(r => r.remove());
+            const ml = chipBox.querySelector("#create-model-list");
+            const visionSet = new Set(p.visionModels || []);
             for (const m of p.models) {
-              input?.insertAdjacentHTML("beforebegin", allowedChip(m));
+              ml?.insertAdjacentHTML("beforeend", allowedModelRow(m, visionSet.has(m)));
             }
           }
         }
@@ -10271,8 +10792,10 @@
           const chipBox = $("create-chips");
           if (chipBox) {
             chipBox.querySelectorAll(".cfg-chip").forEach(ch => ch.remove());
-            const input = chipBox.querySelector("#create-chip-input");
-            input?.insertAdjacentHTML("beforebegin", allowedChip(m));
+            chipBox.querySelectorAll(".cfg-model-row").forEach(r => r.remove());
+            const ml = chipBox.querySelector("#create-model-list");
+            const visionSet = new Set(p.visionModels || []);
+            ml?.insertAdjacentHTML("beforeend", allowedModelRow(m, visionSet.has(m)));
           }
           const noteEl = $("create-note");
           const presetNotes = Object.values(UPSTREAM_PRESETS).map(x => x.note);
@@ -10305,6 +10828,11 @@
       if (adapter) adapter.checked = false;
       $("create-multipliers").innerHTML = multiplierRow("", "");
       $("create-chips").innerHTML = "";
+      // v0.200：逐行模型列表容器（open 重置时 innerHTML 清空了它，重建）。
+      const modelList = document.createElement("div");
+      modelList.id = "create-model-list";
+      modelList.className = "cfg-model-list";
+      $("create-chips").appendChild(modelList);
       // Re-attach the chip input (we just wiped its container above).
       const chipInput = document.createElement("input");
       chipInput.className = "cfg-chip-input";
@@ -10366,7 +10894,10 @@
         }
         // v0.95+（P2）：探测请求用表单里的真实模型名，避免占位名被
         // 严格校验模型名的上游 400 拒（与"连通性测试"取法一致）。
-        const model = (overlay.querySelector("#create-chips .cfg-chip")?.getAttribute("data-model") || "").trim();
+        // v0.208：取逐行模型列表的第一个真实模型 —— 用户添加的模型在
+        // .cfg-model-row 里，旧 .cfg-chip 是另一套（chip/历史遗留），
+        // 会拿到占位名导致 strict 上游 404 误判。
+        const model = _firstCreateModel() || "";
         const panel = $("create-test-log");
         const body = $("create-test-log-body");
         if (panel) panel.hidden = false;
@@ -10398,8 +10929,9 @@
         }
         const wire = ($("create-wire").value || "").trim();
         const auth = ($("create-auth-style").value || "").trim();
-        // 模型：取"允许的模型"第一个 chip，没有就用空串（后端用占位）。
-        const model = (overlay.querySelector("#create-chips .cfg-chip")?.getAttribute("data-model") || "").trim();
+        // 模型：v0.208 改取逐行模型列表第一个真实模型（用户添加的模型
+        // 在 .cfg-model-row 里；旧 .cfg-chip 是另一套，会拿到占位名）。
+        const model = _firstCreateModel() || "";
         const panel = $("create-test-log");
         const body = $("create-test-log-body");
         if (panel) panel.hidden = false;
@@ -10449,6 +10981,19 @@
       if (e.key === "Escape" && !overlay.hidden) close();
     });
 
+    // v0.208：新建上游表单里取第一个真实模型名（用于测试/连通性测试）。
+    // 用户添加的模型在逐行列表 #create-chips .cfg-model-row（data-model）里，
+    // 与旧 .cfg-chip[data-model]（chip 语义）不是一套 —— 取后者会拿到
+    // 占位名，strict 模型名校验的上游直接 404，误导用户以为配置有问题。
+    function _firstCreateModel() {
+      const rows = document.querySelectorAll("#create-chips .cfg-model-row");
+      for (const el of rows) {
+        const m = (el.getAttribute("data-model") || "").trim();
+        if (m) return m;
+      }
+      return "";
+    }
+
     /** Hook up the chips + multipliers add/remove for the freshly
      *  opened form. We rebuild these inside open() because the inputs
      *  get wiped every time the form resets. */
@@ -10476,24 +11021,29 @@
       const chipBox = $("create-chips");
       const chipInput = $("create-chip-input");
       if (chipBox && chipInput) {
+        // v0.200：回车添加模型 → 逐行渲染到 #create-model-list（不再是
+        // 横排 chip）。每行一个模型名 + 「支持图片输入」勾选框 + 删除钮。
+        const modelList = () => chipBox.querySelector("#create-model-list");
+        const existingModels = () => Array.from(
+          chipBox.querySelectorAll(".cfg-model-row"),
+        ).map(el => el.getAttribute("data-model"));
         chipInput.onkeydown = (e) => {
           if (e.key !== "Enter") return;
           e.preventDefault();
           const value = chipInput.value.trim();
           if (!value) return;
-          const existing = Array.from(chipBox.querySelectorAll(".cfg-chip"))
-            .map(el => el.getAttribute("data-model"));
-          if (!existing.includes(value)) {
-            chipInput.insertAdjacentHTML("beforebegin", allowedChip(value));
+          const ml = modelList();
+          if (ml && !existingModels().includes(value)) {
+            ml.insertAdjacentHTML("beforeend", allowedModelRow(value, false));
           }
           chipInput.value = "";
           setStatus("");
         };
         chipBox.onclick = (e) => {
-          const btn = e.target.closest(".cfg-chip-remove");
+          const btn = e.target.closest(".cfg-row-remove");
           if (!btn) return;
-          const chip = btn.closest(".cfg-chip");
-          if (chip) chip.remove();
+          const row = btn.closest(".cfg-model-row");
+          if (row) row.remove();
           setStatus("");
         };
       }
@@ -10544,7 +11094,15 @@
         return;
       }
 
-      const allowed = Array.from(overlay.querySelectorAll("#create-chips .cfg-chip"))
+      // v0.200：模型行逐行收集 —— allowed = 所有行；vision = 勾选了
+      // 「支持图片输入」的行。空 allowed = 不限制（与旧 chip 语义一致）。
+      const modelRows = Array.from(overlay.querySelectorAll("#create-chips .cfg-model-row"))
+        .filter(Boolean);
+      const allowed = modelRows
+        .map(el => el.getAttribute("data-model"))
+        .filter(Boolean);
+      const vision = modelRows
+        .filter(el => el.querySelector(".cfg-model-vision-cb")?.checked)
         .map(el => el.getAttribute("data-model"))
         .filter(Boolean);
 
@@ -10564,6 +11122,9 @@
         url,
         api_key: api_val,
         allowed_models: allowed,
+        // v0.200：每上游「支持图片输入」模型名（裸模型名）。空数组不传
+        // （= 未声明，加载时默认 []，走全局名单兜底）。
+        ...(vision.length ? { vision_models: vision } : {}),
         model_multipliers: multipliers,
         quota_5h,
         quota_week,
@@ -10835,16 +11396,16 @@
 
   // v0.65: 直接调 apply_upstream,不再弹 modal。下拉里所有 (api, model) 组合
   // 都已经展平成单项 option,用户选哪个就把哪个设为 active + model。
-  // v0.67：切换后强制重启中继 —— apply_upstream 本身是热切换（不重启
-  // 也能生效），但用户明确要求切完必须重启，避免"切了但没跳变/没
-  // 真正生效"的观感和残留的旧连接。只在切换成功时触发，失败（ok:false）
-  // 不重启，避免把一个好端端在跑的中继因为一次失败的切换请求也炸掉。
+  // v0.19x：切换 = GUI 落盘 + 无条件全量重启，**全部在 apply_upstream 桥内
+  // 完成**（不再 POST 热切换给运行中的后端 —— 后端忙/在流式时那趟会超时，
+  // 旧版据此把重启跳掉 = 「切了但没重启」）。这里只负责：先显示"重启中…"
+  // 过渡态，调用桥，成功后跑 refreshAfterRestart 拉新状态全量重渲。
   function applyUpstreamDirect(plat, name, model) {
+    setText("status-label", "重启中…");
+    setText("status-meta", "正在杀掉 8088 并重启…");
+    setText("sidebar-status-text", "重启中…");
+    setText("sidebar-status-meta", "正在重启…");
     return api.applyUpstream(plat, name, model).then(res => {
-      // v0.93：放宽"成功"判定 —— relay 端 router 返回的 body 没有 "ok" 字段
-      // （{"platform": ..., "selected": _public(cfg)}），原版用 res.ok === false
-      // 判定失败，但当 res.ok === undefined 时 undefined === false 是 false，
-      // 走不到 alert 路径。改为：res 存在且 res.error 缺失 → 视为成功。
       if (!res) {
         console.warn("apply_upstream returned null/undefined");
         return null;
@@ -10855,9 +11416,8 @@
         api.refresh();
         return null;
       }
-      // 成功路径 —— restartRelay 会改 status-label/sidebar-status-text
-      // 显示"重启中…"，这里不要再覆盖。
-      return restartRelay().then(() => res);
+      // 成功路径 —— 桥已把后端全量重启，这里拉新 snapshot/status 重渲。
+      return refreshAfterRestart().then(() => res);
     });
   }
 
@@ -11365,10 +11925,14 @@
     function wireButtons() {
     const btnToggle = $("btn-toggle");
     if (btnToggle) btnToggle.addEventListener("click", async () => {
-      // Guard here too, not just via `disabled` — a stale lastStatus or
-      // a programmatic click must not reach stop() on an external relay.
-      if (lastStatus && lastStatus.owner === "external") return;
-      const res = (lastStatus && lastStatus.running)
+      // v0.114：外部分支不再早退。端口被别的进程占着（owner==="external"）
+      // 时点启/停，走 start() 走「启动即接管(全清)」—— 后端先 netstat 找
+      // 占端口的 PID → taskkill /F /T → spawn 我们自己的子进程，把配置正
+      // 对的中继接管过来。旧代码在这里直接 return，把 GUI 连到配置不符的
+      // 外部中继上（stale .env / upstreams.json），切上游就 404 —— 就是
+      // e1701fa6 那次。只有 owner==="self" 且 running 时才走 stop()。
+      const isOwn = lastStatus && lastStatus.owner === "self";
+      const res = (lastStatus && lastStatus.running && isOwn)
         ? await api.stop()
         : await api.start();
       if (res && res.error) alert(res.error);
@@ -12318,6 +12882,45 @@
     return null;
   }
 
+  // Electron 主窗标题栏拖动（替代 pywebview easy_drag）。
+  // pywebview 在 gui.py 开了 easy_drag=True，window 上任意非交互 mousedown
+  // 都会拖整个窗口。Electron 主进程没有 easy_drag，改由 main_preload.js
+  // 暴露的 window.panelDrag.start()/end() 触发 main_main.js 的 12ms 光标
+  // 轮询拖窗。这里复刻同一语义：mousedown 目标不是交互元素、不在
+  // .glass-card 里（卡片有自己的 HTML5 拖拽 / 自由拖动 / 尺寸拖拽，且
+  // cardResizePointerDown / cardFreeDragPointerDown 已在 capture 相位
+  // stopImmediatePropagation 拦截）、不在窗口边缘（wireEdgeResize 同样在
+  // capture 相位拦截），就交给 Electron 拖窗。仅 window.panelDrag 存在时
+  // 接线 —— pywebview 路径下 easy_drag 已负责，避免双份。
+  function wireTitlebarDrag() {
+    if (window.__titlebarDragWired) return;
+    window.__titlebarDragWired = true;
+    if (!window.panelDrag || typeof window.panelDrag.start !== "function") return;
+    const INTERACTIVE = "button, input, select, textarea, a, [contenteditable]";
+    let dragging = false;
+
+    document.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest(INTERACTIVE)) return;      // 控件点击：不拖窗
+      if (e.target.closest(".glass-card")) return;    // 卡片区：归卡片拖拽
+      dragging = true;
+      try { window.panelDrag.start(); } catch (_) {}
+    }, false);
+
+    window.addEventListener("mouseup", () => {
+      if (!dragging) return;
+      dragging = false;
+      try { window.panelDrag.end(); } catch (_) {}
+    });
+
+    // 失焦兜底：alt-tab 切走时 mouseup 可能不送达，状态会卡住。
+    window.addEventListener("blur", () => {
+      if (!dragging) return;
+      dragging = false;
+      try { window.panelDrag.end(); } catch (_) {}
+    });
+  }
+
   function wireEdgeResize() {
     if (window.__edgeResizeWired) return;
     window.__edgeResizeWired = true;
@@ -12414,6 +13017,11 @@
     }
     loadAgentAliases();
     loadUaRules();
+    // v0.201：读取平台流量卡的隐藏平台集（localStorage，同步）。
+    loadAgentHidden();
+    // v0.203：平台流量卡「饼图 / 竖状图」二分切换 —— 文档级委托，两个
+    // 视图（stats 页 / 总览嵌入卡）共用一套按钮。
+    wireAgentModeButtons();
     scheduleNext();
     // Kick off an immediate fetch so the first paint isn't blank.
     tick();
@@ -12522,7 +13130,8 @@
     wireButtons();
     initMagnetic();
     initPageZoom();
-    wireSpotlightToggle();
+    // v0.205：wireSpotlightToggle 已删除 —— 「总计 / 最大模型」切换随
+    // 模型名一起移除，spotlight 固定全模型合计。
     // v0.41：wireAuraCanvas 已删除 —— 背景动效整段下线。
     // v0.36 — request-detail modal: close handlers (X / overlay / Esc)
     // and the overview-card click delegation that opens the modal from
@@ -12550,6 +13159,7 @@
     // 立即生效；动态渲染的区块各自在 render 后调 applyLang()。
     applyLang();
     wireEdgeResize();
+    wireTitlebarDrag();
     if (typeof window !== "undefined" && window.addEventListener) {
       window.addEventListener("pywebviewready", () => {
         startPolling();
