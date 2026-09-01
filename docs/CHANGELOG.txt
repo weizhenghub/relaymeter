@@ -1,0 +1,1878 @@
+V0.198  08-30
+1、使用electron重写了主窗口
+2、修复了新建上游后不重启导致upstreaming卡死切换的问题
+3、修复了codex连接中继后缺少字段导致的问题
+4、修复悬浮球转换为S2时异常放大的问题
+5、修复了向非多模态模型发送图片时发生错误的问题
+6、新增允许在上游勾选模型是否多模态
+7、修复了开关“侧边栏”设置不重载悬浮球的问题
+8、修复了“新建上游”时连通性测试的拼接和实模型调用错误导致始终连通性测试始终失败的问题
+9、优化了一些样式
+
+————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+down by claude
+———————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————— 
+v0.197  2026-08-28
+调整：
+- **新建上游后不重启 GUI 无法切换，一切就弹 "HTTP404 no upstream named"**（用户反馈）。新建/删除上游走 GUI 桥（config.add_upstream/remove_upstream）写 upstreams.json，但中继 uvicorn 子进程的 app.state.settings 是启动时的快照，不知道磁盘新加的条目；GUI 桥 create_upstream 里的补救是 POST /api/upstreams/refresh，但那趟请求可能因子进程正在重启 / base_url 不一致 / 2s 超时而静默失败（except: pass 吞掉）。于是"新建后立刻切换"→ select_active 的 set_active 找不到 → KeyError → 404 → 弹窗。重启 GUI 会重生子进程重新读盘，所以重启后能切。根因 = **中继内存 vs 上游文件不同步**。
+
+实现：
+- `routers/api.py` `select_active`：在 `_ensure_known` 后、`set_active` 前，加一段 `apply_to_settings(settings, settings.relay_upstreams_file)` 兜底 overlay，**每次切换动作前从磁盘拉一份最新上游列表**，消灭"中继不知道新上游"。
+- 用当前 `request.app.state.settings`（就地 overlay）而非 `reload_settings()`（重建对象），保留 passthrough_mode 等运行时状态；overlay 失败 `log.warning` 软降级，不回退成硬拒。
+
+无 UI/前端改动：只动 select 端点，切换入口集中兜底，新建/删除后无需 restart、不依赖那趟 refresh 是否送达。
+
+--------------------------------------------------------------------------------
+
+v0.196  2026-08-27
+
+调整：
+- **悬浮球展开成完整侧栏时，左侧那条由深到浅的渐变透明条去掉**（用户反馈）。悬浮球合并容器（ghost_panel.html）展开成完整侧栏后，球帽与面板交界处（面板左缘）会残留一条"左深右浅、往右渐隐"的半透明渐变条，用户看着穿帮。改成完全透明。
+
+实现：
+- `ghost_panel.html` 内联 `<style>`：新增 `#ghost-panel-surface .bg-glow { display: none; }`。根因是面板 surface（`#ghost-panel-surface`）内嵌两块光晕 `.bg-glow-1`（左上）/`.bg-glow-2`（右下），它们都是 `border-radius: 50%` + `filter: blur(80~100px)` 的大圆；展开成整高侧栏时 `.bg-glow-1` 圆心在 `(90,90)`、半径 350px+、强模糊，正好从面板左缘画出那条渐变条。
+- 只隐藏本合并窗里的光晕：选择器限定在 `#ghost-panel-surface` 内，**不动**主窗 `.bg-glow`（主窗仍保留光晕质感），也**不动**普通 `live_panel.html` 侧栏。
+- 侧栏本体底色不变，仍为 `--root-bg` 纯色 —— 用户要的"完全透明"指剥掉渐变条，不是连实底也透（实底若透会穿帮看到桌面）。
+
+无行为变更：纯 UI 装饰，剥离的是视觉背景光晕，内容/事件/交互零变化。
+
+--------------------------------------------------------------------------------
+
+v0.195  2026-08-27
+
+调整：
+- **悬浮球启动默认位置改为主窗**右上角**内部**（用户反馈）。之前 `_default_ball_pos` 返回 `(mx + mw + 8, my + 8)` —— 在主窗右缘**外侧**贴着，像独立悬浮图标。改成 `(mx + mw - 球宽 - 8, my + 8)` —— 球锚点落在主窗内的右上角，与主窗视觉融为一体。8px 偏移留边框呼吸感，与原外侧 8px 同款。
+
+实现：
+- `panel_pool.py` `_default_ball_pos`：把 `return (mx + mw + 8, my + 8)` 改为 `return (mx + mw - self._ball_size - 8, my + 8)`。函数注释更新（外侧 → 内侧、v0.195）。
+- **不影响已拖过的用户**：`__init__` 优先读 settings 里的 `relay_gui_float_ball_x/y`（>-1000 即视为有效），命中就直接用持久化值；只有从未持久化过（首次启用 / 删过该字段）才走 `_default_ball_pos`。也就是说这条改动只影响"新装 / 第一次启用悬浮球"或"清掉持久化坐标"的用户。
+- 持久化路径（`_persist_ball_pos`）不动：用户拖到哪儿、记哪儿、再启动用哪儿。
+- 兜底 `(300, 200)` 不动（主窗几何未知时）。
+
+--------------------------------------------------------------------------------
+
+v0.194  2026-08-27
+
+调整：
+- **协议按钮组中间加竖线，分隔 Anthropic 与 OpenAI 两族协议**（用户反馈）。新建上游表单的「协议」三选一按钮原本一字排开（Anthropic / OpenAI Chat / OpenAI Responses），三个属于两族（anthropic-messages 一族，openai-chat/responses 一族），但视觉上平铺看不出分组。加一条 1px hairline 竖线把两族在视觉上分开。
+
+实现：
+- `index.html` `#create-wire-btns`：在 Anthropic 与 OpenAI Chat 按钮之间插入 `<div class="wire-btns-sep" aria-hidden="true"></div>`。纯装饰，aria-hidden 让屏幕阅读器忽略；不动按钮 DOM、点击 / 数据行为零变化。
+- `styles-20260817.css`：
+  - `.wire-btns` 加 `align-items: center;` —— 让分隔条在 flex 容器里垂直居中，跟随按钮基线对齐。
+  - 新增 `.wire-btns-sep`：`width: 1px; height: 24px; background: var(--hairline); flex: none; align-self: center;`。绝对像素高 24px 保证换行不拉伸；hairline 同色与节分割线一致。
+- 鉴权按钮组（Bearer / x-api-key / 无鉴权）**未加**同款分隔 —— 用户只点了协议行，鉴权是三选一无族划分。
+- `index.html`：CSS stamp ++（20260827-02 → -03），JS stamp 不动。
+
+无行为变更：仅 UI 装饰，可访问性用 aria-hidden 正确隐藏。
+
+--------------------------------------------------------------------------------
+
+v0.193  2026-08-27
+
+调整：
+- **设置页整体放大 1.2×（20%）**（用户反馈）。"所有元素整体调大"包含字号、padding、gap、控件尺寸、hairline 粗细等。改字号/单个 px 改不全还容易漏；用 CSS `zoom: 1.2` 一行覆盖设置根容器，所有后代按 1.2× 等比放大。
+
+实现：
+- `styles-20260817.css`：
+  - `.settings-view` 加 `zoom: 1.2;`。`zoom` 非标准但 Chromium / WebView2 全面支持，且会参与 layout（与 `transform: scale` 不同），父容器 `.main` 的 `overflow-y: auto` 自然接管竖向滚动。仅作用于 `.settings-view` 根容器，**不影响**其他视图（总览 / 实时 / 历史等）。
+  - `.main` 加 `overflow-x: hidden;`：zoom 后子元素视觉宽度可能 1.2× 超出其 layout box（比如固定 width 的控件），默认 visible 会画到主区 padding 之外；横向裁掉，纵向继续靠 .main 滚动。
+- 安全检查：本仓库所有 `position: fixed` 元素（`.bg-glow` / `.window-controls` / `#dispatch-alerts` / `.upstream-menu` / `#error-hints` / `.modal-overlay` / `body.body-flash::before` / `.cards-manage-fab`）都挂载在 `body` 或 `body` 的直属子节点上，**不是 `.settings-view` 的后代** —— 不会被 zoom 1.2× 误伤。
+- `index.html`：CSS stamp ++（20260827-01 → -02），JS stamp 不动。
+
+副作用小：右侧被裁掉的部分如果有重要信息用户感知不到（已加 overflow-x: hidden 兜底）。需要更激进/保守的放大，改一行 zoom 即可。
+
+--------------------------------------------------------------------------------
+
+v0.192  2026-08-27
+
+调整：
+- **「支持图片的模型」chip 全部带上游名前缀**（用户反馈）。此前 chip 只显示裸模型名（如 `deepseek-v4-flash-vision-exp`），同名模型可来自多个上游（_upstream_model_catalog 按 (c.name, m) 去重）时看不出是哪家的。现在显示 `上游 / 模型`（如 `dp官方 / deepseek-v4-flash-vision-exp`）。
+- **chip 字号调大**。继承自 .cfg-chip 的 11px 太小，带上游前缀后字符串更长更是看不清。提到 12.5px + line-height 1.4。
+
+实现：
+- `gui.py` `get_vision_models`：`models` 从裸字符串数组改为 `{model, label}` 富结构。`label` 复用 `_upstream_model_catalog` 的 `"上游 / 模型"`（同名模型 setdefault 取首个上游 label），`model` 仍是 OpenCode 认的裸 id。保存/判等继续用裸 model，`vision_models`（upstreams.json 顶层）仍存裸名 —— `/models/api.json` 按裸名匹配不受影响。
+- `app.js` `renderSettingsVision`：`all` 兼容 `{model, label}`（旧字符串兜底 map 成同名）；chip 显示 `label`、`data-model` 仍写裸 `model`（不破坏 onSaveVisionModels 的保存逻辑）。
+- `styles-20260817.css` `.cfg-vm-chip`：加 `font-size: 12.5px; line-height: 1.4;`。
+- `index.html`：CSS/JS stamp 各 ++（20260826-13→20260827-01 / -15→-01）。
+
+无行为变更：`vision_models` 存裸名、`/models/api.json` 判等信息、OpenCode 收图判定全部不变，仅默认模态 & 大小调整。
+
+--------------------------------------------------------------------------------
+
+v0.191  2026-08-26
+
+修复：
+- **「切换失败: timed out」弹窗**。GUI `set_passthrough_mode` 之前用同步 `urllib.request.urlopen(req, timeout=2.0)` 直连中继打 `/api/passthrough/mode`（PUT）。中继是独立 uvicorn 进程、每 worker 单线程事件循环；当它正在往上游慢速**流式**一个大图响应（实测约 6s 窗口）时，新来的 /api/passthrough/mode 请求会排在那个 stream 后面，socket 读在 2.0s 超时弹错 —— 即使中继本身完全健康。这跟代码库早就解决的「桥线程卡死」是同一类问题（`_pid_executor`）。
+- 顺带：该同步调用跑在 GUI bridge 线程池里，阻塞期间连其它按钮点击都会卡住。两个问题一处修。
+
+实现：
+- `gui.py`：
+  - 新增模块级 `_passthrough_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="relay-passthrough-http")` 和 `_PASSTHROUGH_HTTP_TIMEOUT = 15.0`（镜像 `_pid_executor`/`_PID_LOOKUP_TIMEOUT` 的既有模式）。
+  - `get_passthrough_mode` / `set_passthrough_mode` 改为 `_passthrough_executor.submit(...)` 在专用 worker 里发起 GET/PUT，`future.result(timeout=15.0)` 等待；桥线程不再被网络阻塞。
+  - 新增两个 worker 辅助函数 `_http_get_json` / `_http_put_json`；把 `_PASSTHROUGH_HTTP_TIMEOUT` 同时作为传给 `urlopen` 的 socket timeout（旧 2.0s 停在 socket 层，即使放进 worker 也会在 busy 窗口触发超时，必须一并放宽）。
+  - 未改其它透传端点（get_passthrough_upstreams / rename 等）—— 它们是只读/低频，无此卡死场景。
+
+--------------------------------------------------------------------------------
+
+v0.190  2026-08-26
+
+调整：
+- **「支持图片的模型」从独立设置卡搬到开发者模式组里**（用户反馈）。v0.188 这个新增项原本以独立 `<section class="settings-section">` 平铺在普通设置页，跟"上游配置 / 报错分析"同级。OpenCode 发图能力本身是一个**修真实 bug 的功能**（modalities 没标就客户端本地剥图报 `Cannot read "image.png"`），但 UI 上归到开发者模式组更合适。初始实现参考「自动切换 API → 允许自动切换的 API」套了一个主开关 + 面板嵌套，但用户指出那个主开关**冗余且误导**：
+  - **主开关逻辑是坏的**：checked 状态 = `snap.vision_models.length > 0`（即"是否至少勾选了一个模型"），跟 chip 勾选完全等价 —— 用户勾了模型还要再开一层开关，关了开关已勾的模型其实照样生效（开关不持久化、只折叠 UI），纯属多余控制。
+  - **去掉主开关**，回到 v0.188 的"纯 chip 列表"语义：勾选本身即功能开关（全不勾 = 不允许发图），不再有第二层开关。
+- **最终形态**：开发者模式组里一个 settings-item —— 标题「支持图片的模型」+ 合并 hint + chip 多选列表 + 保存按钮，随开发者模式显隐。功能开关 = chip 勾选，与 v0.188 一致，无额外开关。
+
+实现：
+- `index.html`：删除 v0.188 的独立 `<section data-card="settings-vision">` 块；保留一条占位注释指向新位置。
+- `app.js`：
+  - 删除 `renderSettingsVision($("card-settings-vision-body"))` 调用。
+  - `renderSettingsVision(prefsBody, snap)` 重写：容器改为开发者模式组内的 `#prefs-vision-chip-box`（单 settings-item，含 chip 列表 + 保存按钮）；移除模块级 `visionRendered` 守卫（prefs body 每次重写整个容器，旧标志失效），改用 chip-box 上的 `_visionClickBound` / `prefsBody._visionSaveBound` 防重复绑 click & save。
+  - devMode 主开关 change 处理器 `rows` 数组加 `#prefs-vision-row`（随开发者模式显隐）。无 vision 独立开关，无面板 hidden 逻辑。
+  - `onSaveVisionModels` 改读 `#prefs-vision-chip-box`（旧 `#card-settings-vision-chips` 删）。
+  - i18n 字典（en/zh-TW/ja/ko）更新为合并 hint key（标题 + 单条 hint），删除旧的两条死 key。
+- `styles-20260817.css`：`.cfg-vm-chip` 加 `white-space: nowrap` + `flex-shrink: 0` —— 模型名含连字符（如 `deepseek-v4-flash-vision-exp`），空间不足时 CSS 原本会在连字符处断行导致按钮内部文字换行；nowrap 保证按钮内文字单行，flex-shrink:0 保证按钮不被压窄、空间不够时整枚按钮换到下一行（父容器 `.cfg-chips` 已 flex-wrap: wrap）。
+- 无其它 CSS 改动（`.settings-vm-chips` / `.settings-storage-actions` 已存在）。
+- 无后端改动（vision_models 存储、读写、OpenCode modalities 注入路径全部不变）。
+
+测试：
+- 纯 Node 断言（逻辑自测）：selected 集合优先级（snap 优先 / bridge 补救 / 空数组）；chip HTML（active class 渲染）；`_visionClickBound` / `_visionSaveBound` 守卫语义；4 语言字典 key 存在；全部通过。
+- `node --check app.js` 通过。
+- DOM 层（切到设置 → 开开发者模式 → 看到 chip 列表、勾选 → 保存生效）留用户手动验收；**严禁 kill 8088**。
+
+资源版本：JS `?v=20260826-13` → `?v=20260826-15`；CSS `?v=20260826-11` → `?v=20260826-13`。
+
+--------------------------------------------------------------------------------
+
+v0.189  2026-08-26
+
+调整：
+- **总览页卡片拖动改 100 档**（用户反馈拖动级数要更细）。卡片右下角/左右/下沿拖拽调整大小时，吸附档位从「列跨度 21 档 + 高度 31 档」细分到「列跨度 100 档 + 高度 100 档」，拖起来接近连续、停哪儿锁哪儿。
+- 列跨度 `OVERVIEW_SPANS`：1.0 → 3.0，步长由 0.1 改 0.02（101 端点 = 100 间隔），round 到 2 位小数保证表值参与 `includes` / `_spanEq` 精确匹配。
+- 高度 `OVERVIEW_HEIGHTS`：160 → 760，步长由 20 改 6 px（101 端点 = 100 间隔）。
+- **`_spanEq` 容差从 0.05 缩到 0.005**：列跨度档距变 0.02 后，旧的 0.05 容差会把相邻两档判成同一档（find() 永远吸到更小那档）。0.005 < 半档 0.01 且远大于浮点尾差，相邻档精确区分、同档精确命中。
+- 卡片边缘拖拽提示 title 从「（1/2/3 列）」改为「（列数，1.0–3.0）」，口径与实际的连续小数列跨度一致。
+
+实现：
+- `app.js`：`OVERVIEW_SPANS` / `OVERVIEW_HEIGHTS` 生成式步长改细；`_spanEq` 容差缩小；两处 `card-edge-right` title 文案更新。
+- 持久化不受影响：`getCardSize`/`setCardSize` 对 height 只校验 > 0，对 span 用 `_spanEq` 最近邻匹配 —— 旧 21 档 / 5 档存的 span（如 1.1、2.9、3）在新 100 档表里都能精确命中，旧高度直接沿用，无需迁移。
+
+测试：
+- 纯 Node 断言（逻辑自测）：`OVERVIEW_SPANS` 101 值（1.00→3.00 步长 0.02、两位小数、严格递增）；`OVERVIEW_HEIGHTS` 101 值（160→760 步长 6）；`_spanEq` 相邻档区分 / 同档命中 / 浮点尾差容忍；高度与跨度最近邻 snap（含端点 758→760、1.03→1.02 等）全部通过。
+- `node --check app.js` 通过。
+- DOM 层（实际拖到 100 档手感）留用户手动验收；**严禁 kill 8088**。
+
+资源版本：`?v=20260826-12` → `?v=20260826-13`（JS；CSS 未改不动）。
+
+--------------------------------------------------------------------------------
+
+v0.188  2026-08-26
+
+调整：
+- **支持图片的模型 —— 中继端新增全局多选，修复 OpenCode 发图报错**（用户反馈 OpenCode 通过中继发图报 `Cannot read "image.png" (this model does not support image input)`）。根因：OpenCode 发请求前在客户端本地检查 `model.capabilities.input[modality]`（`transform.ts:435`），模型没被标成能收 `image` 就在本地把图剥掉并报错，请求根本不会发到中继。中继 proxy 层从不剥图，真正的拦点在 OpenCode 客户端。而 `capabilities` 读的是 OpenCode 从 `${OPENCODE_MODELS_URL}/api.json` 拉回的 `modalities` —— 该端点原来**只暴露声明了 thinking_options 的 anthropic 上游**，`deepseek-v4-flash-vision-exp` 这种走非 thinking 上游的多模态模型根本不在清单里，OpenCode 连它的 modalities 都收不到。
+- **新增**：设置页「支持图片的模型」多选卡，勾选的模型名（裸模型名，OpenCode 认模型 id）存 upstreams.json 顶层 `vision_models`。`/models/api.json` 每次被请求时现读 `vision_models`，命中的模型标 `modalities.input=["text","image","pdf"]`，其余保持 `["text"]`。OpenCode 读到 image 能力就放行图片。
+- **设计**：全局按模型名匹配（不区分上游）—— 模型名是透传的、跨上游一致（OpenCode 认的就是它）；同名模型跨上游会被同时标记（用户已接受此权衡）。**不预置，全手动**，初始为空清单。
+- **consumption 安全**：`vision_models` 只被 GUI 和 `models_api` 读写，relay 转发 / 计费 / 透传路径未动，不影响其它平台。`/models/api.json` 无 relay 内部其它调用者（passthrough 白名单里的 `/openapi.json` 是 FastAPI schema，无关）。
+
+修复：
+- **`/models/api.json` 只暴露 thinking_options 上游（排除多模态模型的根因）**：去掉 `if not cfg.thinking_options: continue` 过滤。改后所有声明过的模型都进 relay provider，用户才勾得着。
+- **一个上游只产出 `cfg.model` 一个 entry**：改成遍历 `cfg.model + allowed_models` 去重，各自以模型名为 key 建 entry，让 `deepseek-v4-flash-vision-exp` 单独出现。
+- **`_model_entry` 统一拷贝 `MODALITIES`（含 image）**：改成按 `support_image` 分支现场构建（`_IMAGE_MODALITIES` text/image/pdf 或 `_TEXT_MODALITIES` 纯 text），不再污染共享常量。
+
+实现：
+- `config.py`：Settings 加 `vision_models: list[str] = []`；新增 `save_vision_models`（strip + 去重，写 `data["vision_models"]`，镜像 `save_error_analysis`）。
+- `upstreams_file.py`：`apply_to_settings` 读顶层 `vision_models`，fail-open（非 list 落默认空列表，绝不阻塞 load）。
+- `gui.py`：新增 `get_vision_models`（返回去重模型名清单 + 当前勾选，清单复用 `_upstream_model_catalog` 抽 `m["model"]`）/ `set_vision_models`（保存 + reload）；快照加 `"vision_models"` 供首帧。
+- `routers/models.py`：`models_api` 去 `continue` 过滤、`vision = set(settings.vision_models)`、遍历多模型 entry；`_model_entry(cfg, *, support_image)` 按支持图定 modalities。
+- `app.js`：bridge `getVisionModels`/`setVisionModels`；`renderSettingsVision` 多选 chip（点击 toggle 勾选态，保存按钮 → `setVisionModels`）；设置路由 dispatch。
+- `index.html`：`settings-error` 卡后加 `card-settings-vision-body` 设置卡。
+- `styles-20260817.css`：`.cfg-vm-chip` / `.cfg-vm-chip.active`（accent 描边高亮勾选态）。
+
+测试：
+- 自动验证（Python，`usage-stats` env）：`save_vision_models` 往返（strip + 去重写入文件 + `apply_to_settings` 读回）；`models_api` 消费逻辑 —— 勾选的 `deepseek-v4-flash-vision-exp` → `input=['text','image','pdf']`、未勾选的 `deepseek-v4-flash` → `input=['text']` 且确实出现在 relay provider、`claude-opus-5` 保留 `reasoning=True`；`models_api` 路由（stub network）注入 relay provider（api=anthropic、npm=@ai-sdk/anthropic），全部断言通过。
+- 静态核对：Python AST 语法通过；`node --check app.js` 通过。
+- DOM 层（GUI 重启后设置页出卡 / OpenCode 重启 TUI 后发图）留用户手动验收；**严禁 kill 8088**。
+
+资源版本：`?v=20260826-10/11` → `?v=20260826-11/12`（CSS + JS）。
+
+设计文档：docs/dev/vision_models_opencode_image_v0.188.md（7 节）。
+
+--------------------------------------------------------------------------------
+
+v0.187.2  2026-08-26
+
+调整 + 修复：
+- **「初始不重叠」+ 「蔓延到侧栏」两个反馈一起解决**：
+  - v0.187.1 把左/上钳到 `x=0`、`y=0`。代码层确实拦住了「卡滑进侧栏底下」（这是 v0.187.1 已修复的「蔓延到侧栏底下卡死」），但用户复测反馈「还是蔓延到侧栏」—— 真实痛点是视觉上的：**卡左边紧贴 `.grid` 左边缘 = 紧贴 `.sidebar` 右边缘**（中间只隔 `.main` 的 padding），用户感觉「蔓延」。v0.187.2 把左/上各留 `FREE_SAFE_MARGIN = 16px` 的安全距离，卡片起步位置离侧栏/顶栏明显有一段空隙，而不是仅仅「没滑进去」。
+  - 用户明确要求「初始必须让每一个卡片都不重叠」。默认模式 flex 流本身就靠 flex-wrap 不重叠，seed 取的也是 flex 实测位置 —— 理论上不该重叠，但用户希望保险。v0.187.2 在 `switchLayoutMode` 的 seed 阶段（步骤 3.5）加一个 O(n²) overlap 防御：扫到两张卡矩形相交就把后一张整体往下挪一行（`y += 前者 h + 12px`），直到 16 轮扫完都不再重叠。理论上不该触发，但作为「切到自由模式那一瞬视觉不重叠」的硬保证。
+
+实现：
+- `app.js`：
+  - `_clampFreePos`：新增 `const FREE_SAFE_MARGIN = 16`；左/上钳 `nx < SAFE_MARGIN → SAFE_MARGIN`；右/下钳到 `gw - SAFE_MARGIN - FREE_EDGE_KEEP`（= 容器 - 64），`Math.max(SAFE_MARGIN, ...)` 兜底极端窄窗。
+  - `switchLayoutMode` 步骤 3.5：seed 完写盘后、`applyCardSize` 之前跑 overlap nudge。结果写回自由槽（带 `if (moved)` 判断，无重叠时不动）。
+- 无 CSS 改动。
+- 副作用：seed 后第一帧所有卡都至少离侧栏/顶栏 16px 远，切回默认模式再切回自由也保持这个偏移（钳制在 applyCardFreePosition 里再次跑）。
+
+测试：
+- `%TEMP%/h3/test_clamp_v01872.js`（**18 / 18 全过**，纯 Node）：验证 SAFE_MARGIN 边界（x=-250 → 16；x=0 → 16；x=16 不动；右/下钳到 1000-16-48=936；极端窄容器兜底；无父容器降级）。
+- `%TEMP%/h3/test_dual_slot_v0187.js` 仍 38/38 全过（未破回归）。
+- DOM 层（实测切到自由模式第一帧是否真的 SAFE_MARGIN / overlap nudge 是否真生效）本轮 GUI 未带调试端口，留用户手动验收。
+
+资源版本：`?v=20260826-07/08` → `?v=20260826-08/09`（CSS + JS）。
+
+设计文档：docs/dev/overview_free_region_v0.186.md 追加「v0.187.2 增量」段。
+
+--------------------------------------------------------------------------------
+
+v0.187.3  2026-08-26
+
+修复：
+- **自由模式卡片「蔓延到左侧菜单栏」的真正根因 —— 定位基准错了，钳制逻辑方向治错**：v0.187.1/187.2 一直在完善 `_clampFreePos`（硬边界 + SAFE_MARGIN 边距 + EDGE_KEEP 抓取区，单测 18/18 全过），但用户复测仍报「蔓延到侧栏」。反复排查发现不是钳制不够，而是**卡片 absolute 的定位基准与 JS 坐标语义对不上**：JS 全链路都把卡 `left/top` 当「相对 `.grid` 的偏移」（seed `r.left-gr.left`、拖动 `startLeft+dx`、存槽 grid-relative），但 `.grid` 及其任何祖先（`#app` / `main.main` / `section.view`）都**没设 `position`**，于是卡 `position:absolute` 后 `offsetParent` 落到 `body`。`body` 是满视口 flex，`.grid` 相对 body 的偏移 = `(sidebar 宽, topbar 高)`，卡片被系统性右下推一个常量 → `left=SAFE_MARGIN` 相对 body 时落在 grid 左边 = 侧栏区域。`_clampFreePos` 钳的是 grid-relative 坐标、却被 CSS 当 relative 到 body，所以钳 16px 还是进侧栏。
+- **修复**：给 `.view[data-view="overview"] > .grid` 加 `position: relative`，让 `offsetParent=.grid`，与 JS seed/拖动/存取槽的 grid-relative 语义对齐；`_clampFreePos` 的 `clientWidth` 基准也正好一致。JS 一行未改。
+
+实现：
+- `styles-20260817.css`：overview `.grid`（2493 那条）新增 `position: relative;` + v0.187.2 根因注释。特异性 (0,2,0)，与 5301 `.view[data-view="overview"] .grid`（只写 gap，无 position）不冲突，无后覆盖。
+
+测试：
+- `%TEMP%/h3/test_clamp_v01872.js` 仍 **18 / 18** 全过（未改钳制函数本体，纯 CSS 修复）。
+- CSS 花括号平衡 881/881。
+- 实机（用户 GUI 操作，未主动重启 8088）：切自由模式确认初始布局跟默认一致、拖卡向左不再进侧栏。
+
+资源版本：`?v=20260826-09/10` → `?v=20260826-10/11`（CSS + JS）。本次真实改动仅 CSS，JS stamp 同步 +1 保持版本对齐。
+
+设计文档：docs/dev/overview_free_region_v0.186.md 追加「v0.187.3 增量」段。
+
+--------------------------------------------------------------------------------
+
+v0.187.1  2026-08-26
+
+修复：
+- **自由模式下卡片能拖到侧栏底下、卡死再也拖不出来（用户反馈「自由也太自由了，咋还移动到左边的菜单栏上面去了？」）**：v0.187 的自由拖动 `cardFreeDragPointerMove` 只算 `st.startLeft + dx` 不做边界检查，鼠标往左一甩就能把卡片甩到 `.grid` 外面、**滑进** `.sidebar` 底下。`.sidebar` 在 v0.118 提过 `z-index: 500`，掉进去的卡片被盖住、既点不到也拖不到，唯一恢复手段是清 localStorage。v0.187.1 加 `_clampFreePos(card, x, y)`：左/上越界钳到 0（不让卡片滑出 `.grid` 进入侧栏区），右/下钳到 `容器宽高 - 48`（保留一条 ~48px 抓取区，避免卡贴边抓不到）。无父容器时降级返回原值不抛异常。结果 `Math.round` 化避免 inline style 出现长小数。
+
+实现：
+- `app.js`：
+  - `const FREE_EDGE_KEEP = 48` + `function _clampFreePos(card, x, y)` —— 纯函数，不依赖任何外部状态，注入 grid.clientWidth/clientHeight + card.offsetWidth/Height 即可。
+  - 3 处 wiring：(a) `cardFreeDragPointerMove` 内 `st.startLeft + dx` → `_clampFreePos` 包一层后写 inline style（拖动实时钳制）；(b) `applyCardFreePosition` 在 `classList.add("card-free-positioned")` 之后调一次（**救援 v0.187 期间误拖出去卡死的旧卡**，reload 即恢复；顺带处理窗口缩窄导致原坐标越界）；(c) 函数定义自身。无新依赖、无 CSS 改动。
+- mouseup 写盘时读 `card.style.left/top`（已经被钳过的），所以 localStorage 里存的坐标天然合规，刷新后不会再越界。
+
+测试：
+- `%TEMP%/h3/test_clamp_v01871.js`（**12 / 12 全过**，纯 Node 无需 CDP）：从 `app.js` 按注释锚点原样抽出 `_clampFreePos` 源码执行。覆盖：正常范围透传、★核心★ 负坐标钳到 0（侧栏方向）、右/下钳到容器-保留量、极端窄容器不出负数、整数 round、无父容器降级。
+- DOM/视觉层（拖到侧栏底下真的卡不住 / 救援旧卡生效）本轮 GUI 未带调试端口，留用户手动验收。
+
+资源版本：`?v=20260826-06/07` → `?v=20260826-07/08`（CSS + JS）。
+
+设计文档：docs/dev/overview_free_region_v0.186.md 追加「v0.187.1 增量」段。
+
+--------------------------------------------------------------------------------
+
+v0.187  2026-08-26
+
+调整：
+- **总览布局改成一个全局总开关 + 两套配置独立记忆（用户反馈「一个按钮统一切换自由模式和默认模式，且两套机制用两个位置记忆配置」）**：v0.186 是逐卡开关（每张卡右侧一个「📌 自由」按钮，11 张卡要逐个点），且两套模式共用同一份 span/height —— 在自由模式把卡拉大拉小、拖来拖去，切回默认模式后**默认模式的尺寸也被改掉了**，回不到原样。v0.187 两处都改：
+  - **一个总开关**：「管理卡片」弹层顶部一行「布局模式 [默认|自由]」二选一按钮，一次切换全部卡片。逐卡 📌 按钮全部移除，列表回到纯 checkbox + 卡名。
+  - **双槽独立记忆**：两套模式各自记全套 span / height（自由槽再多带 x/y 坐标），切来切去互不污染。
+- **存储布局**（旧 key 继续当默认模式槽 → 老用户的默认布局零丢失、无需迁移）：
+  - `overview-card-sizes-v1`  （沿用）默认模式 `{key:{span,height}}`
+  - `overview-card-order-v1`  （沿用）默认模式卡片顺序
+  - `overview-free-layout-v1` （新增）自由模式 `{key:{span,height,x,y}}`
+  - `overview-layout-mode-v1` （新增）全局标量 `"default"` / `"free"`
+- **自由坐标改成扁平存**（`x`/`y` 直接挂记录上，不再套一层 `free:{}`）。默认槽从此**永不含**坐标字段。
+- **切到自由模式时自动 seed**：首次进入以卡片当前实测位置（相对 .grid 的偏移）作为初始 x/y，span/height 从默认槽复制 —— 切过去看到的是「布局原样没动，只是现在每张卡都能拖了」，而不是所有卡塌到 (0,0) 叠成一坨。
+- **现有功能零回归**：v0.185 的边缘 resize（8px/8px/20×20 透明命中区 + 31 档高度 + 21 档宽度）、grid HTML5 重排、点卡体弹 resize 面板、v0.186 的自由拖动 / z-index 置顶 / 光标 —— 全部不动。
+
+修复：
+- **自由模式下改尺寸会静默掉回默认模式（v0.186 潜伏 bug）**：`setCardSize(key, span, height)` 有两处调用只传 3 个参数（列跨度按钮、边缘 resize 收尾）。v0.186 把缺省的第 4 参 `free` 一律归一化成 `null` 写回，等于**顺手把坐标擦了** —— 自由模式下拖一下边缘改尺寸、或点一下列跨度，卡就退出自由模式。v0.187 把第 4 参改成三态语义：`undefined`（不传）= 保留槽里已有的 x/y 只更新 span/height；`null` = 显式清坐标；`{x,y}` = 写入新坐标。
+
+实现：
+- `app.js`：
+  - 新增 `FREE_LAYOUT_KEY` / `LAYOUT_MODE_KEY` 常量、`_layoutMode` 状态、`isFreeMode()` / `saveLayoutMode()`。
+  - **读写路由层**：`_slotKey()` 按当前模式返回槽 key，`_readSlot()` / `_writeSlot()` 收口 localStorage 存取。`savedSize` / `getCardSize` / `setCardSize` 改走路由 —— 于是 `applyCardSize`、边缘 resize 收尾、列跨度按钮、自由拖动 mouseup **一行都不用改**，自动读写「当前模式那一槽」。改动面因此收窄到路由层 + 开关 UI。
+  - `switchLayoutMode(next)`：seed 自由槽 → 存模式 → 全卡重跑 `applyCardSize` → 默认模式额外 `applyCardOrder()`（自由模式 absolute 定位，DOM 顺序不影响视觉，跳过）→ `lastCardsSig=null` + `renderAll`（卡宽变了，D3 图要按新尺寸重算）。⚠ seed 的三步顺序不能乱：**先量**（卡还在 flex 流里，`getBoundingClientRect` 拿到的才是默认布局位置）→ **再切模式** → **后写盘**（`setCardSize` 按当前模式路由槽）。
+  - `_migrateFreeFieldOnce()`：把 v0.186 遗留在默认槽里的 `free:{x,y}` 搬进自由槽，并从默认槽剥掉 free 字段。幂等。⚠ 判据用 `"free" in rec`（key 是否存在）而**不是** `rec.free` 真值 —— v0.186 对默认模式的卡也会显式写 `free: null`，用真值判断会把这类记录漏在默认槽里，既破坏「默认槽永不含 free」的不变式，也丢掉幂等性。
+  - `openCardsManage()`：顶部渲染 `.layout-mode-row`（标签 + 两个 `[data-layout-mode]` 按钮），下面 11 行回到纯 checkbox + 卡名。
+  - 逐卡 `[data-card-free-toggle]` click 委托 → 换成 `[data-layout-mode]` 全局委托，切完同步弹层内按钮 active 态（弹层保持打开）。
+- `styles-20260817.css`：`.card-free-toggle` 全套（含 disabled 态）→ 换成 `.layout-mode-row` / `-label` / `-group` / `-btn`，做成 segmented control（相邻边框 `margin-left:-1px` 合并、active 那半 `z-index:1` 盖上去防边框被切）。v0.186 的 `.card-free-positioned` / `body.card-dragging-free` 规则**一行未动**。
+
+测试：
+- `%TEMP%/h3/test_dual_slot_v0187.js`（**38 / 38 全过**，纯 Node 无需 CDP）：从 `app.js` 按注释锚点**原样抽出**被测函数源码 + 注入 mock localStorage 执行 —— 测的是产品代码本体，不是照抄副本。覆盖：默认槽写入隔离、**★双槽往返隔离★**（默认 1.3 → 自由 2.5+(300,200) → 回默认仍 1.3 → 再回自由原样还原）、`free` 三态语义、旧数据迁移 + 幂等 + 不覆盖已有自由槽、模式持久化、脏数据兜底。
+- 单测第 5 组抓出一个真 bug（`free: null` 漏剥导致幂等性丢失），已修（见上面「实现」里的 ⚠）。
+- `%TEMP%/h3/verify_layout_mode_v3.bun.ts`：CDP 端到端 9 组已写好（全局生效 / seed / 往返隔离 / 迁移 / resize 回归），本轮 GUI 未带 `--remote-debugging-port=9222` 启动、9222 无监听，待调试端口可用后跑。
+- 静态核对：`node --check app.js` 通过；CSS 花括号 881/881 平衡；v0.186 自由模式 CSS 规则 git diff 显示 0 行改动。
+
+资源版本：`?v=20260826-05/06` → `?v=20260826-06/07`（CSS + JS）。
+
+设计文档：docs/dev/overview_free_region_v0.186.md 追加「v0.187 增量」段。
+
+--------------------------------------------------------------------------------
+
+v0.186.2  2026-08-26
+
+修复：
+- **「管理卡片」弹层里看不到「📌 自由」按钮（用户反馈「默认模式和自由模式切换按钮没有出现在"管理卡片"弹出的菜单栏中」）**：v0.186.1 的功能代码本身完好无损 —— `openCardsManage()` 的按钮渲染、`.card-free-toggle` 全套 CSS、click 委托三处都在，CDP 当时也验过 29/29。真正原因是**缓存 stamp 漏 bump**：v0.186.1 之后又对 `app.js`（20:13）/ `index.html`、`styles-20260817.css`（20:14）做了后续改动，但 `?v=` 版本号仍停在 v0.186.1 落地时的 `20260826-04/05`。WebView2 据此判定资源未变，继续复用**旧的 app.js 缓存副本**，而那份旧副本里 `card-free-toggle` 出现次数为 **0** —— 弹层于是只渲染出 checkbox + 卡名，按钮整列缺失。
+- 修复方式：资源版本号 bump。**没有改任何功能代码**（磁盘上的 JS/CSS 逻辑本来就是对的）。
+
+实现：
+- `index.html`：`styles-20260817.css?v=20260826-04` → `-05`；`app.js?v=20260826-05` → `-06`。
+
+排查要点（留档）：
+- 症状是「功能代码在磁盘上完全正确但界面不体现」时，先比对**资源 stamp 时间 vs 文件 mtime**：本次 `app.js` mtime 20:13 晚于 stamp 最后一次 bump 的 12:14，即可确诊缓存。
+- 快速判据：`grep -c "card-free-toggle" app.js.bak-stats-cards`（旧备份 = 0）对比 `app.js`（当前 = 4），能直接证明"旧副本无此功能"。
+- 教训：**同一天内多轮改前端，每轮都要 bump stamp**；只在"版本收尾"时 bump 会让中途改动被缓存吞掉。
+
+验证：
+- `node --check src/relay/web/app.js` 通过；`card-free-toggle` 在 app.js 出现 4 次、CSS 8 次，链路完整。
+- 待用户在 GUI 重启后确认：点右下「管理卡片」FAB → 11 行每行右侧应有「📌 自由」按钮（已勾选的可点、未勾选的灰显）。
+
+资源版本：
+- `?v=20260826-04/05` → `?v=20260826-05/06`（CSS + JS）。
+
+--------------------------------------------------------------------------------
+
+v0.186  2026-08-26
+
+新增：
+- **总览卡片「自由模式」级**（用户需求「允许任何一个卡片，在空白位置悬浮，无需和其它卡片挨着，也允许叠放到其它卡片之上」「保留当前样式。增加一个切换功能，可切换到刚才说的"自由模式"」）：在原 resize 面板里新增「📌 自由」切换按钮。每张卡可独立在两种模式间切换：
+  - **默认模式**（沿用 v0.185 的 flex 流）：`--ov-span` 1.0–3.0 步长 0.1（21 档）+ `--ov-h` 31 档。卡贴在前一张卡的旁边，行内自动换行。
+  - **自由模式**：卡脱离 flex 流，`position: absolute !important`，用 X,Y 像素绝对定位，存到 localStorage。卡可以叠放到其它卡之上，最近一次拖动的卡置顶（`card.style.zIndex` 自增）。
+- **自由模式下整卡可拖**：鼠标按住自由卡的非边缘命中区、非交互控件区域，整张卡跟手走。松手时位置一次写 localStorage（不拖动期间不写），刷新后还原。
+- **现有功能零回归**：v0.185 的边缘 resize（8px/8px/20×20 透明命中区 + 31 档高度 + 21 档宽度）、grid HTML5 重排、点击卡体弹 resize 面板 —— 全部不动。自由模式下边缘 resize 仍生效（resize 优先级 > 自由拖动）。
+
+实现：
+- `index.html`：在 `#card-resize-panel` 里加 `<button class="card-free-toggle" data-card-free-toggle="1" title="切换自由模式（脱离默认的 flex 流、可叠放）">📌 自由</button>`。CSS/JS 版本号 bump `20260826-02/03` → `20260826-03/04`。
+- `styles-20260817.css`（追加，不改任何 v0.185 规则）：
+  - `.view[data-view="overview"] > .grid > .glass-card.card-free-positioned { position: absolute !important; margin: 0 !important }` —— !important 兜底特异性坑（v0.185 同教训）
+  - `body.card-dragging-free * { cursor: move !important }` —— 直接写具体值，不用 inherit（v0.185 WebView2 cursor 退化陷阱）
+  - `body.card-dragging-free .glass-card.card-free-positioned:hover { transform: none !important }` —— 拖动期间禁 hover 上浮
+  - `.card-free-toggle` / `.card-free-toggle.active` 按钮样式（跟 `.card-span-btn` 同款）
+- `app.js`：
+  - `getCardSize` / `setCardSize` 加第 4 参数 `free`（`{x, y}`），Number.isFinite 兜底；旧 v0.185 数据无 `free` 字段读时回退 `null`（默认模式）—— 向后兼容
+  - 新增 `applyCardFreePosition(card, free)`：给卡加 `.card-free-positioned` 类 + 写 inline `top/left`
+  - `applyCardSize(card)` 末尾追加 `applyCardFreePosition(card, s.free)` 调用，刷新后还原
+  - `syncResizePanel(card)` 渲染「📌 自由」按钮 + 写 `freeBtn.dataset.card = key`（click 委托靠 dataset 识别卡）+ 同步 active 类
+  - 新增 document 级 click 委托响应 `[data-card-free-toggle]`：stopPropagation + 切换 + applyCardSize + syncResizePanel（刷新位置和按钮态）
+  - 新增 `cardFreeDragPointerDown/Move/Up` 三件套：跟 `_cardResize` 平行的 module 作用域状态，window 级 capture listener；mousedown 过滤（必须是 `.card-free-positioned` + 非边缘命中区让位 resize + 非交互控件）；临时 `card.draggable = false`（mouseup 还原，避开 HTML5 grid reorder）；mouseup 写 localStorage + `card.style.zIndex = ++_freeDragZCounter`（z-index 局部隔离，只动该卡）
+  - 「点击卡体弹 resize 面板」委托里加：自由模式卡不弹面板（避免拖完一张卡就弹一坨面板，喧闹）
+
+影响面：
+- 仅新增功能。v0.185 的 31 档高度、21 档宽度、命中区透明、CSS Grid→flex 切到布局 —— **完全不动**。
+- 持久化 schema 扩展：`overview-card-sizes-v1` map 加可选 `free` 字段，向后兼容（旧数据无字段 = 默认模式）。
+- z-index：自由卡用 module 计数器 + 单卡 inline style.zIndex。**不影响** .grid 整体的 stacking context（hover / 弹窗机制保持不变）。
+- 其它视图（history / upstreams / live / settings / stats）：零影响。
+- 后端 / API：零影响。
+
+测试：
+- CDP 端到端（`%TEMP%/h3/verify_free_region.bun.ts`，**26 / 26 全过**）：
+  - 面板「📌 自由」按钮存在 + 初始非 active
+  - click toggle → 卡加 `.card-free-positioned` 类 + inline top/left + localStorage.free 已存 + 按钮变 active
+  - 拖动 left+200 / top+150 增量精确（mouseup 后 left=200, top=150）
+  - 拖动期间 body.card-dragging-free 挂上 + card/body cursor: move
+  - mouseup 后 body 类清除 + localStorage.free 更新
+  - 第二张自由卡叠放 z-index 自增（hourly=2 → today=3）
+  - 再点 toggle → 卡退出类 + 清 inline + localStorage.free = null + 按钮 inactive
+  - 回归：自由模式下边缘 resize 仍生效（`--ov-span` 1.0 → 1.3 正常）
+- 已知 CDP quirk（不影响生产）：document 级 click 委托链里"点卡体弹面板"和"点外部关面板"在 CDP dispatchEvent 同步跑时会互斥（v0.185 既有 bug），真实 WebView2 mouse 行为下用户没遇到。
+
+资源版本：`?v=20260826-02/03` → `?v=20260826-03/04`（CSS + JS）。
+
+--------------------------------------------------------------------------------
+
+v0.186.1  2026-08-26
+
+调整：
+- **「📌 自由」按钮搬到「管理卡片」弹层**（用户反馈「将切换开关放到"卡片管理"选项中」）：v0.186 把按钮塞在 resize 面板里，但 resize 面板每次点卡体才弹、还容易被"点卡体弹面板"和"点外部关面板"两个 click 委托互斥关掉（v0.185 已知 quirk），用户希望它在卡片管理里能持续可见。现在每行卡右侧都有 📌 自由 按钮，跟 checkbox + 标题横排：
+    - **已勾选**（在总览显示）的卡：按钮启用，active 态高亮表示当前是自由模式
+    - **未勾选**（不在总览显示）的卡：按钮 disabled 灰显，提示「先勾选启用此卡再切换自由模式」
+  - resize 面板里的按钮彻底移除，面板回到 v0.185 的「高度 + 列跨度 + 关闭」三项布局。
+  - 弹层内点击 📌 自由后弹层保持打开，按钮 active 态实时同步（不用关闭重开）。
+  - 自由模式拖动逻辑、z-index 置顶、localStorage 持久化、边缘 resize 互斥 —— **全部不变**。
+
+实现：
+- `index.html`：`#card-resize-panel` 删除 `<button class="card-free-toggle">`。CSS/JS 版本号 bump `20260826-03/04` → `20260826-04/05`。
+- `app.js`：
+  - `syncResizePanel(card)` 删除 `freeBtn` 渲染 + `dataset.card` 同步（按钮不在面板里了）
+  - 「📌 自由」click 委托保留：跟 `_cardResize` 同套逻辑，切完后再把弹层内的 freeToggle 按钮 active 态同步（`document.querySelector('[data-card-free-toggle][data-card="key"]').classList.toggle('active', !isFree)`）
+  - `openCardsManage()` 改写渲染：每行用 `<span class="cards-manage-title">${title}</span>` + `<button class="card-free-toggle" data-card-free-toggle="1" data-card="${key}"${on ? "" : " disabled"}>📌 自由</button>` 横排布局
+- `styles-20260817.css`（追加 / 改）：
+  - `.cards-manage-title { flex: 1 1 auto; min-width: 0 }` —— 标题占满剩余宽度，自由按钮靠右
+  - `.card-free-toggle` 字号 11px → 跟弹层视觉协调，padding 3px 7px → 4px 9px
+  - `.card-free-toggle:disabled { opacity: 0.4; cursor: not-allowed }` —— 未勾选卡灰显
+  - 其它 active / hover 样式不变
+
+影响面：
+- 仅 UI 位置迁移。点击「管理卡片」FAB → 看见每行右侧的 📌 自由 按钮。
+- 自由模式拖动 / z-index / 持久化 / 边缘 resize 互斥 **零回归**（CDP 验证 29/29 全过）。
+- 已勾选卡片的自由模式状态在打开弹层时仍正确还原（active 态从 localStorage 读）。
+
+测试：
+- CDP 端到端（`%TEMP%/h3/verify_free_region_v2.bun.ts`，**29 / 29 全过**）：
+  - 弹层打开 + 11 行（CARD_DEFS 全量）
+  - hourly 行有 📌 自由按钮 + 初始非 active + 启用（默认勾选）
+  - 未勾选的统计卡按钮 disabled 灰显
+  - 点 hourly 📌 自由 → 卡加类 + inline top/left + localStorage + 弹层内按钮变 active + 弹层保持打开
+  - 自由拖动 left+200 / top+150 精确 + body.card-dragging-free + cursor: move
+  - today 切自由 + 拖动 → z-index 自增（hourly=2 → today=3）
+  - 再点 hourly 📌 自由 → 卡退出类 + 清 inline + localStorage.free = null + 按钮非 active
+  - 回归：自由模式 + 边缘命中区 → card-resizing-w（不走 card-dragging-free，--ov-span 1.0 → 1.3）
+
+资源版本：`?v=20260826-03/04` → `?v=20260826-04/05`（CSS + JS）。
+
+--------------------------------------------------------------------------------
+
+v0.185.1  2026-08-26
+
+调整：
+- **总览卡片边缘命中区悬停不再显色（用户反馈「边缘的变色可拖动指示条可以删去或透明化了」）**：v0.185 给三条命中条（`.card-edge-bottom / -right / -corner`）加了 `linear-gradient` 背景色（橙/绿/红 ◢） + `opacity: .35/.55` hover 提示。功能上 hover 颜色提示"这里可拖"，但用户反馈每张卡边缘一亮就变色太喧闹。改成命中区完全透明：
+  - 三条 edge 的 `background` 全部去掉（不再有橙条 / 绿条 / 红 ◢）
+  - 删掉 `.glass-card:hover > .card-edge-...` 的 `opacity: .35/.55` hover 规则
+  - 保留 `opacity: 0` 基线、`cursor: ns/ew/nwse-resize`、z-index、position —— 命中区仍 8px/20px 全可点击
+  - 光标形状本身就是"可拖"的暗示（pointer 进入边缘区立即变 ns/ew/nwse-resize），不再需要变色辅助。
+
+实现：
+- `styles-20260817.css`：三条 `.card-edge-*` 规则各砍掉 `background` linear-gradient 和 hover opacity 块；顶部注释加"完全透明、不显指示色"说明。删除 `transition: opacity .15s`（已无 opacity 变化）。
+
+影响面：
+- 仅视觉变化，功能等价（CDP 实测三个 edge 的 `getComputedStyle.opacity = 0`、`background = rgba(0,0,0,0)`、`cursor` 仍 ns/ew/nwse-resize）。
+- 拖动行为完全不变（CDP 重测 21 档 + 13 个不同宽度通过）。
+- 命中区在卡内这件事没改，仍 8px 厚条 + 20×20 corner；只是不再亮出来。
+
+测试：
+- CDP 三个 edge computed style：opacity=0 + background 透明 + cursor 正确。
+- CDP 21 档宽度拖动回归：dx=25→1.1 (337px) / 320→2.0 (613) / 600→3.0 (920)，全绿。
+
+资源版本：`?v=20260826-01` → `?v=20260826-02`（仅 CSS；JS 未改）。
+
+--------------------------------------------------------------------------------
+
+v0.185  2026-08-26
+
+修复：
+- **总览卡片边缘拖拽失效 + 列跨度只能 3 档 + 光标跳变（一组 5 个累积 bug，用户反馈「上下拖动很正确。但是左右完全拖不动」「按下后...鼠标样式回归普通样式」「拖动没用」「需要修正为20挡位」）**：
+  - **起点坐标系错位**（导致"按下跳变 + 拖动无效"）：mousedown 旧逻辑 `startH = 实测内容高 (27.5px)` 但 `st.height = 吸附档 (200px)`，move 端 `newH = 27.5 + dy`，要 dy > 212px 才能跨过中点到 280 档。修法：`startH = OVERVIEW_HEIGHTS[initSnap]`，跟 `st.height` 同坐标系，dy > 10px 即跨档。
+  - **CSS Grid `span <integer>` 不接小数**（导致"左右完全拖不动"）：CDP 实测 `--ov-span = 1.5/2.5/2.8` 全部被静默丢弃，卡永远 1 列宽（313px）。这是 CSS spec 硬限，不是浏览器 bug。要 fine-grained 必须换布局机制。
+  - **WebView2 `cursor: inherit !important` 退化**（导致"鼠标样式回归普通样式"）：`body.x * { cursor: inherit !important }` 选择器在 WebView2 下把 body 自身 cursor 也变 inherit → 解析为 auto（body 没父级）。用户看到的是普通光标，不是预期的 ns-resize / ew-resize。
+  - **悬停 translateY(-3px) 覆盖命中区**（导致"按下后卡瞬回上浮 + 光标跳回 grab"）：`.glass-card:hover` 把命中区跟着卡上抬 → 鼠标脱离命中区 → cardResizePointerDown 早返回 → wireEdgeResize 接管 cursor。
+  - **20 档循环边界 i<20 → 2.9**（导致"只能吸到 2.9，到不了满 3 列"）：`for (i=0; i<20; i++)` 写到 i=19 = 2.9 就停，3.0 永远进不来。
+
+实现：
+- **布局切换**：总览 `.view[data-view="overview"] > .grid` 从 CSS Grid 切到 `display: flex; flex-wrap: wrap; gap: 16px !important;`；卡 `width: calc(var(--ov-span, 1) / 3 * (100% - 32px)) !important`（32px = 2×16px 行内 gap 总和）。`!important` 兜底 file:// CDP 抓不到的特异性坑（`gap` 不加会被压成 6px）。`.glass-card:hover { translateY(-3px) }` 在 `body.card-resizing` 期间 `transform: none !important` 禁掉。`.card-chart-row` 的 `grid-column: span 2` 在 flex 下变 no-op，注释同步更新。
+- **列跨度 21 档**：OVERVIEW_SPANS `[1, 1.1, ..., 2.9, 3.0]`（循环 `i <= 20`，闭合到 3.0）。
+- **高度 31 档**：OVERVIEW_HEIGHTS `[160, 180, ..., 760]` 步长 20px，move 端 `newH = clamp(round(st.startH + dy))`。
+- **光标**：三个 mode 类直接写具体 cursor 值（`body.card-resizing-h * { cursor: ns-resize !important }` 等），**不用 inherit**。
+- **命中区在卡内**：`.card-edge-bottom { bottom: 0; height: 8px }`、`.card-edge-right { right: 0; width: 8px }`，全部在 `.glass-card` 视觉边界内，`.glass-card { overflow: hidden; border-radius }` 裁两角但其它位置全可命中。
+- **min-height 兜底**：`.card-body[style*="--ov-h"]` 规则加 `min-height: 0 !important`（解除 stats-chart-host / `[data-card^="stats-"]` 的 220 下限，否则拖到 220 以下被静默夹住）。
+- **wireEdgeResize 互斥**：`cardResizePointerDown` 头部 `e.stopImmediatePropagation()`（而非 stopPropagation，capture 队列才会断）；wireEdgeResize mousemove 检查 `!body.card-resizing` 才写 cursor。
+- **起点对齐**：mousedown 算 `baseH = s0.height > 0 ? s0.height : clampH(measuredH)`，再 snap 到 OVERVIEW_HEIGHTS，`startH = OVERVIEW_HEIGHTS[initSnap]`。
+
+⚠ 重点约束（开发文档同款）：
+- CSS Grid `span <integer>` 只接整数，小数会被静默丢弃（CDP 实测）。要 fine-grained 列跨度必须切 flex，不能靠 `grid-column: span var(--ov-span)`。
+- WebView2 下 `body.x * { cursor: inherit !important }` 会让 body 自身 cursor 变 auto；必须直接写具体 cursor 值。
+- min-height 优先于 height，stats 类卡的 220 下限要显式解除才能拖到 220 以下。
+- 改完前端静态文件必须 bump `index.html` 里的 `?v=...` 版本号，否则浏览器复用旧 CSS/JS。
+
+影响面：
+- 总览卡片边缘拖拽从"基本不能用"变为可用：下沿 31 档 20px 步长，右沿 21 档 0.1 步长，右下角同变。
+- 历史持久化的 span（任意 [1.0, 3.0] 小数，如 2.3 / 2.8）正确还原；height 同理（> 0 不查表）。
+- 不影响其他视图（history / upstreams / opencode 仍走原 CSS Grid / flex column 规则，selector `.view[data-view="overview"] > .grid` 严格限定总览）。
+- 不影响 `.glass-card:hover` 的默认 translateY 上浮（仅拖拽期间禁）。
+
+测试：
+- CDP 实测（headless Edge + 真页面）：纵向 `dy=15px → 180px`（首响应 +15）；横向 `dx=25→1.1 (337px) / 50→1.2 (368) / 160→1.5 (460) / 320→2.0 (613) / 400→2.3 (705) / 500→2.6 (797) / 600→3.0 (920)`，13 个不同真实宽度覆盖 21 档。
+- 持久化路径：localStorage 写 `{span: 2.3, height: 0}` → 重载后卡宽 705.3px 正确还原。
+- 边界 clamp：左 / 右 / 上 / 下边界均卡到档位端点（1.0 / 3.0 / 160 / 760）。
+- 资源版本：`?v=20260825-01` → `?v=20260826-01`（CSS）；`?v=20260825-09` → `?v=20260826-03`（JS）。
+
+设计文档：docs/dev/overview_card_edge_drag_v0.185.md（7 节：初始指令 / 提炼实现点 / 开发路径 / 遇到的问题 / 最后如何解决 / 是否遵循规划 / 最终实现点 + 行为验收清单）。
+
+--------------------------------------------------------------------------------
+
+v0.184.3  2026-08-26
+
+修复：
+- **S2 切回无流时球帽不应回 idle（用户反馈「在无实时流的状态下，处在 S2，悬浮球也不会变成翻转的样式」）**：v0.184.2 的 `_sync_geometry_to_mode` 把"无流"统一兜底成 `idle`——这破坏了 S2 的核心语义。S2 是用户显式切换的偏好（「始终隐藏侧边栏」），不应因为来过的请求流 done 就回 idle 失去视觉提示。修复后球帽形态判定：
+  - S1 + 有流 → flow（启动侧栏 + 球帽 flow 动画）
+  - S1 + 无流 → idle（默认安静态）
+  - **S2 + 有流 → done（球帽持续倒立 + 心跳，容器不展开）**
+  - **S2 + 无流 → done（球帽仍倒立，容器收回）** ← 新行为
+  - 一键全藏（_all_hidden=True）→ 不下发 ghostSetState（球帽已 hide，形态无意义；恢复时由 refresh_ball_visibility 决定）
+
+实现：
+- `panel_pool.py` `_sync_geometry_to_mode`：三态映射改成 S1/S2 分支独立判定，S2 无脑 ball_state="done"；`_all_hidden=True` 分支不下发 ghostSetState（省一次 IPC）。
+- 顺手修 `_all_hidden=True` 时 `target_expanded` 未定义的 UnboundLocalError。
+
+影响面：
+- 仅 S2 视觉态持久性变化。S1 路径完全不变（默认 S1 + 无流 = idle 仍成立）。
+- S2 用户切过一次后，球帽持续倒立——视觉上能稳定看到"我处在 S2"。
+
+测试：
+- S2 持久 smoke 13/13：默认 S1+无流→idle / S1+流→flow+展开 / 点球帽→S2 / S2+rid→done+不展 / **S2+清流→done（持久翻转）** ← 关键 / S2+新流→done+不展 / S1+无流→idle / 一键全藏不下发 ghostSetState。
+- 容器 smoke 截图 + computed transform 验证：S2 态 `matrix(-1, 0, 0, -1, 0, 0)`（180° 旋转矩阵）+ 视觉确认小幽灵倒立。
+
+--------------------------------------------------------------------------------
+
+v0.184.2  2026-08-26
+
+新增：
+- **S2 整球帽 180° 翻转（用户反馈）**：v0.184.1 把 S1↔S2 双态切换还原了，但 `ghost-done` 的旋转只作用于 `#ghost-body`（主体小幽灵），halo/ring/heart 仍保持原方向——视觉上"半翻不翻"很别扭。改成整球帽 `#cap-ball` 旋转 180°，halo + body + ring + heart 一起反向，加 400ms cubic-bezier 过渡让翻转过程平滑。父元素 transform 嵌套到子元素 keyframe transform 上，子元素的 halo/ring/heart scale 动画仍在已翻转 180° 的坐标系内继续走自己的 keyframe——观感正常。
+
+实现：
+- `web/ghost_panel.html`：CSS 把 `#cap-ball.ghost-done #ghost-body { transform: rotate(180deg) }` 上移到 `#cap-ball.ghost-done { transform: rotate(180deg); }`；`#cap-ball` 加 `transform-origin: 50% 50%` + `transition: transform 0.4s cubic-bezier(.4, .0, .2, 1)`。
+
+影响面：
+- 仅 S2 视觉态变化。S1 / idle / flow 形态完全不变。
+- 切换 S1↔S2 时球帽会有 400ms 平滑旋转过渡，不再硬切。
+
+测试：
+- 容器 smoke 截图对比（idle / done）：done 态 body 中心 y 从 64.5 → 55.5，`cap-ball` computed `transform = matrix(-1, 0, 0, -1, 0, 0)`（180° 旋转矩阵）✓，halo/ring/heart 跟随翻转 ✓。
+
+--------------------------------------------------------------------------------
+
+v0.184.1  2026-08-26
+
+修复：
+- **悬浮球点击样式转变回归（用户反馈「保留 S1<->S2 双态切换」）**：v0.184 把 `ball_clicked` 改成了单纯的「收起/展开」切换，丢了 v0.183 的 S1↔S2 双态语义。S1（ghost-flow，启动侧边栏显示）/ S2（ghost-done，始终隐藏侧边栏）切换是球帽视觉态反馈的根基 —— 没有它点球帽就只剩几何动作、没视觉态转变。还原完整 S1↔S2 双态：
+  - **球帽形态映射**保留 ghostSetState 三态（idle/flow/done），并补 `'done' → 'ghost-done'` 映射（之前只认 `'s2'`，调用方写 `'done'` 实际落到 idle 兜底）。
+  - **点球帽**切 S1↔S2 flag + 同步球帽形态（flow/done），**几何由 flag + 当前是否有 rid 共同决定**（assign / _clear_rid / set_float_ball / ball_clicked / toggle_all_visible 全部走 `_sync_geometry_to_mode` 单一来源真理），不再直接切 _expanded。
+  - **S1 + 有 rid**：球帽→flow + 容器展开成「球帽+侧栏」（request done 后收回）；**S2 + 有 rid**：球帽→done，容器保持收回（不主动展开）；**无 rid**：球帽→idle，容器收回。
+  - 用户手动点 X / 一键全部隐藏只是临时收回容器，**不动 S1/S2 flag**——下次有流按 flag 决定是否弹。
+
+实现：
+- `panel_pool.py`：新增 `_show_sidebar_on_stream: bool = True`（S1 默认） + `_sync_geometry_to_mode()` 单一来源真理；`ball_clicked` 改写为 S1↔S2 切换；`assign`/`_clear_rid`/`set_float_ball`/`toggle_all_visible` 改走 `_sync_geometry_to_mode`；`assign`/`_clear_rid` 内部的 `_set_ball_state` + 直接 `_expanded = ...` 调用全部归并到 helper。
+- `web/ghost_panel.html`：`GP_CLS` 加 `'done': 'ghost-done'` 键。
+
+影响面：
+- 默认 S1 = 行为与 v0.184 等价（来流自动展开 + 球帽 flow 动画）。
+- 切到 S2 后来流不再弹侧栏，球帽仍切 done 心跳动画 ——「始终隐藏」名实相符。
+- 容器显隐 / hover 穿透 / 拖动等不涉及 flag 的逻辑零变化。
+
+测试：
+- S1↔S2 状态机 smoke（Mock pool）：14/14 通过（默认 S1 / assign S1 展开+flow / 点球帽→S2 收回+done / 切回 S1 重展 / S2 来新 rid 不展开+done / 全清→idle）。
+- 容器 smoke（ElectronBallWindow + ghost_panel.html）：三态 ghost-idle / ghost-flow / ghost-done 全部 class 切换可见；`done → ghost-done` 修复验证。
+
+--------------------------------------------------------------------------------
+
+v0.184  2026-08-26
+
+新增：
+- **悬浮球 + 侧栏合并成单容器窗口（核心重构）**：此前悬浮球（`ElectronBallWindow`）与侧栏（`ElectronPanelWindow`）是两个独立 Electron 窗口。本次合并为一个透明 Electron 容器（`ElectronBallWindow` 加载 `web/ghost_panel.html` + `electron_app/ball_main.js` + `ball_preload.js`）：
+  - **球模式**（悬浮球开关 ON）：容器收起 = `(ball_size, ball_size)` 只露球帽（左上锚点，真透桌面，hover 穿透——球内吞/球外穿）；点击球帽（drag-end 无位移）→ 向右下展开成「球帽 + 侧栏」（`(ball_size + 侧栏宽, panel_height)`，全窗口吞点击，侧栏可交互）；再点球帽收起。
+  - **磁吸模式**（开关 OFF）：容器强制展开成侧栏、dock 贴主窗右缘、球帽隐藏（`ghostSetBallVisible(false)` → `body.no-ball`），高度跟随主窗。
+  - **拖动**：收起态拖球帽 / 展开态拖顶栏拖拽区 → 移动整个容器，dragend 落盘 settings（`relay_gui_float_ball_x/y`）。
+  - **球帽形态**（idle/flow/s2）由请求流驱动（`ghostSetState`），与收起/展开解耦。
+  - 删除独立球逻辑（`BallLayer3` 不再被池引用）；`ball_layer2.py` 死代码不碰。
+
+实现：
+- `web/ghost_panel.html`：`#ghost-root`（flex row）= 左 `#ghost-cap`（球帽方，透明 SVG）+ 右 `#ghost-panel-surface`（侧栏实底）；`body.collapsed` 收起/展开；补球帽拖拽接线（球内圆命中 `dx²+dy² ≤ (50*0.48)²`）+ 展开态顶栏拖拽区（`#panel-drag-region`，排除 X 按钮）+ 收起按钮（`panel_close`）+ `ghostSetBallVisible`。
+- `electron_app/ball_main.js`：新增 `set_expanded(bool)` —— 展开态停 hover 穿透循环 + 全窗口吞点击，收起态恢复 hover 判定；**`resizable: true`**（修复：transparent + resizable:false 的窗口二次 `setSize` 静默失败——首次大改后不再变，容器无法反复收展）。
+- `electron_ball_window.py`：新增 `set_expanded(bool)` 桥；容器即该类的实例（`native=None` → WinForms 互操作路径安全 no-op）。
+- `panel_pool.py`（核心）：
+  - `start()` 改建容器窗口（`ElectronBallWindow` + ghost_panel.html），删 `_create_ball`/`_ensure_ball`/`_show_ball`/`_hide_ball` 的 BallLayer3 逻辑；`events.clicked → ball_clicked`（切收起/展开）、`moved → _ball_drag`、`dragend → _persist_ball_pos`。
+  - `ball_clicked()` 重写为收起/展开切换（替代旧 S1/S2 隐藏模式）。
+  - `_apply_geometry` 两分支：球模式（收起=球方贴球位 / 展开=从球位向右下延长 + 出屏整体 clamp）+ 磁吸（dock 贴右）；`_anim_resize` 升级为宽高同变补间（ease-out x^4，32 步×22ms）。
+  - `set_float_ball` / `refresh_ball_visibility` / `_show_always_one` / `_hide_always_one` 适配容器：球模式显示 = 球帽可见，磁吸显示 = dock 贴右。
+- `gui.py`：`float_ball_url` → `ghost_panel.html`；`_on_panel_loaded` 里删 `_ensure_ball()`，改为按开关初始化容器模式（`pool.set_float_ball(ball_en)`）；`_dock_panel`/`_update_panel_snap`/`_on_panel_moved`/`_on_main_minimized`/`_on_main_restored` 的 ball_mode guard 沿用（容器即球）。
+
+影响面：
+- 悬浮球与侧栏不再是两个窗口 —— 单容器同进退，消除「球与侧栏层级不一致」「两窗不同步」等历史问题。
+- 磁吸 dock 模式行为不变（贴右、随主窗移动/缩放）。
+- 展开/收起有平滑宽高动画；拖动落盘球位，重启保持。
+
+测试：
+- 容器 smoke diag（ElectronBallWindow + ghost_panel.html + ball_main.js）：透明（html/body/cap rgba(0,0,0,0)、surface 实底）、`ghostSetExpanded`/`ghostSetBallVisible` 切 class、反复 `resize(456,900)/(56,56)` 回读（resizable:true 修复验证）、`set_expanded` 吞/穿切换、合成球帽点击 → `clicked` 事件回 Python、`move`/`set_topmost`/`capture` 17/17 通过。
+- `py_compile` / `ast.parse` panel_pool.py / gui.py / electron_ball_window.py + `import` 全绿。
+- 手动验收（用户）：球收起 56×56 真透桌面；点球 → 右下展开「球 + 侧栏」可交互；再点球帽收起；收起拖球帽 / 展开拖顶栏移动容器、位置落盘重启保持；磁吸模式（关球）dock 贴右随主窗；点球下方记事本 → 球响应且记事本不收到点击；退出 `pool.stop()` 无残留 electron 进程。
+
+--------------------------------------------------------------------------------
+
+v0.169  2026-08-25
+
+修复：
+- **「高级设置折叠组」里用户改过的值被重置（用户反馈「关掉之后...不要给他重置回默认了哦」）**：根因是设置页 `body.innerHTML = ...` 在「离开设置 → 重新进入」时会全量重建（`prefsRendered = false` 守卫仅控制重渲本身），重建后所有 wheel-picker / 嵌套 input / checkbox / seg 都从 `snap`（500ms 轮询）初始化 —— 而 wheel-picker 改值走「350ms 防抖 → setLivePanel... → backend 更新 → 下次轮询」整链路，若用户在防抖或轮询窗口内离开设置页，snap 里仍是旧值，新 wheel-picker 就以「默认值」出现，看上去像「关掉高级设置 → 嵌套值被刷回默认」。修复：
+  - **`renderSettingsPrefs` 进入时先 snapshot 旧 DOM**：新增 `_snapshotPrefsValues(body)`，从旧 DOM 抓 wheel-picker 中行（`is-cur` 行 textContent = 当前 `_v`）、嵌套 number input、嵌套 checkbox、list-font seg 三档 active 值，存到模块级 `_prefsDirtySnapshot`。
+  - **mountTimeoutWheel / maxInput 初始值优先级**：新增 `wpDef(dataKey, snapKey, fallback)` —— 旧 DOM 快照 > snap > 默认常量；让 wheel-picker 创建时直接用快照值，无需等 async 回写。
+  - **initTimeoutWheel 跳过覆盖**：新增 `dataKey` 参数；若快照已有该值，`__wpSet(snap, true)` 静默回写跳过，避免把刚改的值又刷回；异步 getter 路径保留（snap 缺字段时仍走）。
+  - **嵌套 input / checkbox / seg 同样处理**：`tools-cap-input` / `ep-list-vh-input` / `min-cols-input` / `tools-always` / `no-panel-frame` / `list-font` seg 在 `refreshPrefsDynamic` 里先查快照、有则跳过 snap 覆盖。
+  - 范围：仅 wheel-picker / 高级折叠组里的 input/checkbox/seg；其它顶层 input 每次渲染都从 snap/bridge 实时拉最新，没必要覆盖。首帧 `_snapshotPrefsValues(body=null)` 返回空对象，无副作用。
+  - `index.html` JS cache `?v=20260825-03` → `?v=20260825-04`。
+
+影响面：
+- 仅设置页渲染逻辑。其它视图 / 后端 API 零改动。
+- 仍尊重后端权威：snap 有最新值时仍用 snap（用户改动落库后，下次进入设置 snap 自动跟上）；只在 snap 滞后于用户改动时才用快照兜底。
+
+测试：
+- `node --check` app.js 通过。
+- 手动验收：开高级「等待时间」组 → 改 wheel-picker（不动 350ms）→ 切到「实时」tab → 立即切回设置 → 高级组仍是 ON、wheel 值仍是用户改的值（不是默认）。
+
+--------------------------------------------------------------------------------
+
+v0.170  2026-08-25
+
+新增：
+- **侧边栏与悬浮球同层级（用户反馈「侧边栏始终要和悬浮球在同一层级」）**：悬浮球自 v0.165 起恒 `WS_EX_TOPMOST`（永远置顶），而侧栏此前从没置顶 —— 浮动(球)模式下侧栏解耦主窗（`RemoveOwnedForm`）后是普通桌面窗，会被其它窗口盖住，而球永远在最上面，两窗层级不一致。修复：侧栏置顶态恒等于「悬浮球置顶」开关，球与侧栏要么一起置顶、要么一起降级，恒同层级。
+- **设置页新增「悬浮球置顶」开关（默认 ON）**：`RELAY_GUI_FLOAT_BALL_TOPMOST=1/0`，配置字段 `relay_gui_float_ball_topmost`。关掉后球与侧栏一起降到普通层级（不再盖住其它窗口）。
+
+实现：
+- `config.py`：新增 `relay_gui_float_ball_topmost: bool = True`（`.env` 键 `RELAY_GUI_FLOAT_BALL_TOPMOST`）。
+- `ball_layer.py`：`BallLayer` 构造器新增 `topmost` 参数（默认 True，沿用 v0.165 行为），`_create_and_show` 按它条件设 `f.TopMost` / `WS_EX_TOPMOST`；新增 `set_topmost(bool)` 运行时切换（dispatch 到 UI 线程，`f.TopMost = True/False` 由 WinForms 内部走 `SetWindowPos(HWND_TOPMOST/NOTOPMOST)`，不触发句柄重建）。
+- `panel_pool.py`：构造读 `relay_gui_float_ball_topmost` 存 `_float_ball_topmost`，`_create_ball` 传给 BallLayer；新增 `set_float_ball_topmost(enabled)` —— 已建球则 `ball.set_topmost`，未建只记标志（建球时初始化）。
+- `gui.py`：
+  - 新增桥 `get_float_ball_topmost` / `set_float_ball_topmost`（仿 `get/set_live_panel_frameless`，`update_env_var` 写 `.env`）；setter 里联动 `pool.set_float_ball_topmost` + `_sync_panel_topmost()`。
+  - 新增 `_sync_panel_topmost()`：仅浮动(球)模式生效 —— 读 `_panel_docked` 判浮动（磁吸 dock 态侧栏是主窗 owned 窗体、跟随主窗层级，不能被拔成置顶），浮动 + 开关 ON → `BeginInvoke` 异步派发 UI 线程 `panel_native.TopMost = True/False`（与球 `f.TopMost` 同一机制，WinForms 属性缓存跨 show/hide 持久；`TopMost` setter 走 `SetWindowPos`，**不触发 RecreateHandle** —— 会重建句柄的是 `ShowInTaskbar`，见 `_hide_panel_taskbar` 死锁教训）。
+  - **实现踩坑**：初版用 ctypes `SetWindowPos` + `int(panel_native.Handle)` 取句柄，但 pythonnet 3.x 的 `IntPtr` 不支持 `int()`（抛 TypeError，必须 `ToInt64()`，见 `ball_layer._handle_int`）→ `_apply` 被 `except` 吞掉 → 侧栏从未置顶（用户实测「球在 cmd 上面、侧栏被 cmd 盖住」）。改用 WinForms `TopMost` 属性天然规避，且属性更新 form 缓存、比 ctypes 改样式持久（ctypes 不更新缓存，后续 WinForms 操作可能把置顶刷掉）。
+  - `_sync_panel_owner()` 入口无条件先调 `_sync_panel_topmost()`（放在 bound 早退**之前** —— bound 状态没变也要重算置顶）→ 所有走 `_sync_panel_owner` 的模式切换点（`set_float_ball` / `_dock_panel` / `_update_panel_snap` 两分支 / `_on_panel_loaded`）自动带上置顶同步，球与侧栏恒同层级。
+  - 设置 snapshot 加 `"float_ball_topmost"` 键（设置页首帧初始值）。
+- `app.js`：悬浮球开关下方加「悬浮球置顶」toggle（`prefs-live-panel-float-ball-topmost`，default 显示 ON）+ 四语言 i18n（zh/en/zh-TW/ja/ko）；桥 `getFloatBallTopmost`/`setFloatBallTopmost`；change handler + `refreshPrefsDynamic` 初始值。
+- `index.html`：JS cache `?v=20260825-04` → `?v=20260825-05`。
+
+修复：
+- **侧栏启动白屏（老生常谈，用户反馈「启动白，有内容恢复」）**：`live_panel.html` 静态默认 `<html data-theme="light">`，深色/日间主题下侧栏首帧渲染用 light 的 `--root-bg: #f5f5f7`（近白），直到 `_on_panel_loaded` 的异步 `setTheme` 才切换到正确底色（dark=#0a0a0a / day=#fdf6ec）。修复：`gui.py` 构造 `live_panel_url` 时追加 `#theme=<当前主题>`；`live_panel.html` 头部加同步脚本读 hash 参数、首帧前设 `data-theme` —— 页面第一帧就用正确主题色，不再白到异步 setTheme 才恢复。
+- **侧栏整页白屏无 UI（ERR_FILE_NOT_FOUND，上一轮的回归）**：初版把主题参数写成了顶层 URL 的 `?query`（`live_panel.html?theme=day&v=…`）。WebView2 对顶层 `file://` 导航会把 `?query` 当**文件系统路径** → 文件解析失败 → `ERR_FILE_NOT_FOUND` → 整页白屏完全无 UI（用户截图实锤）。修复：顶层 `file://` URL 用 **hash fragment**（`#theme=`）传参 —— fragment 只在客户端参与、不参与文件路径解析，文件正常加载，首帧仍能读主题。⚠ 约束：顶层 `file://` 导航不可带 `?query`；子资源 query（`<script src="...?v=NNN">` / `<link href="...?v=NNN">`）不受此限，照常做缓存 bust。
+- **球 Z 序被侧栏盖住**：pywebview `resize()` 用 `hWndInsertAfter=NULL`（HWND_TOP）会把侧栏抬到 TopMost band 顶部，而球 `WS_EX_NOACTIVATE` 永不自动抬顶 → 侧栏反盖球。`ball_layer.py` 新增 Z 序保活定时器（`_topkeep_timer`，300ms 周期 `SetWindowPos(HWND_TOPMOST, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)`），球恒居 TopMost band 顶。
+- **侧栏不跟随悬浮球 + 主窗无法拖动（v0.170 Z 序保活的回归，用户反馈「侧边栏又没跟随悬浮窗了，直接卡在固定位置」「主窗口没法拖动移动位置了」）**：`ball_layer._load_user32()` 在**共享** `ctypes.windll.user32` 实例上设了 `SetWindowPos.argtypes`（cx/cy 声明成 `c_int`）。pywebview 的 `winforms.py` `move()` 也走 `windll.user32.SetWindowPos`，但它对 cx/cy 传 `None`（依赖 ctypes **未设 argtypes** 时的宽松转换）→ 每次 `ww.move()` 抛 `ctypes.ArgumentError: argument 5: NoneType` → 侧栏所有 move 失败、卡死固定位置不跟随球；主窗/侧栏都是 frameless + easy_drag（拖动靠 pywebview `move()`）→ 主窗同样无法拖动。修复：`_load_user32()` 改用**私有** `ctypes.WinDLL("user32", use_last_error=True)` 实例（模块级 `_user32` 缓存）—— argtypes 只作用于球自己的 `SetWindowPos(HWND_TOPMOST)` 调用，不再毒害 pywebview 共享的 `windll.user32`。
+
+影响面：
+- 仅球/侧栏层级相关。不改悬浮球开关、拖动、磁吸逻辑。
+- 默认值 True = 行为与 v0.169 完全一致（球恒置顶、侧栏在 dock 态因 AddOwnedForm 随主窗）；只有用户关掉「悬浮球置顶」才让两者一起降级。
+
+测试：
+- `py_compile` 全部修改的 Python 文件 + `node --check` app.js 通过。
+- 手动验收：开悬浮球 → 侧栏浮动展开 → 打开一个全屏/高窗口盖住侧栏位置 → 侧栏仍在最上面（与球同层级）；关「悬浮球置顶」→ 球与侧栏一起被高窗口盖住；重启 GUI 开关状态保留。
+- 手动验收两条回归（⚠ 不要再踩）：(1) 重启 GUI >5 次 → 侧栏正常加载、无白屏无 UI（ERR_FILE_NOT_FOUND 已修，URL `#theme=` 非 `?theme=`）；(2) 拖动主窗 + 拖动悬浮球 → 主窗能自由移动、侧栏实时跟随球（argtypes 私有 WinDLL 已隔离，不再毒害 pywebview）。
+
+--------------------------------------------------------------------------------
+
+v0.171  2026-08-25
+
+修复：
+- **侧栏延展/收缩时悬浮球反复闪烁（用户反馈「侧边栏延展或收缩时，悬浮窗会在『悬浮在侧栏上面』和『被侧栏遮挡』两个状态间反复闪烁几次」）**：根因是 pywebview `winforms.py:616` 的 `Form.resize()` 走 `SetWindowPos(handle, None, x, y, w, h, 64)` —— flag `64 = SWP_SHOWWINDOW`，`hWndInsertAfter=None`(= `HWND_TOP`)，**没有 `SWP_NOZORDER`**。这意味着侧栏**每帧 resize 都被抬到 Z 序顶**。宽度补间动画（`_anim_resize`，32 帧 × 22ms ≈ 700ms）期间，悬浮球的 Z 序保活（v0.170 `_topkeep_tick`，300ms 一次 `SetWindowPos(HWND_TOPMOST)`）又把球压回最顶 —— 两个机制交替胜出，动画期间球在「悬浮在侧栏上面」↔「被侧栏遮挡」间反复闪烁 2-3 次（700ms / 300ms ≈ 2-3 次）。`move()` 反倒是 z-order-safe（带 `SWP_NOZORDER`，winforms.py:642），**只有 `resize()` 是肇事者**。
+
+  解法：完全绕开 pywebview 的 `resize()`，新增 `panel_pool._resize_safe(w, to_w, to_h)` helper 自己调 `SetWindowPos(SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE = 0x16)` —— 不搬位置、不改 Z 序、不抢焦点；侧栏尺寸仍由我们精确控制（logical→physical 乘 `native._scale`，与 pywebview 同口径），但 resize 不再顺带把侧栏抬到顶，球恒在上层。
+  - **私有 user32 实例（沿用 v0.170 教训）**：用 `ctypes.WinDLL("user32", use_last_error=True)` 模块级缓存，不碰共享 `ctypes.windll.user32`。本次再次踩到的坑：共享实例设 `argtypes` 会让 pywebview 的 `move()` 抛 `ArgumentError: argument 5: NoneType`（pywebview 对 cx/cy 传 `None`，依赖 ctypes 未设 argtypes 时的宽松转换）→ 侧栏 move 失败 + 主窗无法拖动，与 v0.170 是同一根因。私有 WinDLL 的 argtypes 只作用于本次 `SetWindowPos` 调用，不污染 pywebview。
+  - **句柄 `ToInt64()`（沿用 v0.170 教训）**：pythonnet 3.x 的 `IntPtr` 不能直接 `int()`（抛 TypeError），必须 `h.ToInt64()`（`ball_layer._handle_int` 同惯例）。
+  - **失败回退 `w.resize()`**：任何异常回退到 pywebview 的 `resize()`（宁可回到旧闪烁也要侧栏尺寸正确；尺寸错位会挡主窗，闪烁只是视觉痛点）。
+  - **5 处调用点改走 `_resize_safe`**：`_anim_resize` 内 3 处（动画帧 1、动画帧 i、收尾精调）+ `_apply_geometry` 内 2 处（球模式仅高度变化、磁吸模式仅主窗高度变化）。`move()` 不动（本身已 z-order-safe）。
+
+实现：
+- `panel_pool.py`：新增 `_resize_safe(w, to_w, to_h)`（约 55 行含注释），5 处 `ww.resize()` 替换为 `self._resize_safe(ww, ...)`；原 `import ctypes` 仍可用、helper 局部 `from ctypes import wintypes` + 局部 `WinDLL("user32", use_last_error=True)`。
+
+影响面：
+- 仅侧栏 Z 序相关，不动球的置顶/保活机制、不动 ball_layer.py。
+- v0.170 「悬浮球置顶」开关关闭路径未变（侧栏降级到普通层级，resize 仍 z-order-safe，但因已不在 TopMost band，无闪烁可发）。
+- 顺带修掉了「仅侧栏高度变化时也顺带升 Z 序」的小副作用（磁吸 + 主窗 resize 期间，侧栏 resize 不再每帧抢顶位，对其它 OS 窗口更友好）。
+
+测试：
+- `py_compile src/relay/panel_pool.py` 通过。
+- 手动验收（⚠ 与 v0.170 同样口径，无自动化）：触发并发请求（侧栏 1→2 列）→ 球全程稳定悬在侧栏上方、无闪烁；并发结束（2→1 列）→ 球全程稳定、无闪烁；延展期间拖动球、点击球、拖主窗均不受影响。
+
+资源版本：无（纯后端，无 JS/CSS cache 变动）。
+
+开发文档：docs/dev/sidebar_resize_zorder_safe_v0.171.md（含 ⚠ 重要参考：pywebview `winforms.resize` Z 序副作用 + 共享 user32 毒害坑，标记为「所有新增对侧栏/球的 resize 路径都必须走 `_resize_safe`，不能直接调 `w.resize()`」）。
+
+--------------------------------------------------------------------------------
+
+v0.168  2026-08-25
+
+修改：
+- **磁吸「只在松手时落地」—— 拖动悬浮球完全不磁吸，按住侧栏拖也只在松手时真磁吸**：原行为：球拖到主窗右缘 → 面板跟随移动 → pywebview `easy_drag` 派发 `moved` → `_update_panel_snap` 直接执行 dock/undock；侧栏被按住拖时同样如此。需求：「拖动悬浮球时就算靠近主窗口右边缘也不磁吸，只有按住侧栏拖拽它时才磁吸。且只要没松手，磁吸就不真的发生」。修复：
+  - **池新增 4 个字段**：`self._ball_dragging`（球拖动期间 True，`_ball_drag` 入口置 True、`_persist_ball_pos` 复位）、`self._panel_dragging`（侧栏拖动期间 True，`begin_panel_drag` 置 True、`_drag_settle` 复位）、`self._pending_snap`（缓存 `{x, y, dock}` 意图）、`self._drag_settle_timer`（200ms 静默检测松手）。池新增 6 个方法：`preview_snap`、`apply_pending_snap`、`begin_panel_drag`、`arm_drag_settle`、`_drag_settle`、`set_drag_settle_callback`、`ball_dragging`、`panel_dragging`、`pending_snap`。
+  - **球拖动 → 直接屏蔽**：`_on_panel_moved` 见 `pool.ball_dragging()` 为 True 直接 return，不进入 snap 路径；球松手 `_persist_ball_pos` 复位 `_ball_dragging=False`，面板跟随到新位置的 moved 走常规 snap。
+  - **侧栏拖动 → 拖动期间只缓存、不真执行**：每次 moved 都 `begin_panel_drag`+`arm_drag_settle`（200ms 静默视为松手），`_update_panel_snap` 见 `pool.panel_dragging()` 为 True 只 `preview_snap` 缓存 `{x, y, would_dock}` 后 return。200ms 静默 → settle 定时器到点 → `_on_drag_settle_apply` 把最后缓存的意图按真实路径跑一次（dock/undock）。
+  - **递归屏蔽**：settle 触发的 snap 路径执行 `set_float_ball`/`_dock_panel`（派发 panel.moved → 反向 `_on_panel_moved`）会再次触发 settle。整体包 `_dock_panel_semaphore=True/finally False` 挡同一帧内的自递归；worker 后续派发的 moved 视为新事件，下次进入 drag-settle 路径缓存最新意图、自然收敛（不会无限递归）。
+  - **球本身不需要回调改动**：球松手用现有 `on_move_end`（绑 `_persist_ball_pos`）就够了，进 `_ball_drag` 时直接翻 True、出时直接翻 False。
+- 行为差异：拖侧栏贴近主窗右缘时，面板不再「跳一下贴右」（旧行为），而是只缓存意图、200ms 后再贴。视觉变化：拖动期间更稳，松手瞬间吸附。
+
+--------------------------------------------------------------------------------
+
+v0.167  2026-08-25
+
+修改：
+- **「最多显示的并行数量」改为滚轮选择器**：设置页「实时栏管理」组的「最多显示的并行数量」（`relay_gui_live_panel_max`）原是原生 `<input type="number" min=1 max=8 step=1>`，改为复用 v0.113k 自绘的 `wheelPicker` 组件（1-8、无单位、setter 返回 `{max}`）。`wheelPicker` 通用化为 `opts={min, max, unit, valueKey}`，默认仍 `1-600`、`"s"`、`{seconds}`（5 个超时 wheel 行为不变）。交互与超时三档一致：悬停展开（76px）、点击上下半区 ±1、滚轮 ±1、拖动 ±N、防抖 350ms 写回。组件挂载在 `wireSettingsPrefs`（连同其他控件一起绑）；初始值 `__wpSet(snap.live_panel_max, true)` 在 `refreshPrefsDynamic` 用 silent set 从后端真值回写。后端桥 `setLivePanelMax` 不变（仍 clamp 1-8、`enforce_max` 收缩超出窗口）。
+
+--------------------------------------------------------------------------------
+
+v0.166  2026-08-25
+
+新增：
+- **磁吸与悬浮球互斥**：悬浮球开关单一驱动两模式——开球=浮动（侧栏从球左上角展开，脱离磁吸），关球=磁吸（侧栏贴主窗右缘）。`_should_keep_idle_open()` 改为「磁吸模式 + 始终开启一个」才成立，浮动模式下 always_one 恒不生效，侧栏显隐由球 S1/S2 接管。`gui.set_float_ball` 同步设 `_panel_docked = not enabled`；`_update_panel_snap` 双向联动：拖侧栏近右缘→关球贴右，拖离右缘→定球位置+开球跟随。
+- **拖动实时连续跟随**：`BallLayer` 增 `on_move` 回调，`_mouse_tick` 拖动分支按 50ms 节流（~20fps）把当前 logical 位置丢给 `pool._ball_drag`（新线程跑，不写盘）→ 更新 `_ball_pos` + `_relayout()`，侧栏在拖动中连续贴住球位置，不再等松手后一次性跳。松手仍走 `on_move_end` → `_persist_ball_pos` 落盘持久化。
+- **非并发容器固定骨架**：关「允许并发」后侧栏固定显示 1 端点 + 1 完整内容 + 1 工具容器，内容可空、容器不可缺不可多。后端 `assign()` 非并发时清掉旧 rid（活跃 rid 恒 ≤1）；前端 `setConcurrent` 建 `__idle__` 空完整内容容器 + 空工具卡占位，`relayLiveClear` 非并发分支只重置内容+badge「空闲」不删容器，`findReusableDone` 把 idle 当可复用槽。
+- **悬浮窗模式侧栏与主窗解耦层级，磁吸才绑定**：侧栏原来是主窗的 WinForms `OwnedForm`（`AddOwnedForm`，v0.95），恒与主窗同层级 —— 主窗被遮挡侧栏跟着退后、主窗回顶侧栏跟着回、主窗最小化侧栏跟着藏。但浮动（球）模式侧栏从球左上角展开，是桌面独立窗（依赖球 `WS_EX_TOPMOST`），不该再跟随主窗遮挡/最小化/回顶。改为 `_sync_panel_owner()`（幂等）：磁吸 dock 态 `AddOwnedForm` 绑定同一层级，浮动（球）态 `RemoveOwnedForm` 解耦为独立顶层窗。切换点：`set_float_ball`（开球=解耦/关球=绑定）、`_update_panel_snap`（磁吸=绑定/浮动=解耦）、`_dock_panel`（force dock 必绑定，但已在 ball_mode guard 之后，浮动不会进）、`_on_panel_loaded`（初始按 `_panel_docked`）。native 变更走 `BeginInvoke` 异步（防 RecreateHandle 死锁）。
+
+修改：
+- **「始终开启一个」改名「磁吸状态下始终开启一个」**：4 语言 i18n 键 + 提示文案（en/zh-TW/ja/ko）+ 设置页 HTML 标题/提示 + 注释。语义收窄为该选项只在磁吸（dock）模式生效，浮动（球）模式下不生效。
+- **小幽灵图标加宽加胖**：`_draw_ball` 几何重设为身体横向 0.13~0.87s（宽 74%）× 纵向 0.22~0.80s（高 58%），宽>高（矮胖椭圆感）；眼睛中心 0.37/0.63、眼宽 0.060s，间距随脸宽拉开；手臂随身体加宽探出。
+
+修复：
+- **点不了悬浮窗（能拖）+ 侧边白屏（用户反馈，消息流出现后自然消失）**：根因是**并发双击创建悬浮球**。球创建/可见性 check-then-create（`_ball is None` 判定）无锁，而调用方横跨多线程 —— `PanelPool.start`(init)、`gui._on_loaded`(execute、本轮新增的启动即激活)、`gui._on_panel_loaded`(execute)、`set_live_panel`/`set_float_ball`(api worker)。两线程同时读到 `_ball is None` → 各自 `new` 一个 `BallLayer` → 屏幕出现**两个球/两个鼠标轮询器**，其中一个不被 `pool._ball` 跟踪（孤儿）：孤儿能被拖动（有自己的 poller），但 `ball_clicked` 里 `self._ball is None` → 点球无反应（实测 log：paired "start dispatched" 8ms 同位置，随后 click 全部 `ball=False`）。且两个 15ms 动画循环 + 轮询器叠加 `BeginInvoke` 到单一 UI 线程，挤占侧栏 WebView 渲染 → 侧边白屏，直到流状态稳定收敛。修复：`_create_ball` 整体 check-then-create 持 `_lock` 原子；`refresh_ball_visibility` 的 check-then-create 也持 `_lock`（RLock 可重入，`set_float_ball` 已持锁再调 `_create_ball` 无死锁）。加锁后后到者见 `_ball` 已非 None 只 show，不再产生孤儿/双球。
+- **悬浮球延迟到首条请求流才出现（用户反馈）**：侧栏窗口创建为 `hidden=True`（`PanelPool.start`），其 `loaded` 事件要等侧栏首次显示才触发 —— 浮动（球）模式空闲隐藏侧栏，`_on_panel_loaded`（唯一调 `_ensure_ball` 处）要等首条请求流才跑 → 球默默缺席到第一条流才激活。改为在主窗 `_on_loaded`（`webview.start()` 后、native 就绪）直接 `pool.refresh_ball_visibility()` 建球，不等侧栏；幂等（已建则 no-op），且经 `_ball_should_show` 门控（实时流侧栏 OFF 时不弹球）。旧的 `_on_panel_loaded → _ensure_ball` 保留为冗余 no-op（`self._ball is not None` 即返回）。
+- **启动时侧栏误显示（用户反馈「没开实时流侧栏侧栏却在」）**：三处启动强显（`PanelPool.start` / `gui._on_loaded` / `gui._on_panel_loaded`）原用 `live_panel OR always_one` —— `always_one` 默认 `True` 时，即使主开关关或处于悬浮球模式，侧栏也被强显。统一 gate 到新增 `pool._should_show_on_startup()` = `live_panel AND not float_ball AND always_one`：主开关关 → 启动不显示；悬浮球模式 → 侧栏空闲隐藏（由球 S1/S2 控制）；磁吸 + always_one ON → 常驻显示；磁吸 + always_one OFF → 首个请求再弹。
+- **拖动悬浮球卡顿（用户反馈）**：拖动流畅度由 `_MOUSE_POLL_MS` 决定（球直接跟光标，每 tick 一次 `UpdateLayeredWindow` 重定位）；30ms≈33fps 有明显卡顿感。降到 15ms（≈64fps；WinForms Timer 分辨率下限 ~15.6ms，再小被系统取整无意义）。侧栏跟随节流 `_FOLLOW_MS=50` 不变 —— 那只是「侧栏 relayout」频率，不是球定位帧率。
+- **S2 折叠后侧栏被弹回（用户反馈「延展或收回时侧栏又弹出」）**：根因是 pywebview WinForms 后端的 `move()`/`resize()` 底层 `SetWindowPos` 带 `SWP_SHOWWINDOW` —— 对**隐藏窗**调用会把窗口重新显示。S2 隐藏模式 `_hide_always_one` 置 `always_one_visible=False` 但**不**置 `always_one_manually_hidden`，流式容器增减 → `reportWidth` → `request_width` → `_relayout` → `_apply_geometry`（球分支贴球位）仍 enqueue move/resize → 侧栏被弹回。修复两层：(1) `_apply_geometry`（球模式/磁吸通用）新增 `force_apply` 参数 —— 非 show 路径且隐藏态直接跳过原生 move/resize（几何只缓存，留给 `_show_always_one` 定位），`_show_always_one` 改传 `force_apply=True` 强制应用；(2) `_hide_always_one` 折叠时 `_width_anim_seq += 1` 失效在飞的宽度补间动画 —— 否则动画线程每 22ms 连发 `resize()`（SWP_SHOWWINDOW）把隐藏窗持续弹回。
+
+影响面：
+- 仅 GUI/侧栏侧。uvicorn 8088 proxy 路径零改动。
+- 互斥改变「始终开启一个」的生效域：浮动（球）模式下该选项不再生效，侧栏显隐完全由球 S1/S2 控制。
+- 非并发模式下容器骨架恒在（内容可空），行为与并发模式「done 后销毁容器」不同。
+- 拖动跟随只在 GUI 运行时生效，无独立单测。
+
+测试：
+- `py_compile` 通过（ball_layer.py / panel_pool.py / gui.py）。
+- `node --check` 通过（live_panel.js / app.js）。
+- 悬浮球/侧栏联动为 GUI 运行时行为，无独立单测；手动验收清单见 dev doc §7。
+
+开发文档：
+- docs/dev/float_ball_magnet_follow_v0.166.md（7 节固定结构：初始指令（前序 B 互斥/改名 + 本次 C 四任务）→ 实现点 → 开发路径 → 问题 10 个（#1 拖动无实时回调 / #2 非并发容器被销毁 / #3 后端多 rid / #4 幽灵瘦长 / #5 球延迟到首条请求 / #6 启动侧栏误显示 / #7 拖动卡顿 / #8 悬浮窗与主窗未解耦层级 / #9 点不了球+白屏（并发双击创建）/ #10 S2 折叠后侧栏被弹回）→ 解法 → 偏离（无方案级）→ 实现点/⚠ 关键约束/验收清单；覆盖 panel_pool.py / ball_layer.py / gui.py / live_panel.js / app.js 全文件）。
+
+--------------------------------------------------------------------------------
+
+v0.165  2026-08-25
+
+新增：
+- **悬浮球(原生 GDI+ 分层窗)**：设置页「实时栏管理」新增「悬浮球」开关（app.js UI + 4 i18n），开启后桌面出现可拖动的真·圆球，是侧栏的锚点（侧栏从球左上角展开）。WebView2 透明两次实测失败（LWA_COLORKEY→黑底、TransparencyKey→白底椭圆，根因是 WebView2 的 D3D 合成表面无法对桌面做逐像素 alpha），改原生 WinForms 分层窗 + GDI+ 自绘：`UpdateLayeredWindow` + 32bpp premultiplied DIB（球外像素 alpha=0 透桌面），`WS_EX_LAYERED|TOPMOST|TOOLWINDOW|NOACTIVATE`。
+- **config.py 3 个 settings 字段**：`relay_gui_float_ball`（开关）+ `relay_gui_float_ball_x/y`（球位置，**逻辑像素**）。.env 键 `RELAY_GUI_FLOAT_BALL / _X / _Y`。
+- **桥 + guard**：`get_float_ball`/`set_float_ball`/`ball_clicked` 三桥；snapshot 新增 `float_ball`；`_dock_panel`/`_on_main_minimized`/`_on_main_restored` 在 `ball_mode` 时跳过 dock；`_update_panel_snap` ball_mode 分支拖侧栏→球跟随。
+- **三态可视化（v0.165e 改为 Claude 小幽灵）**：idle 幽灵正常站立静态；flow 呼吸光晕 + 轻微上下浮动；s2 幽灵 180° 倒立（脚朝天）+ 脉冲外环 + 白底红心「有流」徽标。terracotta 陶土橘主体 + 深褐竖条眼 + 波浪圆摆下摆（参考 Claude 吉祥物），几何按 min(w,h) 归一化，`fill_rr` 拼 GraphicsPath 画圆角身体。
+- **点击切换 S1↔S2**：点击球恒切换（无论是否有流）。S1→S2 进隐藏模式（侧栏展开且有流时顺带收起）；S2→S1 回正常，有流立即弹侧栏。S2 期间新请求侧栏不弹但球动画持续。
+- **拖动 + 锚点**：拖动球→侧栏从球位置展开；拖侧栏→球跟随（`set_float_ball_pos_from_panel`，logical 坐标）。位置持久化到 settings，重启还原。
+
+修复：
+- **点击球颜色没变（输入方案根因）**：原生层起步用 `Form.MouseDown/Move/Up`（WM 鼠标消息），但 `WS_EX_NOACTIVATE` + 逐像素 alpha 分层窗在本机收不到 WM 鼠标消息 → 点击无响应。参考 AHK Floatyball（用户提供的工作参考）改为**全局轮询状态机**：常驻 30ms timer，`GetAsyncKeyState(VK_LBUTTON)` 读物理按键态 + `GetCursorPos`/`WindowFromPoint` 判光标是否在球上，`IDLE→PRESSED→DRAGGING` 判点击/拖动。`SetWindowRgn`（椭圆 hit-test region）+ layered 组合同样弃用。
+- **球显示但点击无效（异步 start() 竞态）**：`_create_ball` 里 `self._ball.start()` 是 fire-and-forget 异步派发（BeginInvoke），返回时 `available` 恒为 False → 同步 `if not self._ball.available: self._ball = None` 把引用丢了；球照常异步建起来显示，但 pool 无引用 → 点击/状态推送全部 no-op（日志实锤：create_and_show 成功、present ok，但 ball_clicked 里 ball=None）。删除同步检查，pool 保留引用，真正失败由内部 `available=False` 兜底。
+- **诊断日志不可见**：GUI 默认无 --diag 时 root 无 handler，ball 的 INFO 全丢。`ball_layer`/`panel_pool` 自挂文件 handler 写 `.relay-logs/ball-debug.log`（幂等，不依赖 basicConfig/--diag）。
+- **样式脏**：旧版画完径向渐变后整球盖 30alpha 黑糊掉高光；改为 `SetClip` 只压底部 45% 暗弧，补内缘描边 + 上左 glossy 高光 + flow 游动光斑 + s2 白边红徽标；所有新建 brush/pen 均 Dispose 防泄漏。（v0.165e 整体重绘为 Claude 小幽灵。）
+
+影响面：
+- 仅 GUI/侧栏侧。uvicorn 8088 proxy 路径零改动。
+- WebView2 悬浮球桥管线（`ballSetState`/`float_ball.html`）整体消失，由 `set_state` 取代；`float_ball_url` 参数保留（签名兼容）但不建 WebView2。
+- 降级：任何原生失败静默无球（宁可无球，不要错球），不影响侧栏主流程。
+- config 坐标口径：`relay_gui_float_ball_x/y` 是**逻辑像素**（与侧栏几何同口径），注释原写「物理像素」已修正。
+
+测试：
+- `py_compile` 通过（ball_layer.py / panel_pool.py / gui.py / config.py）。
+- 悬浮球为 GUI 运行时行为，无独立单测；手动验收清单见 dev doc §7。行为经 `.relay-logs/ball-debug.log` 实测验证（create/ensure_gdi/present/press/click/set_state 全链路）。
+
+开发文档：
+- docs/dev/float_ball_native_layer_v0.165.md（7 节固定结构：初始指令 → 实现点 → 开发路径 → 问题 6 个（WebView2 透明×2 / 点击收不到 / 日志不可见 / 异步竞态 / 样式脏）→ 解法 → 偏离（输入方案全局轮询）→ 实现点/⚠ 关键约束/验收清单；覆盖 config.py / ball_layer.py / panel_pool.py / gui.py / app.js / float_ball.html 全文件）。
+
+--------------------------------------------------------------------------------
+
+v0.164  2026-08-25
+
+修改：
+- **总览卡片「平台分布」→「协议分布」**：v0.143 起该卡已按客户端入口 wire 拆分，名字滞后于语义。`app.js` CARD_DEFS 标题 + 4 个 i18n 字典（en `Protocol breakdown` / zh-TW `協議分佈` / ja `プロトコル分布` / ko `프로토콜 분포`）同步改；`index.html` 静态标题同改；web 资源 cache bump 到 `?v=20260825-01`。
+- **侧栏不占独立任务栏位**：侧栏是独立 WebView2 顶层窗口，任务栏出现第二个按钮。新增 `_hide_panel_taskbar()`（`_on_panel_loaded` 调用）：`BeginInvoke` 异步投递到 UI 线程 + Win32 `SetWindowLongPtrW` 改扩展样式（去 `WS_EX_APPWINDOW`、加 `WS_EX_TOOLWINDOW`），不重建句柄、无闪烁。
+- **关闭「始终开启」后侧栏按请求流自动显隐**：有请求流时侧栏出现，请求均结束后消失。三处：① `PanelPool.start()` 恢复按「始终开启」开关控制启动显隐（移除 v0.125 无条件展开）；② `assign()` 在「始终开启 OFF（自动显隐模式）」下清掉 `always_one_manually_hidden`——手动 X 不再粘滞，新请求流到达即弹出；③ `_clear_rid()` 最后一个 rid 清掉后立即隐藏侧栏（不等 watchdog 下一 tick）。
+
+修复：
+- **`ShowInTaskbar = False` 导致 GUI 假死（本次事故）**：第一版任务栏实现直接设 `panel_native.ShowInTaskbar = False`，该 setter 在窗口 handle 已创建且显示后赋值会触发 WinForms `RecreateHandle`（重建句柄）且需回主 UI 线程执行；而 `_on_panel_loaded` 跑在 WebView2 execute 线程、UI 线程此刻正卡在 `create_window` 的 `browser.Show()`（WebView2 初始化，消息泵未启动）→ RecreateHandle 跨线程 SendMessage 无人泵 → execute 线程永久阻塞 → GUI 卡死（`Responding: False`）。py-spy 实锤：Thread-11 卡在 `ShowInTaskbar = False` 那行，MainThread 卡在 `winforms.py:834 create_window`。改用 Win32 `SetWindowLongPtrW` 改扩展样式，不重建句柄；`BeginInvoke` 异步投递不阻塞 execute 线程。
+
+影响面：
+- 仅 UI/GUI 侧：总览卡文案、侧栏任务栏行为、侧栏显隐时机。`always_one_manually_hidden` 粘滞修复只在「始终开启 OFF」生效，ON 的持久面板语义（X 掉就一直关着）不变。
+- uvicorn 8088 proxy 路径零改动，本版本不影响转发。
+
+测试：
+- `py_compile` 通过（panel_pool.py / gui.py）。
+- 面板显隐为 GUI 运行时行为，无独立单测；手动验收清单见 dev doc §7。
+- GUI 重启实测正常（任务栏修复无死锁）。
+
+开发文档：
+- docs/dev/sidebar_autoshow_taskbar_v0.164.md（7 节固定结构：3 条需求 + 卡死事故 → 根因两处 → 决策 → 事故复盘 → 解法 → 偏离 → 实现点/验收清单）。
+
+--------------------------------------------------------------------------------
+
+v0.163  2026-08-25
+
+修复：
+- **cross-wire 流式路径 `settings` 未定义 → NameError 掐断整条流**：opencode 走 openai 入口发消息，relay 成功转发到上游（MiniMax 返回 200）后，`_relay_cross_wire` 的 `gen()` finally 里 `settings.relay_save_messages` 引用未定义变量，直接 NameError，客户端拿到的是被掐断的流 → opencode 表现为「反复 `[Image #N]` 重试」。`_relay_cross_wire` 入口补 `settings = app_state.settings`，修复 2899（非流式）/3160（流式）两处。
+- **上游 wire 误判导致三协议转换不触发**：`dp官方`（DeepSeek，`url=https://api.deepseek.com/anthropic`、`wire=None`）被 `infer_wire_for_platform` 按「进门平台段」错判成 `openai-chat`，恰好等于 opencode 的 client_wire → 判定同 wire 走直通而非 cross-wire 转换，硬拼出 `https://api.deepseek.com/anthropic/v1/chat/completions` → 上游 404 `Not Found`。新增 `infer_wire_from_url`，`effective_wire` 在 `wire=None` 时先按 base URL 命名空间认语言（`/anthropic`→anthropic-messages、`/openai`→openai-chat），认不出才退回平台段推断（存量配置 zero 变化）。
+- **adapter SSE 路径 `settings`/`agent`/`raw_ua` 未定义（同源回归）**：`_anthropic_adapter_relay_sse` 的 `gen()` finally 里 `db.record(agent=..., raw_ua=...)` 和 `settings.relay_save_messages` 引用未定义变量（v0.155/v0.157 加 `agent`/`raw_ua`、v0.120 加 `relay_save_messages` 时漏了该函数）。该函数补 `settings`/`agent`/`raw_ua` 三个参数（默认 `""`），调用方 `_anthropic_adapter_relay` 透传；`_anthropic_adapter_relay` 入口补 `settings = request.app.state.settings`。此为测试 `test_proxy_integration.py` 暴露的潜伏 bug。
+
+影响面：
+- 仅影响 `wire=None` 且 base URL 带 `/anthropic` 或 `/openai` 命名空间的上游（如 DeepSeek anthropic 端点）。显式声明 wire 的上游一律不被 `infer_wire_from_url` 覆盖，行为 zero 变化。
+- cross-wire / adapter 两条流式路径的 `settings`/`agent`/`raw_ua` 泄漏都是「把该有的绑定补上」，不改运行语义。
+
+测试：
+- 手写验证脚本：`dp官方` 修复后 `effective_wire(openai)=anthropic-messages` → 触发 cross-wire 转换 → 拼出 `api.deepseek.com/anthropic/v1/messages`；对照修复前 `=openai-chat` → 直通 → 拼出 `.../anthropic/v1/chat/completions`（404）。
+- 相关测试全绿：test_wire / test_wire_3way / test_wire_3way_stream_thinking / test_proxy_integration（含此前失败的 adapter SSE 用例）/ test_proxy_thinking / test_parsers / test_dispatch / test_endpoint_robustness / test_upstreams_file / test_auth_header / test_headers，共 305 用例通过。
+- 注：pytest 组合跑 temp 目录被锁（`pytest-of-weizheng/pytest-current` WinError 5）属测试基建问题，逐文件/逐组用独立 `--basetemp` 单独跑通过后记录不深追。
+
+开发文档：
+- docs/dev/wire_url_namespace_infer_v0.163.md（7 节固定结构：现象→定位→实现点→问题→解法→偏离→实现点/验收清单）。
+
+--------------------------------------------------------------------------------
+
+v0.162  2026-08-24
+
+修改：
+- **撤回 v0.161 全局三档开关**：v0.161 在「平台流量」卡片顶部加的全局胶囊开关（localStorage `agent-view-mode`）整段撤回 —— 用户原话：「是在点击某一个平台的设置页中单独设置其如何显示而不是统一设置」。全局开关是「统一设置」语义，与「每个平台单独设置」诉求冲突。
+- 改为 **per-row 三档**（v0.162 新增）：在总览点击某平台弹出的编辑 modal 里，新增「显示模式」三档胶囊（均显示 / 显示次数 / 显示token），与显示名 / 色板并排。每行只改自己那一行的 meta 文案显示方式，互不影响。
+- `agent_aliases` schema 升级：`{name, color}` → `{name, color, view}`。view ∈ `{"both", "requests", "tokens"}`，非法值（不在白名单 / None / 非字符串）静默丢弃，默认 `both` 行为。`Settings.agent_aliases` 类型保持 `dict[str, dict[str, Optional[str]]]`（Optional 覆盖 view 字段，无需改）。
+- `renderAgent` 改读 `agentRowView(raw)`（per-row），按 view 模式决定 meta 文案（`requests` 仅 `数字 请求`、`tokens` 仅 `X tokens`、`both` 两者都显示）。
+- 设置页「平台别名」`__agentAliasSave` 写时保留既有 `view`（用户在 modal 改过显示模式 → 设置页只改名字写回来时不丢）。
+- 后端 `save_agent_aliases`（`config.py`）+ `apply_to_settings`（`upstreams_file.py`）：view 字段白名单校验，落 / 读对称。
+
+测试：
+- test_upstreams_file.py 新增 2 用例：v0.162 view 字段 roundtrip（白名单值 / 非法值 / None / 缺失 全部正确处理）；load 侧 fail-open（非法 view 静默丢弃，不阻塞 load）。
+- test_agent_sniff + test_upstreams_file 共 87 用例全绿（+2 v0.162）。
+
+资源版本：
+- styles-20260817.css 戳保持 v0.161 的 30（v0.162 没改 CSS，.card-title-row 已撤回）。
+- app.js ?v=20260824-30 → ?v=20260824-31。
+
+不在本次范围：
+- 不在设置页「平台别名」列表里加三档（用户原话确认位置 = 总览 modal）。
+- v0.161 的 `getAgentViewMode` / `setAgentViewMode` / `mountAgentViewSwitch` / `.card-title-row` 等代码全部撤回。
+- 不影响 30 天统计页「按平台流量」块（仍只看 agent 名，不掺 per-row 计数 / token 模式）。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md 追加 v0.162 变更节（撤回原因 + per-row 设计 + schema 升级 + 测试覆盖）。
+
+--------------------------------------------------------------------------------
+
+v0.161  2026-08-24
+
+新增：
+- 总览「平台流量」卡片顶部加 3 档显示模式开关：**显示次数** / **显示token** / **均显示**（默认）。用户原话：「"显示次数""显示token""均显示"三极按钮」。三档直接切换右侧 meta 文案，不影响徽标本身 / 点击编辑入口 / 卡片其它部分。
+- 复用 `.consume-switch` 胶囊分段控件样式（与透传模式开关视觉语言一致），不引入新 CSS 类。
+- localStorage 持久化键 `agent-view-mode`，值 `"requests" | "tokens" | "both"`；切换仅重渲染 `card-agent-body` 行，不触发整页 renderAll（不抢焦点、不抖其他卡、不重拉数据）。
+
+测试：
+- test_agent_sniff + test_upstreams_file 共 85 用例全绿（后端零改动 → 测试不需新增）。
+- node --check app.js 通过；jsdom harness 暂未覆盖（UI 行为，列入「行为验收清单」）。
+
+资源版本：
+- styles-20260817.css ?v=20260824-29 → ?v=20260824-30。
+- app.js ?v=20260824-29 → ?v=20260824-30。
+- index.html 同步 bump（?v= 只存在于 script/link 引用）。
+
+不在本次范围：
+- 不影响 30 天统计页「按平台流量」块（treemap/pie 维度只看 agent 名，不掺计数 / token 单双视图）。
+- 不影响设置页「平台别名」编辑入口（仍走 modal，颜色 + 名字与显示模式正交）。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md 追加 v0.161 变更节（三档开关 + 持久化 + 范围隔离）。
+
+--------------------------------------------------------------------------------
+
+v0.160  2026-08-24
+
+修改：
+- 总览「平台流量」编辑 modal 的色环改 **Material Design 风格 12×8 离散色板**（用户给产品截图要求改成点选）。v0.159 的 HSL/饱和度/亮度 slider + HEX 直接编辑整套替换为：12 色相列 × 8 色阶行 = 96 个色块网格，hover 放大 1.12、点击直接设 stateColor、当前色块加 `is-selected` 外环。
+- 色板调色原则：12 列覆盖红/橙/琥珀/黄/青柠/绿/青/天蓝/蓝/紫/品红/粉（每个色相从 Tailwind 500 系族取 8 个 lightness 阶），徽标底色需白字可读 → 中间行 40-65% lightness 饱和度最高，两端做柔和渐变；最末两行适度收饱和避免压死对比度。
+- 状态管理简化：删 `__hslToHex` / `__hexToHsl`（约 30 行数学 + 滑块双向同步代码），`stateColor` 直接存 `"#rrggbb"` 字符串，保存写入 `agent_aliases[raw] = {name, color}` 时序列化器照旧。后端、bridge、测试一概不动。
+- 「重置颜色」按钮语义保留：抹掉 `stateColor` → `null`，inline style 移除 → css 默认 `.agent-{raw}` 配色生效。
+
+测试：
+- test_agent_sniff + test_upstreams_file 共 85 用例全绿（v0.160 后端零改动 → 测试不需新增）。
+- node --check app.js / py_compile 全部通过。
+
+资源版本：
+- styles-20260817.css ?v=20260824-28 → ?v=20260824-29。
+- app.js ?v=20260824-28 → ?v=20260824-29。
+- index.html 同步 bump（?v= 只存在于 script/link 引用）。
+
+不在本次范围：
+- 不支持自定义 / 任意 HEX 颜色（必须从预设 96 色调色板中选）。HEX 直输入口永久下线（用户嫌 HSL slider 太繁琐，色板 96 色已覆盖主流徽标配色）。
+- 色板常量化（`__MATERIAL_SWATCHES`）：不做动态生成（无好处）；色相列与色阶行硬编码 96 个 hex。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md 追加 v0.160 变更节（色板设计 + 删掉的代码 + 行为验收）。
+
+--------------------------------------------------------------------------------
+
+v0.159  2026-08-24
+
+修改：
+- 总览「平台流量」点击行为升级 v0.158 inline-edit → **弹出编辑 modal**（用户原话：「修改点击某个条目的行为为，弹出编辑窗口，可以输入名字，选择颜色」）。同一 modal 承载两个字段：显示名 + 完整色环（hue 0-360 + 饱和度 + 亮度 slider + HEX 直接编辑 + 实时预览）。三个动作按钮：保存 / 重置颜色（抹掉 color 落回 css 默认）/ 删除该别名（落回原名 + 默认色）。
+- `agent_aliases` 存储 schema 升级：`{raw: <string>}` → `{raw: {name: str, color: str|None}}`。color 是 CSS color 字符串（hex / hsl / named 皆可），空或 None 时徽标走 css 默认配色。后端 `save_agent_aliases` 改签名 `dict[str, dict]`；`upstreams_file.apply_to_settings` 解析兼容旧 string value（自动升级为 `{name: <v>, color: None}`，下次写盘落新格式 —— 配置文件无需手动改）。
+- 渲染层：`renderAgent` 给徽标加 `style="background:<userColor>"` 覆盖 css 默认；`agentBadgeColor(raw)` 新函数读用户色。inline style 优先于 `.agent-{raw}` css 默认，color 为 None 时 inline style 不写 → css 生效。
+- 共用 `agentAliases` 缓存：总览 modal 和设置页「平台别名」区都改写同一份 `next[raw] = {name, color}` 对象，避免双 Settings 副本陷阱。设置页 `__agentAliasSave` 写时保留既有 color（用户在总览改过颜色 → 设置页写回时不丢）。
+
+测试：
+- test_upstreams_file.py 新增 3 用例：v0.159 dict schema roundtrip（空 name / 无 name / 旧 string / 数字 / 非法 value 全部正确丢弃；空 / None color 落 {color: None}）；旧 string value 迁移（load 升级 + 下次写盘新格式）；非对象 + 空 name + 数字等 fail-open 用例。
+- jsdom harness 暂未覆盖（UI 行为，列入「行为验收清单」）。
+- node --check app.js / python py_compile 全部通过。
+
+资源版本：
+- styles-20260817.css ?v=20260824-27 → ?v=20260824-28。
+- app.js ?v=20260824-27 → ?v=20260824-28。
+- index.html 同步 bump（?v= 只存在于 index.html 的 script/link 引用）。
+
+不在本次范围：
+- v0.158 inline-edit 入口下线（被 modal 取代）。原先 `__agentRowEditing` / `__agentRowIsEditing` 守卫 + 事件委托整套删除。
+- 不支持就地修改原始 agent 名（原始名落库不可改 —— 那是「UA 归类」该做的事）。
+- 设置页「平台别名」区保留只改 name 的入口（不再提供 inline 颜色编辑 —— 颜色改走总览 modal，更直观）。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md 追加 v0.159 变更节（modal + schema 升级 + 共用缓存）。
+
+v0.158  2026-08-24
+
+修改：
+- 总览「平台流量」就地重命名（v0.155/v0.156 已有功能 v0.158 升级体验）：点某行徽标 → 同行变输入框 + 保存/取消 + ESC 取消 + Enter 提交，右侧「XX 请求 · YY tokens」统计保持不动。复用 `agentAliases` 缓存（与设置页「平台别名」同一份，原始 agent 名落库不变）；保存走同一条 `api.saveAgentAliases` 链路 → Python `save_agent_aliases` 原子写 upstreams.json。
+- 编辑期间 500ms poll tick 不刷该卡（`__agentRowEditing` 守卫在 `renderAgent` 顶部），输入框不被冲掉；保存/取消/ESC 都会清守卫，下次 tick 恢复重建。
+- 事件委托：`document.addEventListener("click", …)` 按 `data-agent-row` 找到行，按 class 区分"徽标/保存/取消"，避免每个徽标重复绑定。键盘 Esc / Enter 委托在 `keydown` 监听。
+
+测试：
+- jsdom harness 暂未覆盖（UI 行为，列入「行为验收清单」）。
+- node --check app.js / python py_compile 全部通过。
+
+资源版本：
+- styles-20260817.css ?v=20260824-26 → ?v=20260824-27。
+- app.js ?v=20260824-26 → ?v=20260824-27。
+- index.html 同步 bump（?v= 只存在于 index.html 的 script/link 引用）。
+
+不在本次范围：
+- 不动设置页「平台别名」/「UA 归类」入口，两套入口共用同一份 agentAliases 缓存，不引入双 Settings 副本陷阱。
+- 不支持就地修改原始 agent 名（原始名落库不可改 —— 那是「UA 归类」该做的事）。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md 追加 v0.158 变更节（总览就地重命名）。
+
+v0.157  2026-08-24
+
+修改：
+- 「UA 归类」用户规则：用户在设置页把真实出现过的 User-Agent 整串归到一个平台名（可新建或并入已有），日后同一种 UA 头的请求都算这个平台。规则存 upstreams.json 顶层 `ua_rules`（整串 UA → 平台名 dict），中继进程在请求入口 `resolve_agent(raw_ua, settings.ua_rules)` 消费，**精确命中优先于白名单 + 动态抽 token + 兜底桶**（优先级最高），未命中回落 sniff_agent。
+- 新增 `requests.raw_ua TEXT` 列（MIGRATIONS 追加，旧库 ALTER TABLE，旧行 NULL 预期）。落库 raw UA 原文，不参与聚合，仅供设置页列出真实出现过的 UA 让用户归类。proxy 入口从 User-Agent 头取原文 → 全链透传：`proxy_legacy.py` 入口 / `_InFlight` / `_register_inflight` / `_anthropic_adapter_relay` / `_reject_dispatch` / `_relay_cross_wire` 6 个函数签名加 `raw_ua` 参数，15 处 record 调用点全部补 `raw_ua=raw_ua`。
+- 中继子进程消费 ua_rules（不是纯展示层），所以 GUI 桥 `save_ua_rules` 写盘后必须 POST `/api/upstreams/refresh` 通知中继子进程 reload（仿 `add_upstream` 尾部通知，同套 `_ur.Request` 单 socket 2s 超时静默兜底）。
+- 设置页新增「UA 归类」区：列出最近出现过的 UA（`fetch_recent_uas` 取 distinct raw_ua，按最后出现时间倒序，最多 100 条）+ 已配置规则 key（含未在最近列表里的老规则），每行平台名 input + datalist 提示（已有平台名 + "其它"），留空 = 删除该规则。30s TTL 防 500ms poll tick 反复打桥。
+
+测试：
+- test_agent_sniff.py 新增 9 用例：resolve_agent 用户规则赢白名单 + 整串精确匹配大小写敏感 + 去空白 + 回落 sniff_agent + 空白 value 跳过；record(raw_ua) 落库 + 不传 NULL；fetch_recent_uas distinct 去重 + 按最后 ts 倒序 + NULL/空串跳过 + limit 生效 + 空库返回 []。
+- test_upstreams_file.py 新增 3 用例：ua_rules JSON 解析（fail-open：非对象忽略 / 空值条目跳过）、顶层非 dict 整个键 warn + 不阻塞 load、save_ua_rules 原子写 + strip 过滤 + 读回一致 + 旧结构不被破坏。
+- node --check app.js / python py_compile 全部通过。
+
+资源版本：
+- styles-20260817.css ?v=20260824-25 → ?v=20260824-26。
+- app.js ?v=20260824-25 → ?v=20260824-26。
+- index.html 同步 bump（?v= 只存在于 index.html 的 script/link 引用）。
+
+不在本次范围：
+- 不改 `agent` / `platform` / `endpoint` 字段语义与聚合口径，ua_rules 是新独立维度（精确命中时替换 agent 值）。
+- 失配语义：用户规则按**整串精确匹配**（子串会误伤别工具），不走子串包含。
+- 旧库（迁移前无 raw_ua 列）启动正常，旧行 NULL；设置页只展示存量之后新到的请求对应的 UA。
+- ua_rules 不做 GUI/中继跨进程实时同步之外的额外通知（save 后 POST refresh 一次够用，下个请求就生效）。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md 追加 v0.157 变更节（UA 归类用户规则 + raw_ua 列 + resolve_agent + 中继进程消费链路）。
+
+v0.156  2026-08-24
+
+修改：
+- 「平台识别器」兜底行为升级：有 UA 的请求不再归兜底桶——白名单命中存规范名（claude-code / opencode / codex / openclaw / ai-sdk）；白名单未命中但**带 UA 头**时，从 UA 抽第一个有意义的 product token 动态建新平台（Bun/1.3.14→bun、python-httpx/0.28.1→python-httpx、undici→undici、clawx/0.5.2→openclaw 白名单优先）；**只有完全无 UA 头的请求**才归兜底桶。
+- 兜底桶改名「未知」→「其它」（AGENT_UNKNOWN 常量 + 前端 agentDisplayName fallback + 设置页别名区文案同步）。init() 加一次性回填 `UPDATE requests SET agent='其它' WHERE agent='未知'`（仿 v0.143 endpoint backfill，幂等），存量「未知」行自动并到新桶。
+- 动态抽 token 规则（agent.py `_extract_ua_token`）：跳过浏览器/OS 基础设施标记（Mozilla / AppleWebKit / KHTML / Chrome / Electron / Safari / Windows NT / x64 …）、带括号的注释 token（如 "(Windows NT 10.0; zh-CN)"，否则 PowerShell UA 会抽出 "zh-cn" 而非 Windowspowershell）和纯数字 token；抽出的名字转小写、去版本号。一个没进白名单的 Electron 桌面应用会得到它自己的 app 名，而不是 "mozilla"/"chrome"。
+- 实测 relay_trace.log 52,271 条 UA：原 36% 盲区（Bun/1.3.14 26.7%、python-httpx、curl 等）全部转化为独立平台，兜底桶归零；clawx 修复（v0.155 后补）保留。
+
+测试：
+- test_agent_sniff.py 重构为 32 用例：动态 token 参数化（Bun ×2 / undici / node-fetch / Python-urllib / python-httpx / python-requests / curl / axios / testclient）、Electron UA 跳基础设施用例、纯基础设施 UA 兜底用例、init 回填「未知」→「其它」+ 幂等用例；无 UA（None / 空串 / 纯空白）→「其它」。
+- node --check app.js / python py_compile 全部通过。
+- 已知存量坏测试与本次无关（不修）：test_tui.py 3 个 endpoint 旧 schema 用例、test_stats.py 1 个 NameError（v0.143/v0.155 遗留）。
+
+资源版本：
+- styles-20260817.css ?v=20260824-24 → ?v=20260824-25。
+- app.js ?v=20260824-24 → ?v=20260824-25。
+- index.html 同步 bump（?v= 只存在于 index.html 的 script/link 引用）。
+
+不在本次范围：
+- 不改现有 `platform` 字段语义、不动计量/quota 逻辑。
+- 不识别同一工具的不同版本（claude-cli 2.8.4 vs 999.0.0-restored 都归 claude-code）。
+- 存量已归「其它」的旧行（此前「未知」）不回溯到动态平台（DB 只存归类结果，不存原始 UA）。
+- 别名映射仍纯展示层，不做 GUI/中继跨进程实时同步。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md 追加 v0.156 变更节（兜底行为升级 + 桶名改名）。
+
+v0.155  2026-08-24
+
+修改：
+- 新增「平台识别器」（src/relay/agent.py）：请求体只声明协议、不自报工具身份（Claude Code 和 OpenCode 都走同一 /anthropic 入口，body 无法区分），User-Agent 是唯一协议无关的身份信号——从每个请求的 UA 识别客户端工具，识别出 claude-code / opencode / codex / openclaw / ai-sdk 五类，认不出的统一存字面量「未知」。识别算法 = 小写子串匹配，有序规则表首个命中生效（opencode 必须排在 ai-sdk 前，因 OpenCode 的 UA 同时含 ai-sdk 字样）。用真实 relay_trace.log 52,319 条 UA 实测：claude-code 58.2% / opencode 5.8% / ai-sdk ~0% / 未知 36%（最大盲区 Bun/1.3.14 占 26.7%，Bun 运行时默认 UA 无法反查工具）。
+- `requests` 表新增 `agent TEXT` 列（MIGRATIONS 追加，旧库自动 ALTER TABLE，旧行 NULL）。`agent` 是独立于既有 `platform`（入口路径）的新维度：platform=anthropic/openai，agent=claude-code/opencode/…，两字段都落库互不影响，既有统计/计量逻辑全部保留。
+- `db.record(...)` 加 `agent` 参数，proxy 全链透传：`proxy_legacy.py` 入口 `sniff_agent(request.headers.get("user-agent"))` → `_InFlight`/`_register_inflight` → `_anthropic_adapter_relay`/`_reject_dispatch`/`_relay_cross_wire` 各带 `agent` 参数，10 处 record 调用点全部 `agent=agent`。
+- 聚合层：`tui.py` 新增 `fetch_agent_totals`（GROUP BY `COALESCE(NULLIF(agent,''),'未知')`，NULL/空串/未识别并桶）；`fetch_aggregate_by_dim` 的 valid_dims + key_expr 加 `agent` 分支（NULL 归「未知」，与 model 的 `(无)` 同款兜底）。`routers/stats.py` + `gui.py` 桥的 dim 白名单加 `"agent"`，/stats/aggregate?dim=agent 可用。
+- 总览页新增「平台流量」卡片（CARD_DEFS 加 agent，renderAgent 读 snapshot.by_agent 渲染，行结构复用 .platform-row，徽标用新 .agent-badge 按工具固定配色）。
+- 统计页新增「30天按平台流量」块：固定 `statsAggregate("agent","30d",0,"relay")`（与 dim/range/模式选择器解耦，agent 只存在于转换库）+ 30s TTL 防 500ms poll tick 反复打桥，rows 经别名映射后复用 renderPie。
+- 别名/重命名 = 纯展示层（不写回 agent 列）：写回会不可逆丢失原始归类证据，且改名前的行是旧名、改名后的行是新名会把聚合撕成两半。原始 agent 名落库不变，`agent_aliases`（原始名→显示名）映射存 upstreams.json 顶层，前端渲染时应用——改名后旧数据自动按新名显示，且避开 GUI/中继双 Settings 副本陷阱。设置页新增「平台别名」区：列出已出现的 agent + 「未知」，每行可编辑显示名，保存走 api.saveAgentAliases → config.save_agent_aliases 原子写盘。
+- 别名持久化链路：upstreams_file.apply_to_settings 解析顶层 `agent_aliases`（fail-open），config.Settings 加字段 + save_agent_aliases helper（strip 过滤非空 k/v，save_upstreams_json mutator 模式）。桥方法 get_agent_aliases / save_agent_aliases（仿 save_quick_switch 模板）。前端启动 loadAgentAliases 读一次缓存。
+
+测试：
+- 新建 tests/test_agent_sniff.py（23 用例）：sniff_agent 已知/未知 UA 参数化（含真实 claude-cli 两版本、opencode、Bun、curl、None、空串）、大小写不敏感 + opencode 优先级、record(agent) 落库 + 缺省 NULL、fetch_agent_totals 三路并桶 + errors 计数、fetch_aggregate_by_dim(agent) 口径 + 非法 dim。
+- tests/test_stats.py 的 test_aggregate_invalid_dim valid 集合补 `agent`（特性使然）。
+- node --check app.js / python py_compile 全部通过。
+
+资源版本：
+- styles-20260817.css ?v=20260824-23 → ?v=20260824-24。
+- app.js ?v=20260824-23 → ?v=20260824-24。
+- index.html 同步 bump（?v= 只存在于 index.html 的 script/link 引用，bump 一次全覆盖）。
+
+不在本次范围：
+- 不改现有 `platform` 字段语义、不动计量/quota 逻辑。
+- 不识别同一工具的不同版本（claude-cli 2.8.4 vs 999.0.0-restored 都归 claude-code）。
+- 别名映射不做 GUI/中继跨进程实时同步（纯展示层）。
+- live 面板、实时流侧栏不带 agent 字段。
+- 已知盲区：Bun/1.3.14 等运行时默认 UA 无法识别；DB 只存归类结果不存原始 UA，规则升级后存量行不可重分类（后续可加 raw_ua 列）。
+
+开发文档：
+- docs/dev/agent_sniffer_platform_traffic_v0.155.md（新建，7 节结构：UA 选型依据 → agent 独立维度 + 别名纯展示层 → sniff 规则表 → 10 处 record 透传 + 聚合 + 前端三块 → 真实流量识别率实测 + 7 个实现问题 → 偏离 2 处细节 → 验收清单）。
+
+--------------------------------------------------------------------------------
+
+v0.153  2026-08-24
+
+修改：
+- 统计页单模型 30 天调用分布 tooltip 修复：旧版 tooltip 颜色绑主题变量，深色主题看不清；新版背景 `rgba(20,20,22,.94)` + 文字绝对白 `#fff` + 边框 `rgba(255,255,255,.08)`，完全不绑 `[data-theme]`，3 主题统一可读。空白天（数据 0）显示「日期 + 无数据」行（italic 65% opacity），不再隐藏 tip。tick 500ms 重画 SVG 时 tip 不被擦：DOM 拆 `.md-svg` + `.md-tip` 两个 sibling，模块级闭包 state（`mdLastHoverIdx` / `mdHoverVisible`）记上次悬停索引 + 可见性，render 末尾 `if (mdHoverVisible) showTip(lastIdx)` 恢复；切 chip（全部↔单模型）同一逻辑，状态不丢。
+- 「总览 → 平台分布」固定 3 行：旧版 `fetch_totals` GROUP BY platform 把 openai 全塌一行，加上 opendaw/openclaw 等未知 platform 混进，5+ 行飘忽。新版 GROUP BY `(platform, endpoint)` + `EMPTY = {anthropic, openai:openai-chat, openai:openai-responses}` 常量后处理补 0 占位；`PLATFORMS = ("anthropic", "openai")` 过滤未知 platform 不入卡片。前端 key 拆 `[plat, endpoint]`，label `anthropic` / `openai·chat` / `openai·responses`，badgeCls 加 `platform-endpoint-openai-chat` / `platform-endpoint-openai-responses` 色块（用 `var(--platform-openai)` + `color-mix` 区分 chat / responses）。
+- 「历史」+「上游」页面下方留白修复：删 `.card-body-list { max-height: calc(70vh / var(--page-zoom, 1)) }` cap；上游 view 补 flex chain（history view 已有 `.view:not([hidden]) → .grid → .glass-card → .card-body` flex 链路，上游 view 补同款，让 card 撑满 main）。
+- 配置页「转换模式」加「示例」subsection（与透传模式对称）：复用透传模式已有的所有 i18n key（「示例：」/「Deepseek 的请求地址（来自官网信息）」/「不走中继时的请求填写」/「走中继时，该请求需要改写为：」/「走中继时的请求填写」），无需新增翻译。内容含 Deepseek 请求地址 cfgTable 4 行 + 「不走中继时」cfgCode（deepseek 真实 URL + key）+ 「走中继时」cfgCode（`AUTH_TOKEN="auto"` + `BASE_URL="${base}/anthropic"` + `MODEL="auto"`）。转换模式核心语义：中继选 upstream/model，client 端只放占位（与透传模式的 @@ 格式正交）。
+- 配置页示例代码内特殊字符黄底高亮（增强注意力）：`cfgCode(label, code)` 扩展为 `cfgCode(label, code, hlTokens)`。转换模式「走中继时」block 传 `["auto"]`（两处 `"auto"` 字面量被黄底高亮）；透传模式「走中继时」block 传 `["@@"]`（`AUTH_TOKEN` 中 `@@` 分隔符被黄底高亮）。CSS `.cfg-hl`：默认 `#b45309` 文字 + `rgba(245,158,11,0.18)` bg + bold 600；`[data-theme="dark"]` 切 `#fde68a` + `rgba(245,158,11,0.22)`。实现细节：先 `escape(code)` → 转义后字符串按 token 长度倒序遍历 → token 也 escape 再 regex 替换，避免 `<` 之类字符破坏 HTML。
+- 新建上游 → 「预设配置」下拉全部隐藏：6 个 `<option>`（sentinel `value=""` + 5 个供应商预设）全部加 `hidden` attribute，点开下拉是空白。`value=""` sentinel 必须保留：JS 的 `if (!p) return`（change 监听）+ `ps.value = ""`（wire/auth 手动调整时清预设）都依赖这个哨兵。`UPSTREAM_PRESETS` 字典 + `applyPreset` 逻辑完全不动——上线不删，便于日后恢复。sentinel option 文本保持空字符串（用户接受「点击后是空白」为预期视觉，不加 placeholder 文字避免「自定义」语义残留）。
+- 修实时栏「始终开启一个」关掉后侧栏再也不弹出的 bug（panel_pool.py `enforce_always_one`）：旧逻辑关开关时除了 `_hide_always_one()` 还把 `always_one_manually_hidden = True`，该 flag 本意是「用户手动 X 掉侧栏」，一旦置位 `_apply_geometry` 恒 return False → `assign(rid)`（流式新请求）调 `_show_always_one` 也被拦，侧栏永远不重渲染。新版关开关只 hide、不置 flag；手动 X 两路径（`hide_panel` / `_on_always_one_closing`）照常置位，idle 隐藏仍由 watchdog 负责（那里本就把 flag 复位）。效果：关掉开关后新流式请求到达，侧栏按预期重新弹出。
+
+测试：
+- 实时栏 always_one 修复：关开关 → 面板隐藏；新请求 assign() → `_show_always_one()` 放行 → 侧栏重新弹出（手动 X 路径 flag 仍置位，行为不变）。
+- 手动验证：headless Edge 探针（`_probe_blank.py` + `_probe_model_daily.py`）渲染各视图 HTML，DOM 结构含 `.md-tip` / `.cfg-hl` / `.platform-endpoint-*` 等新 class；统计页 tooltip 在 tick 后保留；空白天显示「无数据」。
+- node --check app.js / css 文件位置无破坏。
+- 「不走中继时的请求填写（以 claude code 为例）：」等透传模式已有的 i18n key 在转换模式块复用，5 语切换所有 t() 翻译正确（无新增 key）。
+- i18n 翻译补 1 条 key `"无数据"` —— tooltip 空白天分支最初硬编码「无数据」中文字符串，非中文语言环境会看到中文。补齐 4 字典翻译：en `No data` / zh-TW `暫無資料` / ja `データなし` / ko `데이터 없음`。
+- i18n 翻译再补 2 条 key `"合计"` + 复用既有 `"暂无数据"`：tooltip 多模型态合计行最初硬编码「合计 ${total}」中文；chart 入口守卫（days / series 为空时）也硬编码「暂无数据」。补齐 4 字典翻译：`合计` → en `Total` / zh-TW `合計` / ja `合計` / ko `합계`；`暂无数据` 字典已存在（v0.152 引入），直接复用。
+
+资源版本：
+- styles-20260817.css ?v=20260824-15 → ?v=20260824-21（6 次小 bump，跟随 5 个子任务 + 2 次末次 i18n 补翻译）。
+- app.js ?v=20260824-15 → ?v=20260824-21（同步 bump）。
+- index.html 同步 bump（create-preset 6 option hidden attribute 同步）。
+
+开发文档：
+- docs/dev/stats_platform_layout_guide_preset_v0.153.md（新建，7 节结构：5 段用户指令合并 → tooltip + 3 行平台 + 留白修复 + 配置示例 + 预设下线 总账）。
+
+--------------------------------------------------------------------------------
+
+v0.152  2026-08-24
+
+修改：
+- 配置页「接入指南」全面改写（按用户提供的 README.docx 思路）：旧版「转换模式」「完全透传模式」两块各自只有一段抽象描述 + 一个 curl 例子；新版两块都加「官方 Claude Code settings.json vs 走中继 settings.json」左右两栏 JSON 对照，改动的 key 黄底高亮。透传模式额外加「为什么用 @@ 格式？」三段流程图（客户端发 / 中继拆 / 上游收，箭头连接），把 docx 里「占用 url 位置 + 重写 key 字段」那段核心解释翻译成可视化流程。高级 curl 例子移到 `<details>` 可折叠块里，避免主区域信息密度过高。
+- 修旧版 curl 例子自相矛盾：旧版 `cfg-mode-block` 的「透传 curl 示例」用 `/anything` 路径配 `x-api-key: xxx@@anthropic` + body `model: deepseek-chat`（OpenAI 模型名），路径协议 / body 模型 / 鉴权头三套语义错位。新版换成 2 个真实可跑的 deepseek curl —— `/openai/v1/chat/completions` 走 OpenAI key、`/anthropic/v1/messages` 走 Anthropic 兼容 key，每个都写完整 `model / max_tokens / messages` 字段。
+- 新增 2 个 helper：`cfgJsonDiff(labelOff, codeOff, labelRelay, codeRelay, markRelay)`（两栏 JSON 对照，markRelay 列出的 key 在中继侧黄底高亮）+ `cfgWhyFlow(step1, body1, step2, body2, step3, body3)`（三段横排流程图）。
+- 新增 CSS 类（接在 .cfg-code 块后面）：`.cfg-json-diff`（grid 两栏）、`.cfg-json-side` / `.cfg-json-side-head` / `.cfg-json-side-relay`（中继侧头加「走中继」tag + accent 橙）、`.cfg-chg`（黄底高亮改动 key 所在行）、`.cfg-why-flow`（flex 三段 + 箭头）、`.cfg-why-step` / `.cfg-why-step-title`、`.cfg-why-arrow`、`.cfg-adv-curl`（details 可折叠样式）。
+- i18n 五语同步：新增 26 条字典 key（zh / en / ja / ko / zh-TW 都补齐），全部走 `t()` 函数；key 与 value 都是简中原文，dict 平铺结构兼容。
+
+测试：
+- 手动验证：浏览器（headless 探针）渲染配置页 HTML，DOM 结构含 `.cfg-json-diff` ×2（两块各一）+ `.cfg-why-flow` ×1 + `.cfg-adv-curl` ×1。
+- 切换语言测试：5 种语言切换时所有 t() 调用点都返回对应翻译（en 走英、ja 走日、ko 走韩、zh-TW 走繁体、zh 还原原文）。
+- node --check app.js / css 文件位置无破坏。
+
+资源版本：
+- styles-20260817.css ?v=20260824-07 → ?v=20260824-08。
+- app.js ?v=20260824-07 → ?v=20260824-08。
+- index.html 同步 bump。
+
+开发文档：
+- docs/dev/config_guide_v0.152.md（新建，7 节结构：抽象描述 → JSON 对照 + @@ 流程图 + curl 矛盾修复）。
+
+--------------------------------------------------------------------------------
+
+v0.151  2026-08-24
+
+修改：
+- 前端多语言支持扩展到 5 种语言：旧版仅 zh（简体中文）+ en，新版增加 zh-TW（繁体中文）/ ja（日语）/ ko（韩语）。设置面板「语言」段新增 3 个切换按钮，按钮文字母语展示（繁體中文 / 日本語 / 한국어），与 zh / English 同级排列。localStorage `lang` key 接受 5 种值；启动时读取并校验，未知值回落 zh。
+- 字典组织由 `I18N.en` 单一字典改为 `I18N[lang]` 五字典平铺结构；新增 `_curDict()` helper（`I18N[I18N.lang] || I18N.ja`）。`t(key)` 改为「非 zh 时返回字典值，否则返回原 key」。所有 `applyLang` / `t()` 调用点切到 `_curDict()`。
+- `applyLang` 重写三处判定：(a) `document.documentElement.lang` 按 BCP-47 输出 zh-CN / zh-TW / en / ja / ko；(b) body 类改为 `lang-en` / `lang-ja` / `lang-ko` / `lang-zh-tw` 动态切换（CSS 留接入点，例如日文字号偏大、韩语字距偏宽等场景）；(c) `data-i18n` 元素翻译块 + 全文档 walker 翻译块里 `if (I18N.lang === "en")` 全部改为 `if (I18N.lang !== "zh")`，统一走当前字典。
+- `renderStats` 顶部 hint 字符串拼接修正：`I18N.dict[I18N.lang]` 之前是错误的 dict key（从未定义过）→ 改为 `I18N[I18N.lang]`；所有非 zh 走翻译字典（之前 zh 走原文、其他走 en 单字典，新版每个语言各走自己的字典）。
+- 语言切换按钮 click 守卫 `if (lang !== "zh" && lang !== "en") return` 改为白名单 `["zh","en","ja","ko","zh-TW"].includes(lang)`，允许新语言触发 applyLang。
+
+翻译生成：
+- zh-TW：取 zh 字典 331 条 key，S2T 字符映射 + 繁体高频 UI 词 override（如「设置」→「設定」、「启动」→「啟動」），不可机械转换的（标点 / 数字 / 单位）保持原样。
+- ja / ko：取 en 字典为底稿，JA_OVERRIDE / KO_OVERRIDE 各 ~130 条覆盖常用 UI 术语（如「Settings」→「設定」、「启动」→「起動」），未覆盖项保持 en（技术名词/品牌名直接复用）。
+- 生成器脚本 `C:\Users\weizheng\AppData\Local\Temp\gen_translations.py` 可重跑；`extract_i18n.py` 从 app.js 实时拉 en 字典避免手抄漂移。
+
+资源版本：
+- app.js ?v=20260824-06 → ?v=20260824-07（index.html 同步 bump）。
+
+开发文档：
+- docs/dev/i18n_5lang_v0.151.md（新建，7 节结构：单 en 字典 → 5 字典平铺 + _curDict/t 重写 + applyLang 三处判定翻写 + 按钮 + 翻译生成器）。
+
+--------------------------------------------------------------------------------
+
+v0.150  2026-08-24
+
+修改：
+- 实时栏新容器出现时额外清理 done/error 容器：旧版（v0.144）新 rid 到达只复用第一个 done 容器，其余 done（含「完成」「出错」）容器继续挂满 10s 后端销毁计时器才消失。现在 `ensureContainer` 复用/新建完成后统一调用 `cleanupDoneContainers`，把所有 `badgePhase === "done"`（「完成」「出错」都属 done，区别在 badgeError）的残留容器立即移除，不再等 10s。streaming 容器不受影响；单 done 复用（v0.144）行为不变；后端计时器到点再调 relayLiveClear 时因 rid 已删 → no-op，安全。
+- `live_panel.js` `ensureContainer` 重构：提前 `return` 改为 `let rec` + if/else，末尾统一 `cleanupDoneContainers(rid); return rec;`；新增 `cleanupDoneContainers(excludeRid)` 遍历 `_ridOrder` 收集 done 容器后逐个 `window.relayLiveClear(r)`（IIFE + 严格模式，relayLiveClear 挂在 window 上，须经 window 调用）。
+
+测试：
+- 新增 jsdom harness `cleanup_done.js`（14 项全过）：S1 三 done 堆积 → 新容器复用 1 清 2；S2 出错+完成混合 → 全清理；S3 streaming 容器不误清；S4 单 done 复用不破坏。
+- `concurrent5.js` 场景 2 断言更新（预期行为变化）：「5 全 done 后第 6 个复用 → 仍 5 容器」改为「→ 1 容器」（复用 1 + 清理 4）。场景 3（5 并发中仅 1 done，其余 streaming）仍 PASS。
+- 回归全过：reuse_crossrid / concurrent5 / sticky_remount / upgrade(20) / empty_check(21) / firstfit(10) / tools_clear(8) / endpoint(25) / clear_check(10) / repro / repro_extended。
+
+资源版本：
+- live_panel.js ?v=20260824-01 → ?v=20260824-02（live_panel.html 引用同步）。
+
+开发文档：
+- docs/dev/live_panel_cleanup_done_v0.150.md（新建，7 节结构：done 容器 10s 残留 → ensureContainer 末尾统一清理 + cleanupDoneContainers + jsdom 验证）。
+
+--------------------------------------------------------------------------------
+
+v0.149  2026-08-24
+
+修复：
+- 侧栏向右侧延展时帧率太低、不平滑：v0.145b 加强版（14 步 × 50ms ≈ 700ms 四次方缓出）帧率仅 20 FPS，单方向延展这种持续展开视觉在 30 FPS 以下明显阶梯感。加密步数：14 → 32、50ms → 22ms，总时长 ~700ms 保留（v0.145b 时长不变），曲线 x^4 不变。帧率从 20 FPS 升至 45.5 FPS（提升 2.275×），每帧平均位移从 28.6px 缩到 12.5px（缩 56%）。
+
+修改：
+- `panel_pool.py` `_anim_resize`：步数 / 步间两常量调整，函数 docstring 同步记录 v0.149 的帧率选择理由。曲线函数、总时长、seq 接管、高度首帧到位、收窄语义全部沿用 v0.145b 不动。
+
+测试：
+- 独立逻辑验证 `C:\Users\weizheng\AppData\Local\Temp\anim_check_v0.149.py`：3 场景（400→800 延展 / 800→400 收窄 / 400→1000 大延展）全部 monotonic OK，落点误差 0.00px；曲线 x^4 关键点 (x=0.1,0.3,0.5,0.7,0.9) 进度与 v0.145b 完全一致（曲线函数不变）；帧密度对比 14/24/32/40 步方案：14 步 avg 28.6px 起速 48.6px、32 步 avg 12.5px 起速 21.2px（缩 56%）。
+
+资源版本：
+- 纯 Python 改动，前端资源无版本变化；重启 GUI 生效。
+
+开发文档：
+- docs/dev/live_panel_width_anim_v0.145.md 末尾追加 v0.149 段（保持 7 节结构 + 版本号顺序追加规则，不新建文件）。
+
+--------------------------------------------------------------------------------
+
+v0.148  2026-08-24
+
+修改：
+- 「总览」页「平台分布」卡片按客户端入口协议拆 openai：旧版把 OpenAI 全部请求塌成单一 `openai` 行（截图 3,351 req · 126M tokens），新版按客户端入口 wire 拆成 `openai·chat`（既有 `/v1/chat/completions` 流量，回填后 3,351 行）+ `openai·responses`（`/v1/responses` Responses API 新端点，从 0 起）。`anthropic` 行不变（仍走单一 endpoint，视觉一行）。
+- schema 改动：`requests` 表新增 `endpoint TEXT` 列 + `idx_platform_endpoint_ts (platform, endpoint, ts)` 复合索引（拆分 GROUP BY fast-path）。`Database.init()` 启动时一次性回填 `WHERE platform='openai' AND endpoint IS NULL → 'openai-chat'`（逻辑保证：迁移前所有 openai 入向都是 chat-completions，跨所有 uvicorn 访问日志验证 100%）；anthropic 不回填，聚合层 `COALESCE(NULLIF(endpoint,''), platform)` 让 NULL 走 platform 兜底。
+- 9 处 `db.record(...)` 调用全部透传 `endpoint`：`proxy_legacy.py` 的 adapter 非流 / adapter SSE / `_reject_dispatch`（写 platform 占位）/ `_relay_cross_wire` 错误 / 非流 / 流 / 同 wire 字节透传 错误 / 非流 / 流。adapter 内部走 `endpoint=client_wire`（客户端入口 wire，不是上游协议）。
+- 聚合层：`tui.py` `fetch_totals` GROUP BY 由 `platform` 改为 `(platform, endpoint)`，返回 key 用 `<platform>:<endpoint>` 形式（anthropic 单 endpoint 不带后缀 = 旧 key，兼容）。
+- 前端：`renderPlatform` 解析 `<platform>:<endpoint>` key，anthropic 单 endpoint 显示 `anthropic`（不带后缀），openai 拆开显示 `openai·chat` / `openai·responses`；badgeCls 拼接 `platform-endpoint-{endpoint}`。`renderToday` 累加无 key 顺序假设，无需改。
+- CSS：新增 `.platform-badge.platform-openai.platform-endpoint-openai-chat`（沿用 `var(--platform-openai)` 蓝绿）与 `.platform-endpoint-openai-responses`（`color-mix(...65%, #a78bfa)` 淡紫青，与 OpenAI Responses 品牌色相近）。
+
+测试：
+- 新增 `test_fetch_totals_splits_openai_by_endpoint`：seed 6 chat + 4 responses + 4 anthropic (NULL endpoint) + 2 个 8 天前的老行；断言三个 key 各自 requests/input/output_tokens 正确；since 过滤三种窗口（1d / 1h / 100s）分别覆盖。复用既有 `tmp_db` fixture。
+
+资源版本：
+- styles-20260817.css ?v=20260824-06 → ?v=20260824-07。
+- app.js ?v=20260824-05 → ?v=20260824-06。
+- index.html 同步 bump。
+
+不在本次范围：
+- `fetch_aggregate_by_dim` 的 `dim=platform` 行（aggregate 表维度不同，按 wire 拆会让 top-N 抖动；用户要拆的只是「平台分布」卡）。
+- 透传档位（passthrough.db）—— passthrough 模式不区分 inbound 协议（透传 byte 直接转发，不解析路径），且那张表结构不同。
+
+开发文档：
+- docs/dev/platform_split_openai_endpoint_v0.148.md（新建，7 节结构：openai 单行塌陷 → schema 加列 + 回填 + 9 处 record 透传 + 卡片拆渲染 + CSS 双色 + 单测验证）。
+
+--------------------------------------------------------------------------------
+
+v0.145b  2026-08-24
+
+调整：
+- 侧栏延展动画时长+曲线加强：`_anim_resize` 步数 8 → 14、步间 30ms → 50ms（总时长 240ms → ~700ms），缓出曲线由 `1-(1-x)^3` 升级为 `1-(1-x)^4`（起速更陡、收速更缓，延展"舒展"感更强）。落地精确度不受影响（末帧仍有收尾精调）。
+
+测试：
+- 独立逻辑验证（anim_check.py）：14 步 700ms 全程单调，400→800 / 400→1000 / 800→400 均落点精确；曲线对比 quartic vs cubic，x=0.1 处进度 0.344 vs 0.271（前 10% 已移动 34% 位移，缓出更突出）。
+
+资源版本：
+- 纯 Python 改动，前端资源无版本变化；重启 GUI 生效。
+
+开发文档：
+- docs/dev/live_panel_width_anim_v0.145.md 同步更新曲线与时长说明（不新建文档）。
+
+--------------------------------------------------------------------------------
+
+v0.147  2026-08-24
+
+修复：
+- 实时栏新容器出现时，原有仍在流式的内容容器不再自动滚底：根因是 `placeColumns` 每次布局都无条件把列内容器 detach 再 re-append（`while (colEl.firstChild) removeChild`），流式容器的 scrollTop 在重新挂载时被重置 → `isSticky()` 判定失败 → 自动滚底失效。修复三管齐下：
+  1) 同序列跳过重挂：若列内现有子节点与目标顺序完全一致，直接跳过 remount（不再动正在流式的容器）；
+  2) 确实需要重挂的列，先对全部可滚动容器（.live-panel-stream / .live-panel-pre / .live-panel-tool-args / .lp-ep-list）快照 scrollTop，重挂后再恢复；
+  3) 恢复仅对仍连接的节点生效（被移走的容器不写回）。
+  效果：新容器加入 / 列结构变化时，原有容器既保留滚动位置，也继续粘底自动滚动。
+
+测试：
+- 新 jsdom harness sticky_remount.js（8 检查全过）：S1 单容器流式滚底到 1000；S2 新容器 r2 出现后原容器仍粘底（scrollTop 保留 1000）且继续流式仍滚底；S3 全程无 JS error；S4 强制跨列重挂后快照恢复 r3 的 800 且无 error。
+- 全回归 11 个 harness 全过（repro / repro_extended / upgrade / clear_check / endpoint / firstfit / tools_clear / empty_check / reuse_crossrid / concurrent5 / sticky_remount）。
+
+资源版本：
+- live_panel.js ?v=20260823-62 → ?v=20260823-63（live_panel.html 引用同步）。
+
+开发文档：
+- docs/dev/live_panel_sticky_remount_v0.147.md（新建，7 节结构：新容器出现后粘底失效 → placeColumns detach/reattach 重置 scrollTop）。
+
+--------------------------------------------------------------------------------
+
+v0.146  2026-08-24
+
+修改：
+- 实时栏全部滚动条视觉隐藏：全局 + stream/pre/tool-args 特定容器滚动条改为隐藏（WebKit `display:none` + Firefox/标准 `scrollbar-width:none`），滚动功能保留（overflow 规则不动）—— 页面更干净，不再露出细滚动条。
+
+资源版本：
+- live_panel.css ?v=20260823-58 → ?v=20260823-59。
+- live_panel.js / app.js / styles-20260817.css 不动。
+
+开发文档：
+- 纯视觉 CSS 改动，未写 dev doc（无逻辑，CHANGELOG 记录即可）。
+
+--------------------------------------------------------------------------------
+
+v0.145  2026-08-24
+
+新增：
+- 侧栏窗口延展动画：列数变化导致窗口宽度变化时，不再一次性 resize 瞬跳，改为后端宽度补间动画 —— 从窗口当前实际宽起，ease-out 曲线分 ~8 步渐进到目标宽（总时长 ~240ms），延展/收窄都平滑。高度跟随主窗不受影响（第一步即到位）。新一轮动画 / 宽度再次变化时旧动画线程静默退出，新线程从最新实际宽接管覆盖，不会卡在中间态。
+
+修改：
+- `panel_pool.py` `_apply_geometry`：dock / 浮动两分支的宽度 resize 改走新增 `_anim_resize(w, to_w, h)`（线程补间 + worker 队列逐帧派发）；仅主窗高度变化仍直接 resize（不延迟动画）。
+- 新增 `_width_anim_seq` 序号字段：动画线程检测序号不符即退出（被新动画接管）。
+
+测试：
+- 独立逻辑验证（anim_check.py，复用 _anim_resize 算法）：延展 400→800 单调 + 精确到位；动画中途接管 400→800→1000 从当前实际宽续跑；微差一步到位只 1 次 resize；收窄 800→400 单调到位 —— 全过。
+- 前端无改动（jsdom harness 不涉及窗口宽度）。
+
+资源版本：
+- 纯 Python 改动，前端资源无版本变化；重启 GUI 生效。
+
+开发文档：
+- docs/dev/live_panel_width_anim_v0.145.md（新建，7 节结构：窗口瞬跳 → 后端补间动画）。
+
+--------------------------------------------------------------------------------
+
+v0.144  2026-08-24
+
+修复：
+- 单会话（无并发）出现多容器：v0.141「done 容器立刻复用」只实现了同 rid 复用（后端 assign 同 rid 取消销毁 timer）；但中继每个请求一个全新 uuid rid，一个会话的两段顺序请求是两个不同 rid。新 rid 到达时 `ensureContainer` 在 `_ridEls` 里查不到 → 新建容器，旧 done 容器还要挂满 10s 销毁，于是「无并发却看到两个容器」。v0.144 补完跨 rid 复用：新 rid 未命中且存在 done 容器时，直接把该容器 rebind 到新 rid（data-rid / _ridEls 键 / _ridOrder 位 / 序号过户 / meta 更新 / 徽标复位 streaming / endpoint 列表移除旧请求），不再新建。
+
+修改：
+- `live_panel.js` `ensureContainer` 接入跨 rid 复用；新增 `findReusableDone()`（按到达序找第一个 done 容器）+ `rebindContainer(rec, rid, ev)`；`resetRidContent` 清 tok 时一并 `delete dataset.raw`（复用后 token bump 从头记，否则新值 < 旧 raw 不闪）。
+- 后端不动：10s 销毁 timer 语义保留，rebind 后旧 rid 的 `relayLiveClear` 在前端找不到旧 rid → no-op，安全。
+
+测试：
+- jsdom `reuse_crossrid.js` 11 项全过：顺序两段请求始终 1 容器（S1）/ rebind 后 data-rid 与徽标正确 / endpoint 列表剩新行 / 连续三轮顺序复用 / 真并发 2 容器 + done 后复用仍 2（S2）。
+- 回归：repro / repro_extended / upgrade（20）/ clear_check（10）/ endpoint（25）/ firstfit（10）/ empty_check（21）全过。tools_clear（8）选择器更新为 `.lp-col .live-panel-tool`（v0.137 起 tool 卡挂列，wrapper 已被 layout 移除）后全过。
+
+资源版本：
+- live_panel.js ?v=20260823-61 → ?v=20260823-62。
+- live_panel.css / styles-20260817.css / app.js 不动。
+
+开发文档：
+- docs/dev/live_panel_done_reuse_crossrid_v0.144.md（新建，7 节结构：跨 rid 多容器根因 + rebind 方案 + jsdom 验证）。
+
+--------------------------------------------------------------------------------
+
+v0.143  2026-08-24
+
+修改：
+- 设置页文案精简：
+  - 「允许并发显示」说明只取前半句 → 「多个并发请求同时各自弹出实时栏」。
+  - 「最多显示的数量」→ 「最多显示的并行数量」，下面说明文字删去。
+  - 「始终开启一个」说明只取前半句 → 「无论有无请求都保留一个空闲实时栏」。
+  - 「等待时间高级设置」「样式高级设置」下面说明删去。
+  - 「高级切换」→ 「高级切换（实验）」，说明删去。
+  - 闪烁说明 → 「调用时闪烁」；释放闪烁说明 → 「5小时配额释放动画」；全页闪烁说明 → 「整个页面为你闪烁」。
+  - 「启用开发者模式」→ 「开发者模式」，说明删去。
+- i18n 字典同步更新对应键（data-i18n 与字典键一一对应，英文模式不回退中文）。
+
+资源版本：
+- app.js ?v=20260824-03 → ?v=20260824-04。
+- index.html / styles-20260817.css / live_panel.* 不动。
+
+开发文档：
+- 纯文案改动，未写 dev doc（改动无逻辑，CHANGELOG 记录即可）。
+
+--------------------------------------------------------------------------------
+
+v0.142  2026-08-24
+
+修复：
+- 实时流侧栏 tool 见缝插针失效：布局算法从「顺序列打包」（colIndex 只前进不回头）改为「首次适应 first-fit」（每个 item 从最左列开始找第一个放得下的列，所有列都放不下才开新列）。旧算法下 col0 塞到 80% 后开新列，后续小 tool 卡全被推到最后一列，col0 底部 ~20% 空位被浪费——正是用户报的「左边那栏下方还有空位但 tool 还是移到最后一栏」。改后小 tool 卡回填到前面列底部空位，列数也更紧凑（不再因 tool 多开一列）。
+
+修改：
+- `live_panel.js` `layout()` 列打包循环重写：`colIndex` 单指针 → 全列扫描 first-fit；放不下且 auto_extend 时开新列；放不下又不能开新列（卡超列高 / auto_extend 关）时塞进空位最大的列溢出滚动。
+
+测试：
+- jsdom `firstfit.js` 10 项断言全过：col0 有空位 tool 回填 col0（T2/T3）、rid 顺序不被破坏（T4/T5）、列数不因 tool 多开（T6）、col0 空位不足时 tool 落后列（T8）、全程无 JS error（T9）。
+- 回归：repro / repro_extended / upgrade（20）/ clear_check（10）/ endpoint（25）全过。三个旧 harness 的 `#lp-tools .live-panel-tool` 选择器更新为 `.lp-col .live-panel-tool`（v0.139 起 tool 卡是独立 layout item，不再在 wrapper 内）。
+
+资源版本：
+- live_panel.js ?v=20260823-60 → ?v=20260823-61。
+- live_panel.css / styles-20260817.css / app.js 不动。
+
+开发文档：
+- docs/dev/live_panel_firstfit_fillgap_v0.142.md（新建，7 节结构：见缝插针失效根因 + first-fit 重写 + jsdom 验证）。
+
+--------------------------------------------------------------------------------
+
+v0.141  2026-08-24
+
+修改：
+- done 容器立刻复用：实时流侧栏 per-rid 容器收到 `done` 事件时，立即调用 `resetRidContent(refs)` 清空累积内容（stream / thinking 文本置空 + scrollTop 复位、thinkingCount / streamCount / 输入·输出·缓存读·缓存写 token 计数复位、命中率/速度文本置空），但保留徽标"完成"+ DOM 容器节点。下次同 rid 或任何事件来时 `applyRid` 走 setText 分支直接覆盖，不等待后端 10s 后销毁重建。后端 release 仍挂 10s timer 真销毁（容器占位列空间），仅前端视觉上让 done 容器立刻处于 ready 态。
+
+新增：
+- `live_panel.js` `resetRidContent(refs)` helper：集中清 stream / thinking / usage 计数 / 速度 / 滚动条位；调用点在 `applyRid` `ev.type === "done"` 分支最前。
+
+后端：
+- 无改动（panel_pool 仍挂 10s 销毁 timer；前端视觉层立刻复用）。
+
+资源版本：
+- live_panel.js ?v=20260823-59 → ?v=20260823-60。
+- live_panel.css / styles-20260817.css / app.js 不动。
+
+开发文档：
+- docs/dev/live_panel_done_reuse_v0.141.md（新建，7 节结构：done 容器立刻复用 + resetRidContent helper + 保留 10s 销毁）。
+
+--------------------------------------------------------------------------------
+
+v0.140  2026-08-24
+
+修改：
+- 工具容器自动清除默认时长 20s → 10s：4 处同步收紧默认值，前端 `live_panel.js` `_toolsClearSec` 初始值 + `scheduleToolsClear` / `setToolsClearSec` 兜底 20 → 10；后端 `config.py` 字段 `relay_gui_live_panel_tools_clear_timeout` 默认 20.0 → 10.0；后端 `gui.py` `get_live_panel_tools_clear_timeout` / `set_live_panel_tools_clear_timeout` / snapshot 兜底 20.0 → 10.0；前端 `app.js` `mountTimeoutWheel` / `initTimeoutWheel` 兜底 20 → 10。已存在 .env / 用户手动改过的值不受影响（仅默认值变化）。
+
+后端：
+- 配置文件默认字段收紧；其他逻辑不动。
+
+资源版本：
+- live_panel.js ?v=20260823-58 → ?v=20260823-59（_toolsClearSec 默认值改动）。
+- app.js ?v=20260824-02 → ?v=20260824-03（设置页滚轮兜底 20 → 10）。
+- styles-20260817.css / live_panel.css 无改动，HTML 引用版本不动。
+
+开发文档：
+- docs/dev/live_panel_tools_clear_10s_v0.140.md（新建，7 节结构：工具容器销毁时间收紧到 10s + 7 处默认值同步）。
+
+--------------------------------------------------------------------------------
+
+v0.139  2026-08-24
+
+新增：
+- 主题切换动效：styles-20260817.css 新增 `--theme-trans` 变量（background-color .35s + color .25s + border-color .35s + box-shadow .35s + fill .35s + stroke .35s，统一走 `--ease-out` 曲线），挂到 `html, body` 上做根级过渡；`.glass-card` / `.live-panel-card` / `.live-panel-tool` 各自 `transition: var(--theme-trans)`，主题切那一帧全局一起插值。hover / 点击类 transition 不动，只在 `data-theme` 切那一帧生效。
+
+修改：
+- tool 容器样式彻底改造：`live_panel.js` `buildToolCard` 包成 `<details class="live-panel-tool" open>`（summary = 名字 + 时间戳 + 折叠箭头 `▾`，body = args 文本），summary 点击折叠腾出列内空间给新卡。`live_panel.css` 配套：`.live-panel-tool` 用 `--panel-alt` + `--hairline` + `--radius-sm`（与 `.live-panel-stream` 同款），summary 头整行可点 + 自定义箭头 `[open]` 时 `▾` 旋转 0deg、`[open=false]` 旋转 -90deg。args 区 `max-height: calc(20vh - 24px); overflow-y: auto`，超出滚动查看，整卡列内高度由 layout 决定（不再吞整卡 20vh 封顶）。
+
+资源版本：
+- styles-20260817.css ?v=20260824-04 → ?v=20260824-05（主题过渡变量 + .glass-card 扩背景色过渡）。
+- live_panel.css ?v=20260823-55 → ?v=20260823-58（.live-panel-card / .live-panel-tool 加主题过渡）。
+- live_panel.js ?v=20260823-57 → ?v=20260823-58（buildToolCard <details> 重构）。
+- index.html + live_panel.html 同步 bump CSS cache 版本。
+
+开发文档：
+- docs/dev/live_panel_tool_streamify_v0.139.md（新建，7 节结构：tool 容器正文化 + 主题切换动效）。
+
+--------------------------------------------------------------------------------
+
+v0.138  2026-08-24
+
+修改：
+- 实时流 tool 卡片样式回归 v0.137 之前的 `.live-panel-tool` 紧凑小块（不是玻璃卡）；拆分逻辑（每条独立 layout item / 见缝插针）保留。tool 不再带序号（紧凑小块没有 rid 头结构）。
+- 实时流关闭 X 按钮完全裸悬浮（背景 / 边框 / 圆角 / 阴影 / padding 全部清空），仅留 top: 3px / right: 6px 锚点；hover 时只按钮自身 X 染色。
+- 「等待」背景水印完全删除：HTML 元素 `#lp-watermark`、CSS `.lp-watermark` 全块、JS `body.watermark-away` 两处 toggle 一并清理，不留死代码。
+
+后端：
+- 无改动。
+
+资源版本：
+- live_panel.css ?v=20260823-54 → ?v=20260823-55。
+- live_panel.js ?v=20260823-56 → ?v=20260823-57。
+
+开发文档：
+- docs/dev/live_panel_tool_compact_v0.138.md（新建，7 节结构：tool 紧凑回退 + 关闭按钮裸悬浮 + 水印删除）。
+
+--------------------------------------------------------------------------------
+
+v0.137  2026-08-24
+
+新增：
+- 实时流关闭 X 按钮背景改用总览页同款「卡片液态玻璃」—— 与 `.glass-card` 参数一致（rgba 半透明白 0.11 + backdrop-filter blur(23px) saturate(112%) + 透明 border + 11px 圆角 + 卡片阴影），三主题都看得清。
+- 「等待」背景水印字重 800 → 200（轻体），两字更轻盈不抢内容。
+- 主窗与实时流栏背景光晕跨缝连续：JS 轮询主窗几何 + dock 状态（get_main_geometry 桥，1s 一次），docked 时 body 加 `.glow-docked` 并把主窗宽高写到 CSS 变量 `--glow-mw / --glow-mh`，CSS 据此把侧栏 `.bg-glow-1/2` 圆心对齐到主窗屏幕坐标（缝两侧本就是一个模糊圈）。浮动时移除 class，光晕回落到窗口相对（自包含）。
+- 并发 tool 调用每个独立成卡：每条 `.live-panel-card.live-panel-tool-card`，与 per-rid 容器同级别进 layout 引擎；贪心列打包见缝插针（列满了开新列，auto_extend 模式下窗口向右延展）。序号共享 rid 池（nextFreeCircledIdx 取最小空位），用户看到的是「容器序列」而非两类。
+
+修改：
+- 后端 `gui.py` `Api` 新增 `get_main_geometry()` 返回 `{ok, x, y, w, h, docked}`，try/except 兜底（webview.start 之前调用不阻塞）。
+- 前端 `live_panel.js`：
+  - 工具调用管理重写：每条 tool 进 `_toolEls / _toolsOrder`（不再合并到一个 `$tools` 容器）。
+  - `layout()` items 合并：rid 容器 + tools 容器合并为同一 items 列表，共享贪心列打包。
+  - `syncGlow()` 1s 轮询 + resize 时触发；DOMContentLoaded 同步首帧。
+- 前端 `live_panel.css`：新增 `.live-panel-body.glow-docked .bg-glow-*` 偏移规则；新增 `.live-panel-tool-card` 专属样式（复用 rid 头 + 等宽字体 + 时间戳推到右侧）；`.live-panel-tool-args` max-height 120px 去掉（独立成卡由 layout 决定整卡高）。
+
+资源版本：
+- live_panel.css ?v=20260823-53 → ?v=20260823-54。
+- live_panel.js ?v=20260823-55 → ?v=20260823-56。
+
+开发文档：
+- docs/dev/live_panel_glass_glow_toolsplit_v0.137.md（新建，7 节结构：液态玻璃 + 字重 + 跨缝连续 + tool 独立成项）。
+
+--------------------------------------------------------------------------------
+
+v0.136  2026-08-24
+
+修复：
+- 实时流窗口脱离磁吸后被拽回磁吸位：根因是 `PanelPool._apply_geometry()` 无条件 move 侧栏到 `(主窗右缘, 主窗顶)`，新容器 / 自动延展 / 主窗移动 / 还原 都会触发该路径 → 浮动态也被拽回。
+- 实时流关闭 X 按钮挤占容器空间：`.lp-col` 顶部预留 32px 顶栏带（之前为按钮预留），列内容不能从顶开始。
+
+新增：
+- 浮动解耦：`PanelPool` 新增 `docked_getter` 回调读 gui 的 `_panel_docked`；`_apply_geometry` 按 docked/浮动态两分支：
+  - dock 态：照旧 move 贴右 + 高度跟随主窗。
+  - 浮动态：不 move、不跟主窗高，仅在 width 变时原地 resize；保留 auto_extend 延展能力。
+- 浮动位置持久化：脱开时 `_update_panel_snap` 调 `pool.set_float_pos(x, y)`；浮动 + 隐藏后再显示恢复到用户拖到的位置（不是屏外 -32000,-32000）。
+- 关闭按钮贴近顶角：侧栏内 `.live-panel-body .window-controls { top: 3px; right: 6px }`（vs 主窗 top: 6px / right: 8px）；列顶 padding 32px → 4px（不再为按钮预留顶栏带）。
+- 主窗还原 / 托盘重显尊重浮动态：仅 `if self._panel_docked` 才调 `_dock_panel(force=True)`，浮动则保持脱开。
+
+修改：
+- 后端 `gui.py` `App.__init__`：`self._panel_docked = True` 初始化从末尾提到 `PanelPool` 构造前（原位置留注释"已在 Pool 构造前初始化"）；`PanelPool` 构造传 `docked_getter=lambda: self._panel_docked`。
+- 后端 `gui.py` `_update_panel_snap` 脱开分支调 `pool.set_float_pos(x, y)` 记录浮动位置。
+- 后端 `panel_pool.py` 新增 `docked_getter` 参数、`_float_pos` 缓存、`set_float_pos` 公共方法；`_apply_geometry` / `_show_always_one` / `_relayout` docstring 更新反映两态语义。
+
+资源版本：
+- 无（纯 Python + CSS 改动，live_panel.css / live_panel.js 文件本身未变；HTML 引用版本也未 bump）。
+
+开发文档：
+- docs/dev/live_panel_floating_decouple_v0.136.md（新建，7 节结构：bug 根因 + 解耦方案 + dock/浮动两态 + 偏离规划 + 验收清单）。
+
+--------------------------------------------------------------------------------
+
+v0.120a  2026-08-24
+
+新增：
+- 所有请求路径保存消息原文与回复：adapter 非流式 / adapter SSE / cross-wire 非流式 / cross-wire SSE / upstream_error 路径补 `db.record_messages` 调用（之前仅两条主路径保存，导致 5 个其他路径请求详情显示「未保存对话内容」）。
+- 跨平台链接上游支持：「+ 新建链接」modal 改为跨平台搜索 —— 允许链接不同平台但同名的上游（如 anthropic/e1701fa6 ↔ openai/e1701fa6）。v0.119 原版仅同平台搜索，跨平台同名 cfg 无法链接。链接列表条目额外显示 `[openai]` / `[anthropic]` 平台标签区分。
+- 窗口右上角 min/max/close 按钮磨砂玻璃背景：`.window-controls` 加 `backdrop-filter: blur(23px) saturate(112%)` + 135° 边缘渐变淡出（与现有 `.glass-card` 风格统一），避免与背景内容重叠看不清。
+
+修改：
+- 后端 `proxy_legacy.py` 4 处补 `record_messages`：adapter 非流式 (`proxy_legacy.py:586-598`)、adapter SSE (`proxy_legacy.py:856-868`)、cross-wire 非流式 (`proxy_legacy.py:2860-2872`)、cross-wire SSE (`proxy_legacy.py:3115-3127`)；upstream_error 路径 (`proxy_legacy.py:3587-3599`) 只保存用户请求（无回复）。
+- 前端 `app.js` `openLinkUpstreamOverlay` 改为跨平台搜索所有 `snap.upstreams[*]`，排除自己；modal hint 文案改为「选择要链接的其它上游」（去掉「同平台」）。
+- 前端 `styles-20260817.css` `.window-controls` 加玻璃背景；新增 `.cfg-link-row-platform` 平台标签样式。
+- 资源版本 bump：styles-20260817.css ?v=20260823-36 → ?v=20260824-01；app.js ?v=20260823-54 → ?v=20260823-55（链接跨平台 modal）。
+
+修复：
+- 「未保存对话内容」覆盖盲区：原先 6 个有效请求路径中只有 2 个保存消息；现在全部保存（dispatch reject 路径无效请求，无 body 可保存）。
+- 跨平台同名上游无法链接：v0.119 modal 只列同平台 peer，导致 anthropic/e1701fa6 ↔ openai/e1701fa6 这类跨平台链接根本建立不起来。修后端 `resolve_links` 实际跨平台（`upstreams_for()` 返回 anthropic+openai 合并），前端 modal 也跨平台搜索，前后端对齐。
+- 窗口按钮与背景内容重叠看不清：`.window-controls` 之前完全透明（`background: transparent`），鼠标悬停才有 `glass-surface-strong` 背景。修后改为磨砂玻璃 + 边缘渐变（参数与 `.glass-card` 一致：blur 23px + saturate 112%）。
+
+资源版本：
+- app.js ?v=20260823-54 → ?v=20260823-55（跨平台链接 modal）。
+- styles-20260817.css ?v=20260823-36 → ?v=20260824-01（磨砂玻璃 + 链接平台标签）。
+
+开发文档：
+- docs/dev/save_messages_path_coverage_v0.120a.md（新建，7 节结构：覆盖盲区 + 5 路径修复 + dispatch reject 豁免）。
+- docs/dev/upstream_link_v0.119.md 末尾追加跨平台链接修复节（v0.120 续篇）。
+- docs/dev/window_controls_glass_v0.120a.md（新建，7 节结构：磨砂玻璃 + 边缘渐变）。
+
+--------------------------------------------------------------------------------
+
+v0.120  2026-08-23
+
+新增：
+- 总览页上游状态卡片点击链接上游条目（A <-> B <-> C）弹出的「按模型拆分」modal 顶部新增「属于上游」chip（紫底 🔗，复用 .cfg-linked-chip）。
+- modal 顶部新增聚合统计面板：调用次数 5h / 周 / 月 + 累计 token（用后端 by_upstream[virtual].{counts, total_tokens}，不重复 SUM）。
+- 模型列表按成员上游分块：每个真实上游一节，标题含成员 chip + 该成员自己的 token / call 子统计；跨成员同名模型各自展示（不合并）。
+- 后端 fetch_total_tokens_by_upstream / fetch_by_upstream_model 对虚拟 cfg 修复：正确按成员 token 之和聚合（之前 SQL IN 用虚拟名匹配 0 行，导致 modal 显示空）。
+
+修改：
+- openUpstreamModels 重写为两分支：链接上游走 renderLinkedUpstreamHTML，普通上游走 renderPlainUpstreamHTML（向后兼容 v0.119）。
+- 新增 helper：renderLinkedUpstreamHTML / renderAggregateHTML / renderPlainUpstreamHTML / renderModelRow。
+- 普通上游 modal 行为不变（无「属于上游」、无聚合行）。
+
+后端：
+- tui.py：fetch_total_tokens_by_upstream 重写为「展平成员 → SQL IN → 按 cfg.name 累加」模式（支持 list[str] | list[dict]）。
+- tui.py：fetch_by_upstream_model 重写为同模式（name_to_owners 反查 + cost / weighted_cost 累加）。
+- gui.py：_rebuild_snapshot 中 fetch_total_tokens_by_upstream caller 改为传 cfg dicts（含 _is_virtual + linked_names）。
+
+测试：
+- 后端 pytest：test_virtual_upstream_stats.py 5/5 PASS（虚拟聚合、真实不变、向后兼容）。
+- 前端 jsdom：link_modal.js 9/9 PASS（函数定义唯一、字段引用正确、cfg-linked-chip 复用、reverse parse 正则）。
+
+资源版本：
+- 主窗 app.js ?v=20260823-53 → ?v=20260823-54。
+- styles-20260817.css ?v=20260823-33 → ?v=20260823-34（index.html + live_panel.html 都 bump）。
+- HTML 结构未动（占位 hook 全由 JS append 到 #upstream-models-body 顶部）。
+
+开发文档：
+- docs/dev/upstream_link_v0.119.md 末尾追加 v0.120 节（7 节结构：虚拟 cfg 后端 fetch 修复 + modal 顶部增强 + 成员分块 + 偏离规划之处）。
+
+--------------------------------------------------------------------------------
+
+v0.135  2026-08-23
+
+新增：
+- 设置页「实时栏管理」新增两个可折叠分组开关：「等待时间高级设置」「样式高级设置」，默认关闭。开启后才展开对应子项收纳的内容，关闭时整组折叠隐藏。
+- 「等待时间高级设置」收纳 5 个超时项：思考流超时、思考-正文衔接超时、正文流超时、完成清除超时、工具清除超时（v0.134 完成后原散列在外）。
+- 「样式高级设置」收纳 5 个布局/外观项：工具调用上限、端点列表高度、侧边栏无边框（从「外观」分组挪入）、工具常驻开关（v0.135 新增）、列表字号档位（v0.135 新增）、最小列数（v0.135 新增）。
+
+修改：
+- 工具容器「常驻」开关（v0.135 新增）：开启后即使无工具调用也保留占位（不再整卡隐藏）；关闭则恢复 v0.130 「无 tool 整卡隐藏」行为。
+- 端点并发列表字号档位（v0.135 新增）：小/中/大三档（11/12/13px），写到 body.data-list-font，CSS 据此改写 .lp-ep-list 字号。
+- 最小列数（v0.135 新增）：auto_extend 模式下也至少 N 列（1-6，默认 1），layout() 末尾用 _minCols floor 补列。
+- 「侧边栏无边框」从「外观」分组挪到「实时栏管理」→「样式高级设置」子组（语义属于侧栏视觉样式，分组更连贯）。
+- 两个折叠组的折叠状态用 prefs.livePanelTimeoutAdvanced / livePanelStyleAdvanced 持久化（纯前端偏好，与后端设置无关）。
+
+后端：
+- config.py 新增 relay_gui_live_panel_tools_always（默认 False）、relay_gui_live_panel_min_cols（默认 1）、relay_gui_live_panel_list_font（默认 "medium"）。
+- gui.py 新增 6 个桥：get/set_live_panel_tools_always、get/set_live_panel_min_cols、get/set_live_panel_list_font；写 .env 并即时下发侧栏 setToolsAlways/setMinCols/setListFont。snapshot 增加 3 字段。
+- live_panel.js 新增 setToolsAlways / setMinCols / setListFont 三个 setter；layout() 末尾用 _minCols floor 补列；layout() 工具可见性判断增加 _toolsAlways OR toolCount > 0；loadLayoutHint 启动阶段拉取 3 个新设置。
+- live_panel.css 新增 .live-panel-body[data-list-font="small/medium/large"] 三个 CSS 钩子改写 .lp-ep-list 字号。
+
+测试：
+- jsdom 全过：endpoint.js 25 / upgrade.js 20 / clear_check.js 10 / tools_fill.js 8 / tools_clear.js 8 / 新增 advanced_groups.js 11（setToolsAlways 开/关 + 无工具占位、setMinCols 至少 3 列、setListFont 4 档切换 / 回退 medium、全程无 JS error）= 82 项。
+
+资源版本：
+- 侧栏 live_panel.js ?v=20260823-52 → ?v=20260823-53；live_panel.css ?v=20260823-48 → ?v=20260823-49。
+- 主窗 app.js（index.html 引用）?v=20260823-52 → ?v=20260823-53。
+
+开发文档：
+- docs/dev/live_panel_endpoint_concurrent_v0.132.md 末尾追加 v0.135 节（7 节结构：两折叠分组 + 3 新设置 + 折叠状态本地偏好）。
+
+--------------------------------------------------------------------------------
+
+v0.133  2026-08-23
+
+修改：
+- 端点并发列表排序改"最新活动在最上"：applyEndpoint 对已知 rid 先 delete 再 set（Map 插入序=最近活动序），renderEpList 反向遍历 → 最新到达/更新的请求排列表顶部，较旧的沉底。顶部全局"最新活跃"语义不变。
+- 工具容器优先吃底部空位：列内水填阶段先给 tools 分配空位直到其完整内容高（突破旧 20vh 封顶），剩余空位再给内容容器做 +10% 水填；无空位时 tools 收回到内容实测高（仍可内部滚动）。CSS 去掉 #lp-tools-wrap 的 max-height:20vh 封顶，上限由 JS 改提为整列高 H；toolsNaturalHeight 上限 0.2×H → H。底部不再留白浪费。
+
+修复（视觉）：
+- 侧栏列内左右留白过宽：.lp-col 水平 padding 由 var(--spacing-md)（12px）收窄为 var(--spacing-xs)（4px），上下（顶栏 32px / 底 12px）保留；列间 1px 间距不变。
+
+测试：
+- jsdom harness 全过：endpoint.js 25 项（含 A2/A5 最新在最上、A7/A8 更新较早项移顶且字段刷新）/ upgrade.js 20 项 / clear_check.js 10 项 / 新增 tools_fill.js 8 项（工具撑满内容高突破 20vh、主容器仍水填、空位不足不超内容高、无 JS error）。
+
+资源版本：
+- 侧栏 live_panel.js ?v=20260823-49 → ?v=20260823-51；live_panel.css ?v=20260823-46 → ?v=20260823-48。
+
+开发文档：
+- docs/dev/live_panel_endpoint_concurrent_v0.132.md 末尾追加 v0.133 节（7 节结构：左右缩窄 / 最新置顶 / 工具填位）。
+
+--------------------------------------------------------------------------------
+
+v0.134  2026-08-23
+
+新增：
+- 工具容器最后更新后自动清除：applyTools 末尾挂 setTimeout（默认 20s，可调），到点 clearTools 清空 #lp-tools 并隐藏容器；relayLivePanelInit 重置时一并取消待清除定时器。语义对齐 per-rid done 后 10s 自动清除。
+- 设置页「实时栏管理」新增 4 个可调项：完成清除超时（秒，滚轮）、工具清除超时（秒，滚轮）、工具调用上限（条，数字）、端点列表高度（vh，数字）。
+
+修改：
+- 工具清除超时（默认 20s）、工具调用上限（默认 30 条）由前端硬编码改为设置页可调（setToolsClearSec / setToolsCap / setEpListVh），写回 .env 并即时下发侧栏。
+- 端点列表高度由 CSS 硬编码 30vh 改为 setEpListVh 改写 .lp-ep-list max-height，默认 30vh 不变。
+- 完成清除超时（原 panel_pool 硬编码 destroy_after_done_sec=10）改为 config 字段 relay_live_panel_done_clear_timeout（默认 10s），设置页可调（set_live_panel_done_clear_timeout → pool.set_done_clear_timeout）。
+
+测试：
+- jsdom harness 全过：endpoint.js 25 / upgrade.js 20 / clear_check.js 10 / tools_fill.js 8 / 新增 tools_clear.js 8（setToolsCap 生效、20s→1s 超时自动清空、清空后容器隐藏、setEpListVh 改写高度、无 JS error）。
+
+资源版本：
+- 侧栏 live_panel.js ?v=20260823-51 → ?v=20260823-52；主窗 app.js（index.html 引用）?v=20260823-47 → ?v=20260823-52。
+
+开发文档：
+- docs/dev/live_panel_endpoint_concurrent_v0.132.md 末尾追加 v0.134 节（7 节结构：工具 20s 自动清除 / 4 个可调设置 / 后端完成清除超时可配）。
+
+--------------------------------------------------------------------------------
+
+v0.132  2026-08-23
+
+新增：
+- 端点数据容器改为并发请求全部显示：顶部全局（最新活跃 rid 上游 + phase 徽标）+ 中间并发请求列表（每个请求一行：平台·模型 + phase + 入出向，超高 30vh 内滚动）+ 底部 api-key（全局）。列表与 per-rid 容器同生命周期（done/error 后 10s 清理时同步移除对应行）。
+- 侧栏容器架构清单（4 类容器：端点 / 带思考流 / 纯正文 / 工具调用）完整写入开发文档第 2 节。
+
+修改：
+- 端点容器由"单请求 5 字段"改"并发列表"：删除静态平台·模型行与入出向行（改 per-request 进列表）。
+- phase 徽标逻辑抽公共 phaseLabel，端点顶部 / 列表行 / per-rid 容器三处共用。
+- "最新活跃"语义保留：顶部显示最后到达事件的 rid；该 rid 被清理时回退到剩余请求中最后到达的一个；全空回首连快照兜底。
+
+测试：
+- jsdom harness（/tmp/lp_harness/endpoint.js）23 项断言全过：snapshot 兜底 / 两并发 2 行字段正确 / done+error 徽标 / 顶部=最后到达事件 / clear 回退 / 全清回快照兜底 / init 清空 / 全程无 JS error。
+- 回归：upgrade.js 20 项 + clear_check.js 10 项全过（v0.131 升级 / tools 显隐 / 清理生命周期无破坏）。
+
+资源版本：
+- 侧栏 live_panel.js ?v=20260823-48 → ?v=20260823-49；live_panel.css ?v=20260823-45 → ?v=20260823-46。
+
+开发文档：
+- docs/dev/live_panel_endpoint_concurrent_v0.132.md：v0.132 完整 7 节开发文档（含侧栏容器架构清单表格）。
+
+--------------------------------------------------------------------------------
+
+v0.131  2026-08-23
+
+修复：
+- 主窗左侧导航「实时」扫光波纹在无请求时还在跑：updateLiveNavRipple 与 renderLive 的孤儿过滤不一致（renderLive 对 streaming 空闲超 120s 的条目不显示，波纹却按 calling/streaming 一律点亮）。STREAMING_STALE_SEC 提为共享常量，波纹加同款过滤，保证「实时卡空态 ⇔ 波纹熄灭」同一语义。
+- 实时流侧栏 think 流未建完整容器：首事件若还没带 thinking_text（calling/uploading 或正文先到），容器先按 puretext 建，后续思考流到了不换类 → 思考内容静默丢弃。新增 upgradeToThinkstream：检测到 puretext 收到非空 thinking_text 时补插思考区并换类，已累积正文/统计原样保留。
+
+修改：
+- 实时流侧栏删除「等待请求…」空态占位（#lp-empty），无请求时只显示端点数据容器。
+- 工具调用容器改为没有工具调用时不占位、整卡隐藏（display:none），有 tool 调用才拼到最后一个容器后面。
+
+测试：
+- jsdom harness（/tmp/lp_harness/upgrade.js）20 项断言全过：puretext→thinkstream 升级（含升级后正文保留/思考写入/思考区不重复）、首事件带 think 直接 thinkstream、全程无 think 保持 puretext、tools 无内容隐藏/有内容显示/在列内、#lp-empty 删除无残留引用不报错。
+- nav 波纹一致性 node 逻辑验证 6 场景（stale streaming / 正常 streaming / calling / done / 空 / 混合）全部「实时卡空态 ⇔ 波纹熄灭」一致。
+
+资源版本：
+- 主窗 app.js ?v=20260823-33 → ?v=20260823-47（nav 波纹过滤修复）。
+- 侧栏 live_panel.js ?v=20260823-46 → ?v=20260823-48（thinkstream 升级 + 空态/tools 改动）；live_panel.css ?v=20260823-43 → ?v=20260823-44。
+
+开发文档：
+- docs/dev/live_panel_v0131_fixes.md：v0.131 修复轮完整 7 节开发文档。
+
+--------------------------------------------------------------------------------
+
+v0.130  2026-08-23
+
+新增：
+- 实时流侧栏按流类型动态建容器：识别到思考流（thinking_text 非空）→「带思考流容器」；一进来直接正文流（仅 assistant_text）→「纯正文容器」。kind 首事件定类，中途不换类。
+- 并发请求各建各的容器，JS 显式布局（贪心分列 + 水填 ±10%）在多个并发时刚好填满侧栏高度，允许自动压缩不超原尺寸 ±10%。
+- 主栏不再限一个主内容，并发内容纵向叠放拼接在下方。
+- tool 工具调用全局拼接（无论哪个请求，随时拼在最后一个容器后面），最多 20% 高、cap 最近 30 条 + 滚动。
+- 端点数据容器保留顶部全局，显示最新活跃请求 5 字段。
+- 自动延展侧栏（宽度延展）：窗口随并发列数变宽（nCols × 400px），JS 上报列数 → Python request_width → 窗口 resize。设置页新增开关（.env 键 RELAY_GUI_LIVE_PANEL_AUTO_EXTEND，默认开）。
+
+修改：
+- 统一 rid 模型：panel_pool.py 删 grid 分支，_rids:set[str] 单一来源；事件入口统一为 relayLiveEvent(ev) per-rid 路由。
+- done 后 10s 容器自动清除、窗口收窄回单列（grid 式生命周期）。
+
+修复：
+- 内容容器不显示：layout() items 过滤 rec.el.parentNode 排除了刚创建未挂载的容器 → 永不进 DOM。去掉该过滤。
+- 侧栏侧栏（延展列）不弹出：_apply_geometry 屏幕余宽 clamp 缺 screen[0] > 0 守卫，webview.screen 不可用时延展宽被压回 400px 单列。加守卫。
+
+移除：
+- live_panel_grid.js 删除，grid 分支逻辑并入统一 rid 模型（见修改）。
+
+测试：
+- 本地 jsdom harness（/tmp/lp_harness/）21 项断言：单/双/5 并发挂载、thinkstream/puretext 分类、tool cap 30、clear 移除与重挂、kind 锁定、列数上报、resize 不崩。
+- _apply_geometry clamp 单测 4/4：screen 正常/失效 (0,0)/None 时 2 列都延展到 800；screen 正常但主窗占满屏时正确 clamp 回 400。
+
+资源版本：
+- live_panel.js ?v=20260823-43 → ?v=20260823-46；live_panel.css ?v=20260823-43。
+- 侧栏 styles-20260817.css 引用对齐主窗 ?v=20260823-33。
+
+开发文档：
+- docs/dev/live_panel_unified_container_v0.130.md：v0.130 完整 7 节开发文档（用户指令 / 实现点 / 开发路径 / 问题 / 解决 / 是否遵循规划 / 最终实现点）。
+
+--------------------------------------------------------------------------------
+
+v0.119  2026-08-23
+
+新增：
+- 上游链接（合并统计）：手动将 2+ 同平台上游合成一个虚拟组，所有统计页（总览 / 统计 / 历史 / 实时）把链接组合并显示（A<->B<->C），但路由 / 活跃状态 / 计费 / quota 配置独立——上游本身依然独立工作。
+- 传递闭包：A+B 且 A+C ⇒ A+B+C 是一个组（union-find 实现）。
+- 存储：upstreams.json 每个 entry 新增 linked_upstreams: list[str] 字段（同平台 peer name 列表，自己不能在列表里）。
+- UI 入口：设置页 → 上游编辑卡 →「允许的模型」下方新增「链接上游」chip 区 +「+ 新建链接」按钮 → 弹 modal 多选同平台 peer。
+- 虚拟 cfg 卡片渲染：识别 name 含 <-> 的项 → 显示 🔗 chip +「沿用 A 的 quota」hint。
+- 缺失 / 非 list 字段完全向后兼容（视为空列表）。
+- lazy 解析：linked_upstreams 写了同平台不存在的 name 不报错，下次会话自动加入。
+
+测试：
+- tests/test_link_resolver.py（新文件，11 个测试）：覆盖无链接 / 直接链接 / 传递闭包 / 多组隔离 / 自引用清理 / lazy 解析 / 主值沿用 / 输出顺序稳定 / helper 函数 / 空输入 / 无 name cfg。
+- tests/test_tui.py（+ 3 个 virtual cfg 测试）：覆盖 virtual cfg 合并两上游 / virtual cfg quota 利用率合并 / 真实 cfg 无 _is_virtual 标记。
+- 全部 link_resolver + tui + settings_mutator + upstreams_file 测试通过。
+
+资源版本：
+- index.html：CSS cache ?v=20260823-31 → ?v=20260823-32，JS cache ?v=20260822-30 → ?v=20260823-32。
+
+开发文档：
+- docs/dev/upstream_link_v0.119.md：v0.119 上游链接完整 7 节开发文档（用户指令 / 实现点 / 开发路径 / 问题 / 解决 / 是否遵循规划 / 最终实现点）。
+
+--------------------------------------------------------------------------------
+
+
+v0.118  2026-08-23
+
+新增：
+- 磁吸动效（磁性跟随）：给全部可交互控件接入 .magnetic 磁性跟随动效（transition: transform 0.3s cubic-bezier(0.2,0.8,0.2,1)）。
+- 覆盖控件：普通按钮 .btn、开关 .switch、特殊按钮（.wire-btn / .quick-switch-btn / .consume-switch-btn / .cards-manage-fab）、三级文字按钮（设置子菜单 .nav-sub-item、侧栏主导航 .nav-item、prefs 池 chip .prefs-pool-chip）。
+- 设置开关磁吸系数调大到 0.5（.switch { --mag-strength: 0.5 }）。
+
+修复：
+- 实时流全上游空白（后端 bug）：修复 /live/stream 对所有上游都返回 500、实时面板空白的问题。
+  - 根因：上次重构拆出 InflightStore 后缺少 subscribe()，routers/stats.py 调用即抛 AttributeError。
+  - 解法：InflightStore 补 subscribe() / unsubscribe() / publish()，委托回 proxy_legacy 的 legacy 广播队列（_SUBSCRIBERS / _broadcast），与 relay() 复用同一广播通道。
+- 模型选择菜单（左下角 .upstream-menu）：
+  - 修复展开后左右两栏间距过宽：列模板由 repeat(auto-fit, minmax(0,1fr)) 改为 max-content max-content，列宽按内容收缩（anthropic / openai 两栏贴近）。
+  - 允许左右两栏独立滚动：滚动下放到每个 .upstream-menu-group（max-height:240px; overflow-y:auto），互不挤压。
+  - 修复条目被压扁挤成一坨、滚动失效：.upstream-menu-item / .upstream-menu-group-label 加 flex-shrink:0，禁止 flex 子项收缩，条目保持自然高度溢出触发滚动。
+  - 修复菜单被总览卡片 / 统计页 UI 盖住：.sidebar 是 position:sticky（自成 stacking context），内部菜单的 z-index:500 被封顶在侧栏层；给 .sidebar 设 z-index:500 抬升整个侧栏层，菜单才能真正盖住 .main 卡片。
+- 卡片悬浮层级：.glass-card:hover 新增 z-index: 5，上浮后盖在右侧相邻卡之上，不再被 DOM 靠后的卡片盖住。
+
+测试：
+- tests/test_live_stream.py 新增 test_live_stream_ctx_branch_registers_subscriber，验证 subscribe→legacy 广播链路；全部 12 项 live stream 测试通过。
+
+资源版本：
+- index.html：CSS cache ?v=20260823-29 → ?v=20260823-31。
+
+--------------------------------------------------------------------------------
+
+v0.172  2026-08-25
+
+新增：
+- **PyPI wheel 发布**：`pyproject.toml` 加 `[tool.setuptools.package-data]` 显式 glob（html/js/css/vendor/cursors），web/ 前端资产随 wheel 分发。开发残留（探针 / 孤儿 HTML / .bak）已迁出 src/relay/web/ 至 scratch/web_dev_probes/。
+- **Windows PyInstaller onefile exe**：`relaymeter.spec` + `scripts/relaymeter_bootstrap.py`（入口转发到 `relay.__main__.main()`，单 exe 默认开 GUI、`serve --listen H:P` in-process 起 uvicorn、`stats` 一次性打印用量表）；`scripts/build_release.py` 一键出 wheel+exe（构建时合成 .ico 资源图标）。
+- **frozen 感知代码改动**（4 处 surgical）：
+  - `server.py._start_locked` 冻结态 spawn `[exe, serve, --listen H:P]`，源码态保持 `[sys.executable, -m uvicorn, ...]` 不变。
+  - `plugin.py.plugins_dir` 冻结态返回 `Path(sys.executable).parent / "plugins"`，`RELAY_PLUGINS_DIR` env 仍优先。
+  - `autostart.py._command_line` 冻结态 Run 键只写 exe 路径（不再写 `pythonw -m relay.autostart_boot`），`_points_at_this_python` 冻结态仅比对 exe 路径。
+  - `config.py._project_root` 冻结态固定回 `%LOCALAPPDATA%\Relay\`，让 relay.db / upstreams.json / .env 落固定数据目录，不散落在 exe 所在目录。
+
+构建与验证：
+- `python -m build` → `dist/relaymeter-0.1.0-{tar.gz,whl}`。wheel 内 web/ 干净 10 文件（无 _probe_*.py / _err.html / _mgmt.html / .bak），中文光标 PNG 字节一致，4 个 console script（relay / relay-gui / relay-dashboard / relay-stats）全部可调用。
+- 新 venv `pip install wheel` → `_WEB_DIR` 解析到 `site-packages/relay/web/`，全部资产可读。
+- `python scripts/build_release.py --exe` → `dist/relaymeter.exe`（33.6 MB）。`serve --listen 127.0.0.1:9124` 拉起后 `/healthz` 200、`/api/upstreams` 200（7937 B，upstreams.json 读取正常），uvicorn 日志输出正常。
+- 相关单测（test_autostart 24 全过；test_plugin 5 项既有 e2e 失败与 frozen 改动无关，由 e2e 测试自拉中继连不上游造成）在 usage-stats env 跑通 / 持平。
+
+发布命令（手动执行，需 token）：
+- `twine upload dist/relaymeter-0.1.0.tar.gz dist/relaymeter-0.1.0-py3-none-any.whl`
+- `gh release create v0.1.0 dist/relaymeter.exe --generate-notes`
+
+影响面：
+- 源码态运行行为零变化（4 处 frozen 分支都用 `getattr(sys, "frozen", False)` 守卫）。
+- 单实例互斥 `Local\RelayGUI` 不变：GUI 仍单跑；exe 测 GUI 前需用户先关掉当前 GUI。
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+v0.173  2026-08-25
+
+新增：
+- **语言设置新增「跟随系统」选项**：设置 → 语言段首位加按钮（data-lang="auto"），写入 localStorage `lang="auto"`；启动时调 `navigator.language`（pywebview WebView2 = Edge Chromium 下读系统语言）做前缀映射：zh-TW/zh-HK→zh-TW；zh/zh-CN/zh-SG→zh；ja→ja；ko→ko；en→en；其他/空→zh。运行时 `I18N.lang` 仍解析为 5 种具体语言之一，与 `_curDict()` / `t()` / `applyLang()` 等 17 处判定完全兼容；`I18N.intent` 单独保留用于按钮高亮 + click 守卫。
+
+设计要点：
+- "auto" 不进入 5 语言字典（依旧只有 en / zh-TW / ja / ko），运行时 lang 全程是具体值，启动时 + click 切换时各解析一次。
+- OS 改系统语言 → 已开 GUI 不自动跟随（web 技术通病，浏览器无 OS 语言变更 API），需重启 GUI。
+- click 白名单加 `"auto"`；按钮文案用中文「跟随系统」而非自动 i18n（与「简体中文 / 繁體中文 / 日本語」母语展示风格不冲突）。
+
+资源版本：
+- index.html：app.js cache ?v=20260825-05 → ?v=20260825-06。
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+v0.174  2026-08-25
+
+调整：
+- **「实时流侧栏」主开关从「外观」组末尾挪到「实时栏管理」组最顶**：实时栏管理从此成为该开关的专属页面（不再默认 hidden，主开关永远在该组内），与子项（允许并发 / 始终 1 个 / 自动延展 / 悬浮球 / 等待时间高级设置 / 样式高级设置）形成清晰父子结构。「外观」组不再冗余出现该开关。
+- **「自动切换」整组删除，原 2 个选项挪进「开发者模式」组**：自动切换 API + 允许切换池 + 高级切换（实验）三个 nested 项放进「开发者模式」组末尾，作为开发者模式开关的子项 —— 自动切换是实验性 quota 调度功能，与开发者模式的「内外转换映射」「隐藏顶部调试栏」同级，合在一起。其他自动化（动画闪烁）继续保留独立「动画」组不变。
+- **相关连接点更新**：
+  - 「开发者模式」toggle 改 prefs.developerMode + savePrefs 后，新增的 autoswitch 三项 nested 加入 rows 数组统一隐藏；autoswitch pool 的 hidden 由「开发者模式 AND autoswitch 开启」共同决定。
+  - `syncLivePanelMgmtGroup` 退役为主开关已不在外观组。函数定义保留 no-op stub（5 调用点不动，避免与 settings 渲染顺序破坏）。
+  - 字典里 5 语言的「自动切换」组 label 暂时保留 dead 状态，下次清理 i18n 字典时一并删。
+
+影响面：
+- 仅设置页 UI 结构变更。设置 prefs / 后端 API / 数据零变化。
+- 已存在的本地 prefs（live_panel / autoswitch_enabled / advanced_switch）值原封不动保留。
+
+资源版本：
+- index.html：app.js cache ?v=20260825-06 → ?v=20260825-07。
+
+--------------------------------------------------------------------------------
+
+v0.175  2026-08-25
+
+调整：
+- **设置页彻底移除侧边磁吸相关选项**：「磁吸状态下始终开启一个」设置项不再展示（实时栏管理组），仅保留悬浮球相关选项（悬浮球 / 悬浮球置顶）。磁吸(dock)逻辑代码全部保留（gui.py 磁吸判定/`_dock_panel`/`_update_panel_snap` + app.js always-one 绑定 + 桥 API），未来要恢复直接取消注释设置项 UI 块并还原 cache stamp 即可。
+
+影响面：
+- 仅设置页 UI 变更。后端 API / 数据 / 磁吸行为代码零删除、零改动。
+- 已存在的 `RELAY_GUI_LIVE_PANEL_ALWAYS_ONE` 配置值原封不动保留（仅不再有 UI 开关）。
+
+资源版本：
+- index.html：app.js cache ?v=20260825-07 → ?v=20260825-08。
+
+--------------------------------------------------------------------------------
+
+v0.176  2026-08-25
+
+调整：
+- **实时流侧栏全新行为模型（4 条规则）**：
+  1. 「实时流侧栏」主开关管理下方所有实时流栏相关选项：关掉后自动折叠全部子项，且无论任何情况悬浮球与侧栏均不再弹出。
+  2. 「悬浮球」开关只有开启时才展开下方「悬浮球置顶」选项。
+  3. 实时流侧栏开 + 悬浮球开 → 悬浮球始终显示，且恒保持在侧栏层级之上。
+  4. 实时流侧栏开 + 悬浮球关 → 侧栏固定在中继主窗口右侧，不允许拖动脱离主窗口。
+- 语义明确：「悬浮球置顶」= 盖过其它窗口（球>侧栏的恒在关系由相对 Z 序保活保证，独立于该开关）；dock 固定模式空闲时侧栏仅在有请求时弹出（无常驻空闲面板）。
+
+实现：
+- `app.js`：主开关下新增 `#live-panel-mgmt-sub` 包裹全部子项，hidden 跟随主开关；「悬浮球置顶」项带 `prefs-live-panel-float-ball-topmost-item` id，hidden 跟随悬浮球开关；新增模块级 `syncLivePanelSub()`（主开关/球开关 handler + `refreshPrefsDynamic` 三处调用）。
+- `panel_pool.py`：`_should_keep_idle_open()` 恒 False（两种模式都有请求才弹；always_one 配置保留但不再触发弹出）；`_show_always_one()` 顶部加主开关 gate（关 → 直接 return，球与侧栏均不弹出）；`_create_ball` 给 BallLayer 传 `sidebar_handle_getter=self._sidebar_hwnd`（新增方法，返回侧栏原生 HWND，失败 0）。
+- `ball_layer.py`：构造器新增 `sidebar_handle_getter` 参数；`_create_and_show` 无条件启动 Z 序保活；`_topkeep_tick` 双分支 —— 置顶开 → `SetWindowPos(HWND_TOPMOST)`；置顶关 → `SetWindowPos(侧栏句柄, 球句柄, ...)` 把侧栏钉在球正下方（相对 Z 序，球恒在侧栏之上）。
+- `gui.py`：
+  - `set_live_panel`：dock 模式只 `_dock_panel(force=True)`；浮动关球模式隐藏走 `pool._hide_always_one()`。
+  - `_on_panel_moved`：先跳过哨兵坐标(-32000,-32000)；悬浮球关 → 若位置脱离主窗右侧 dock 位则 `_dock_panel(force=True)` 强制拉回（dock 固定不可拖走）。
+  - `_update_panel_snap`：悬浮球关 → 直接 return（不做 snap 浮动）。
+  - `_on_main_restored`：仅当存在活动请求（pool._rids 非空）才 show 侧栏（空闲不弹）。
+
+影响面：
+- 仅实时流侧栏/悬浮球相关行为。磁吸(dock)与 always_one 代码全部保留（仅不再被 UI/配置触发弹出）。
+
+测试：
+- `py_compile` 修改的 Python 文件 + `node --check` app.js 通过。
+- 手动验收：主开关关 → 全部子项折叠、球与侧栏均不弹出；悬浮球关 → 「悬浮球置顶」项隐藏；球开侧栏开 → 球恒在侧栏之上（重叠验证）；侧栏开球关 → 侧栏固定主窗右侧、拖动自动拉回。
+- 注：dock 固定用 drag-back 策略（`easy_drag` 是加载期注入，运行时改 `window.easy_drag` 无效）；球>侧栏相对 Z 序保活 300ms 周期 `SetWindowPos`，属常开行为。
+
+资源版本：
+- index.html：app.js cache ?v=20260825-08 → ?v=20260825-09。
+
+--------------------------------------------------------------------------------
+
+v0.179  2026-08-25
+
+新增：
+- **纯 pywebview 幽灵球替换 GDI 悬浮球**：v0.165 用 GDI+ 自绘（`ball_layer.py` 的 `BallLayer`，UpdateLayeredWindow 逐像素 alpha）做悬浮球，因当时 WebView2 透明两次实测失败；v0.178 实验找到真透明配方后，v0.179 用**纯 pywebview 幽灵球**替换 —— 新渲染层 `src/relay/web/ghost_ball.html`（陶土橙 #D27C63 幽灵 SVG + 竖眼 + 波浪下摆 + s2 倒立红心），新 `BallLayer2`（`src/relay/ball_layer2.py`）保持与 `BallLayer` 完全一致的公开 API，`panel_pool._create_ball` 换 import 即切换实现，其余接线零改动。
+- **真透明配方**（v0.178 实测）：`webview.create_window(transparent=True)` → WebView2 `DefaultBackgroundColor=Transparent`；**在 `events.loaded`（非 shown）里 `sleep(2)`** 等合成首帧后设窗体 `BackColor=TransparencyKey=#010203` —— shown 里设会 RecreateHandle 隐藏窗口，太早设键控不生效。球外 #010203 被键控掉 → 真透桌面。
+- **拖动/点击**：全局轮询状态机（对照 `ball_layer._mouse_tick`，AHK Floatyball 同款）。`GetAsyncKeyState(VK_LBUTTON)` + `GetWindowRect` 矩形 + 球内圆命中（`WindowFromPoint==hwnd` 在 WebView2 下恒 False，因挂 `Chrome_WidgetWin_0` 整幅子窗）。拖动用 **MoveWindow**（绝对坐标，`SetWindowPos(SWP_NOZORDER)` 在这类窗体返回 TRUE 却静默不动）；松开未移动 → 点击 → `on_click`（生产=`pool.ball_clicked` 切 S1<->S2，侧栏收起/展开，**不做形态循环**）。
+
+实现：
+- `src/relay/web/ghost_ball.html`（**新增**）：幽灵 SVG 原样（保持 GDI 同款视觉），**去掉** demo 的 `setInterval` 自动定时器 + `ballCycle()` 形态循环；新增后端桥 `window.ballSetState(state)`（→ CSS class `ghost-idle/ghost-flow/ghost-done`，动画 CSS 常驻）+ `window.ballClicked()`（→ `gui.Api.ball_clicked`）。状态由中继活动驱动：idle=空闲 / flow=流式 / s2=有流倒立。
+- `src/relay/ball_layer2.py`（**新增**，`BallLayer2`）：BallLayer 兼容 API（`start/destroy/show/hide/move_to/set_state/set_topmost` + `available/position` + 构造参数同名）。线程模型 —— 窗口经 pywebview 全局事件循环（跟 `panel_pool` 建 `always_one_window` 同机制）；输入轮询独立 daemon 线程；**任何原生失败只记日志并置 `available=False`** —— 球静默降级为「无」，绝不做成"错看"的方窗/白底（宁可无球，不要错球）。
+- `src/relay/panel_pool.py`：`_create_ball` 从 `from relay.ball_layer import BallLayer` 改为 `from relay.ball_layer2 import BallLayer2`，`BallLayer` 引用改 `BallLayer2`（仅 `_create_ball` 内）。**其余所有** `self._ball.xxx()` 调用点因 API 同名零改动。
+- `src/relay/gui.py`：`float_ball_url = (_WEB_DIR / "ghost_ball.html").as_uri()`（原来指向 `float_ball.html`）。该参数被 `BallLayer2` 真正使用（原 GDI 时代是死参数）。
+
+影响面：
+- 悬浮球从原生 GDI+ 自绘换成 pywebview 幽灵球，**视觉改为陶土橙幽灵**（原 GDI 版「Claude 小幽灵」同款，仅实现载体不同）。
+- 球仍作「桌面锚点」，侧栏从球位置展开（`_relayout` 球模式分支不变）；`ball_clicked / _set_ball_state / set_float_ball* / ball_mode / refresh_ball_visibility / _ball_should_show / _default_ball_pos / set_float_ball_pos_from_panel` 全部不动。
+- **GDI `ball_layer.py` 保留不删**（历史对照 / 回滚），只不再被 `panel_pool` 引用；`float_ball.html`（v0.165 水波液态球）同样保留不删。
+- **无前端缓存 stamp 改动**：本次未改 index.html / app.js 主体（ghost_ball.html 是 web 资产，不在缓存 stamp 体系内）。
+
+兼容性：
+- `BallLayer` 与 `BallLayer2` 公开 API 完全一致 → `panel_pool` 换 import 即切换，无需其它改动。
+- 默认偏好：`relay_gui_float_ball` 默认值沿用 v0.177（True）。
+
+测试：
+- `py_compile` ball_layer2.py / panel_pool.py / gui.py 全绿。
+- 独立冒烟（`scratch/webview_ball_demo/smoke_ball2.py` 用生产 `ghost_ball.html` + `BallLayer2`）：
+  - 屏幕 DC 抓包 → 幽灵身体 `(210,124,99)`=#D27C63 ✓，眼睛 `(108,64,46)`=#6C402E ✓，白色红心/光晕 ✓；**0 个键控像素** → 球外真透桌面（透过幽灵看到桌面 `(12,12,12)`）✓。
+  - 点击：`on_click` 回调触发 ✓。
+  - 拖动：`mouse_state=2`（DRAGGING）→ 窗口矩形从 `(200,120)` 物理移到 `(317,195)`，`on_move_end 317,195` 触发，位置持久化 ✓。
+- `tests/test_tray.py` → 5 passed。
+- 手动验收（待 GUI 重启后）：球为陶土橙幽灵、可拖动、点球切 S1<->S2、流式 flow / 有流 s2 / 无请求 idle、置顶时球始终在侧栏之上。
+
+资源版本：
+- `ghost_ball.html` 由 `pyproject.toml` `[tool.setuptools.package-data]` 的 `web/*.html` 通配自动进包（无需改 pyproject.toml）。
+
+--------------------------------------------------------------------------------
+
+v0.177  2026-08-25
+
+调整：
+- **发布默认偏好 = 用户日常偏好（首启即开 GUI 主功能 + 紧超时）**：原 v0.176 之前 `Settings` 字段默认值是「最小可用」基线，新装用户首次启动只看到最小 GUI + 60s 思考超时；v0.177 起把代码默认值改成发布标准（用户日常偏好）——新装用户的 wheel/exe 首启即体验「主功能默认全开 + 阶段感知超时已收紧」。**不影响**已有 .env：pydantic-settings 读 .env 时显式值覆盖代码默认，旧用户的真值原封不动。
+- **代码默认值改动一览**（11 项）：
+  - `relay_gui_theme`        `"light"`     → `"day"`
+  - `relay_gui_show_io_map`  `False`       → `True`
+  - `relay_gui_live_panel`   `False`       → `True`
+  - `relay_gui_float_ball`   `False`       → `True`
+  - `relay_live_panel_thinking_timeout`     `60.0`        → `3.0`
+  - `relay_live_panel_gap_timeout`          `20.0`        → `7.0`
+  - `relay_live_panel_text_timeout`         `10.0`        → `5.0`
+  - `relay_live_panel_done_clear_timeout`   `10.0`        → `5.0`
+- **未改动项**（已与发布默认一致）：concurrent/max/auto_extend/float_ball_topmost/tools_clear_timeout/tools_cap/ep_list_vh/panel_frameless/list_font/tools_always/min_cols/save_messages/start_hidden/quota_autoswitch。
+- **打包资源**：新增 `src/relay/packaging/relay.env.dist` + `src/relay/packaging/relay.upstreams.dist.json` 作为发布标准 seed。`pyproject.toml` 的 `[tool.setuptools.package-data]` 追加这两个 glob；`relaymeter.spec` 的 `datas` 同步加入 `relay/packaging/`。⚠ 这两份文件**不含**真实 API key / 上游 URL —— 账号字段留空/占位 + 注释指引用户补全（避免 wheel 公开发布时泄露私有 key）。
+
+实现：
+- `config.py`：
+  - `_seed_default_config()`：frozen-only 函数，从 `_MEIPASS/relay/packaging/` 复制两份模板到 `%LOCALAPPDATA%\Relay\`。**仅当目标文件不存在**才拷（用户已编辑 → 不动）。任何 IOError/PermissionError 静默吞，让 Settings.load() 自然走代码默认 + 缺 upstreams.json 的退化路径，等同 v0.176 行为。
+  - 11 个 `Settings` 字段默认值改成发布标准 + 注释标 v0.177 改动点。
+- `__main__.py`：入口顶部（cmd 分发前）调用 `_seed_default_config()`。必须在 `Settings.load()` 之前完成，否则 `_resolve_config_path` 找不到刚 seed 的 upstreams.json，upstreams 退化到空。
+
+影响面：
+- **新建数据目录**：frozen exe 在干净机器首启时，%LOCALAPPDATA%\Relay\ 下出现 .env（默认值已发）+ upstreams.json（空骨架）→ 用户只需补 key，无需手动初始化。
+- **已有 .env 的用户**：所有 v0.177 默认值改动**不生效**（被显式 .env 值覆盖）；行为零变化。
+- **upstreams.json 字段（账号级）不入代码默认**：仅在发布资源 upstreams.dist.json 里留空骨架 + _comment，引导用户在 GUI「上游管理」页填真值。
+- **API key 仍然只在用户本地 .env / upstreams.json**：wheel 公开发布不含任何真 key（verify: `unzip -l dist/*.whl | grep -E "(env|upstreams)"` 看到的是 .dist / .dist.json 不是真文件名）。
+
+测试：
+- `py_compile -W error::SyntaxWarning` config.py / __main__.py / gui.py / panel_pool.py / ball_layer.py 全绿。
+- `Settings()` 直接构造（无 .env）→ 11 个字段值如上表（手工对照发布标准）。
+- `_seed_default_config()` 在非 frozen 下直接早退（无副作用）。
+- 手动验收（待 wheel 构建后）：`pip install dist/*.whl` 到全新 venv → `python -c "from relay.config import get_settings; s=get_settings(); print(s.relay_gui_theme, s.relay_gui_live_panel)"` 输出 `day True`；`python -c "import relay, os; sys=frozen if hasattr(sys,'frozen') else False"` 源码模式下 seed 路径跳过。
+
+资源版本：
+- 无 index.html / app.js 缓存 stamp 改动（本次未改前端）。
+
+--------------------------------------------------------------------------------
+
+历史版本
+
+更早版本的设计与变更详情见 docs/dev/（v0.100 起）与 docs/ 下各专题文档。
