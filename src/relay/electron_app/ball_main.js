@@ -165,6 +165,10 @@ function createWindow() {
       preload: path.join(__dirname, "ball_preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // v0.205：不节流后台定时器 —— 悬浮球/侧栏的 demo 动画（从球展开、
+      // 请求卡流入）走 setTimeout，窗口收起/隐藏时 Chromium 默认把 timer
+      // 砍到 1Hz，演示会卡住。
+      backgroundThrottling: false,
     },
   });
 
@@ -218,6 +222,11 @@ ipcMain.on("drag-start", (e, src) => {
   dragStartCursor = { x: cur.x, y: cur.y };
   dragStartWin = { x: wx, y: wy };
   dragMoved = false;
+  // v0.209：mousedown 立即广播 dragstart —— Python 侧据此马上冻结几何（中止
+  // 在飞宽度补间 + 丢弃已入队的 move/resize）。不能等首个 ≥4px 的 moved：
+  // 那之前侧栏若正发生容器变化（列数变 → 宽度补间 / 队列里残留 move），窗口
+  // 会被拽回旧球位，与 tickDrag 的 setPosition 拉扯 → 拖拽卡顿 + 漂移。
+  emitEvent("dragstart", [dragStartSrc]);
   dragTimer = setInterval(tickDrag, DRAG_MS);
 });
 
@@ -251,9 +260,14 @@ ipcMain.on("drag-end", (e) => {
   if (clicked) {
     // 纯点击：仅球帽（"cap"）算「切换」—— 发 TCP clicked 事件回 Python
     // （pool.ball_clicked 切 收起/展开）。顶栏点击无位移 = 无操作，不发。
+    // v0.209：先无条件发 dragend 解冻几何 —— dragstart 在 mousedown 就把
+    // Python 侧几何冻住（moved 未必发过，纯点击全程没有 moved），不解冻的话
+    // 紧接着的 ball_clicked 展开/收起会因为 _apply_geometry 早退而不改窗口
+    // 尺寸（点球帽没反应）。dragend 也顺带把球位落盘，幂等无害。
+    emitEvent("dragend", [Math.round(x), Math.round(y)]);
     if (src === "cap") emitEvent("clicked", [Math.round(x), Math.round(y)]);
   } else {
-    // 拖动结束：发 dragend 事件（Python _persist_ball_pos 落盘回写 settings）
+    // 拖动结束：发 dragend 事件（Python 解冻几何 + _persist_ball_pos 落盘）。
     emitEvent("dragend", [Math.round(x), Math.round(y)]);
   }
   // 拖动结束后重新开始悬停判定

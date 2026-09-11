@@ -323,6 +323,42 @@ def _do_listener_lookup(port: int) -> int | None:
     return None
 
 
+def _listener_belongs_to(port_pid: int, ancestor_pid: int) -> bool:
+    """True when ``port_pid`` is ``ancestor_pid`` or one of its descendants.
+
+    uvicorn on Windows forks a worker subprocess that actually binds the
+    port — ``ServerProcess.pid`` (the Popen parent) never equals the
+    netstat LISTENING pid. So "does the port listener belong to my child?"
+    can't be a pid-equality check; walk the parent chain instead.
+    """
+    if port_pid == ancestor_pid:
+        return True
+    seen: set[int] = set()
+    cur = port_pid
+    try:
+        for _ in range(32):  # hard cap — a runaway parent chain shouldn't hang
+            if cur in seen or cur <= 0:
+                return False
+            seen.add(cur)
+            if cur == ancestor_pid:
+                return True
+            out = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter \"ProcessId={cur}\").ParentProcessId",
+                ],
+                capture_output=True, text=True, timeout=3.0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            txt = out.stdout.strip()
+            if not txt.isdigit():
+                return False  # process gone / can't resolve — don't claim
+            cur = int(txt)
+    except Exception:
+        return False
+    return False
+
+
 def _http_get_json(base_url: str, path: str, timeout: float = 2.0) -> dict:
     """GET ``base_url + path`` and parse the JSON body.
 
@@ -454,9 +490,16 @@ class Api:
         # someone else. Claiming it as ours would briefly enable 停止
         # against a port we don't own. Cross-check by PID; the
         # ``_listener_pid`` cache keeps the netstat cost to once per 5 s.
+        #
+        # v0.NNN：uvicorn 在 Windows 上会 fork 一个 worker 子进程真正绑
+        # 端口 —— ``ServerProcess.pid``（Popen 父进程）**永远不等于** netstat
+        # 的 LISTENING pid。旧逻辑用 ``port_pid != pid`` 直接推翻 own，导致
+        # 自己的中继恒被误判成「运行中（外部）」。这里改成进程树判定：
+        # 监听 PID 是 server 子孙 → 仍是自己的；只有明确不属于自己的进程树
+        # 才算被外部接管。查询失败（None / 无法解析父链）不推翻 own。
         if own and pid is not None and healthy:
             port_pid = _listener_pid(port)
-            if port_pid != pid:
+            if port_pid is not None and not _listener_belongs_to(port_pid, pid):
                 own = False
                 pid = port_pid
         elif not own and healthy:
@@ -1068,9 +1111,13 @@ class Api:
             # 自己的 child 还在 —— 看端口到底是谁的。存在"child 活
             # 着但端口被别的进程占着"的竞态（Popen 返回后 child 撞
             # 10048 死掉前的窗口期），那种情况不能 stop 自己了事。
+            # v0.NNN：uvicorn fork worker 绑端口 —— 监听 PID 是 own_pid
+            # 的子孙也算自己的（进程树判定），不能因为 PID 不相等就把
+            # 自己 fork 的 worker 当外部进程 taskkill 掉（那样会把切换
+            # 模型 / 重启后的状态卡成「运行中（外部）」）。
             _pid_cache.pop(port, None)
             port_pid = _do_listener_lookup(port)
-            if port_pid is None or port_pid == own_pid:
+            if port_pid is None or _listener_belongs_to(port_pid, own_pid):
                 try:
                     self._app.server.restart()
                 except Exception as exc:
@@ -1530,6 +1577,16 @@ class Api:
         s = self._app.settings
         from relay.config import _project_root
 
+        # 后台预热「清理原文」年度热力图缓存（get_message_year 首次约 5s，
+        # 避免用户点开弹窗才卡）。幂等：已有缓存 / 已在预热就跳过。
+        try:
+            if getattr(self, "_msg_year", None) is None and not getattr(self, "_msg_year_warming", False):
+                self._msg_year_warming = True
+                import threading as _th
+                _th.Thread(target=self._warm_message_year, daemon=True).start()
+        except Exception:
+            pass
+
         root = _project_root()
 
         def _file_info(path: str) -> dict:
@@ -1616,6 +1673,154 @@ class Api:
             },
             "upstreams": _file_info(s.relay_upstreams_file),
         }
+
+    # ------------------------------------------------------------------
+    # v0.NNN：设置页「清理原文」—— 读（本地 tui 只读 relay.db）+ 删
+    # （走 relay HTTP，与其它存储写操作一致）。日历按本地自然日聚合。
+    # ------------------------------------------------------------------
+    def _cleanup_db(self) -> str:
+        return getattr(self._app.settings, "relay_db", "")
+
+    def get_message_calendar(self, year: int, month: int) -> dict:
+        """某月每天的消息统计 ``{day: {count, bytes}}``（本地日历）。"""
+        try:
+            from relay import tui
+            return tui.fetch_message_calendar(self._cleanup_db(), int(year), int(month))
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    def get_message_year(self, days: int = 365) -> dict:
+        """最近 N 天（含今天）每天的消息统计 ``{date: {count, bytes}}``。
+
+        设置页「清理原文」按时间筛选 —— GitHub 风格年度热力图数据源。
+
+        性能：全量 ``LENGTH(CAST(content_json AS BLOB))`` 聚合很贵（content_json
+        常含 base64 大图，13 万行要 ~5s）。这里做两层优化：
+          1) GUI 进程内缓存结果，用 ``COUNT(*) FROM messages``（几毫秒）当版本号
+             —— 消息数没变就直接返回缓存；
+          2) 消息数变了也至少间隔 MSG_YEAR_MIN_TTL 秒才重算一次（热力图 15s 内
+             略旧完全无感）。
+        首次无缓存时会同步算一次（约 5s），由 ``get_storage_info`` 在设置页
+        渲染时后台预热，避免用户点「清理原文」才卡 5s。
+        """
+        import time as _time
+        now = _time.time()
+        db = self._cleanup_db()
+        # 版本号：messages 总行数（COUNT 走索引，毫秒级）。
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                cnt = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] or 0
+            finally:
+                conn.close()
+        except Exception:
+            cnt = getattr(self, "_msg_year_count", -1)
+        cache = getattr(self, "_msg_year", None)
+        cached_cnt = getattr(self, "_msg_year_count", -1)
+        cached_at = getattr(self, "_msg_year_at", 0.0)
+        fresh = cache is not None and cached_cnt == cnt
+        recent = now - cached_at < getattr(self, "_msg_year_min_ttl", 15.0)
+        if cache is not None and (fresh or recent):
+            return cache
+        try:
+            from relay import tui
+            res = tui.fetch_message_year(db, int(days))
+        except Exception as exc:
+            return {"error": str(exc)}
+        self._msg_year = res
+        self._msg_year_count = cnt
+        self._msg_year_at = now
+        return res
+
+    def _warm_message_year(self) -> None:
+        """后台线程预热消息年度热力图缓存（get_storage_info 调起）。"""
+        try:
+            self.get_message_year(365)
+            self.get_message_upstreams()
+        except Exception:
+            pass
+        finally:
+            self._msg_year_warming = False
+
+    def get_day_messages(self, year: int, month: int, day: int) -> dict:
+        """某自然日 [00:00, 24:00) 的消息列表（snippet 截断）。"""
+        try:
+            from relay import tui
+            import datetime as _dt
+            start = _dt.datetime(int(year), int(month), int(day))
+            end = start + _dt.timedelta(days=1)
+            items = tui.fetch_day_messages(
+                self._cleanup_db(), start.timestamp(), end.timestamp(),
+            )
+            return {"items": items, "count": len(items)}
+        except Exception as exc:
+            return {"error": str(exc), "items": []}
+
+    def get_message_upstreams(self) -> dict:
+        """出现过消息的上游汇总（按上游筛选模式候选）。
+
+        性能：``SUM(LENGTH(CAST(content_json AS BLOB)))`` 逐上游聚合很贵
+        （13 万行要 ~5s），同样做 COUNT 版本号 + TTL 缓存（与热力图一致）。
+        """
+        import time as _time
+        now = _time.time()
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{self._cleanup_db()}?mode=ro", uri=True)
+            try:
+                cnt = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] or 0
+            finally:
+                conn.close()
+        except Exception:
+            cnt = getattr(self, "_msg_upstreams_count", -1)
+        cache = getattr(self, "_msg_upstreams", None)
+        cached_cnt = getattr(self, "_msg_upstreams_count", -1)
+        cached_at = getattr(self, "_msg_upstreams_at", 0.0)
+        fresh = cache is not None and cached_cnt == cnt
+        recent = now - cached_at < getattr(self, "_msg_year_min_ttl", 15.0)
+        if cache is not None and (fresh or recent):
+            return cache
+        try:
+            from relay import tui
+            items = tui.fetch_message_upstreams(self._cleanup_db())
+            res = {"items": items, "count": len(items)}
+        except Exception as exc:
+            return {"error": str(exc), "items": []}
+        self._msg_upstreams = res
+        self._msg_upstreams_count = cnt
+        self._msg_upstreams_at = now
+        return res
+
+    def get_upstream_messages(self, upstream: str) -> dict:
+        """某上游的消息列表（snippet 截断）。"""
+        try:
+            from relay import tui
+            items = tui.fetch_upstream_messages(self._cleanup_db(), str(upstream))
+            return {"items": items, "count": len(items)}
+        except Exception as exc:
+            return {"error": str(exc), "items": []}
+
+    def get_message_full(self, message_id: int) -> dict:
+        """单条消息完整内容（点列表行看完整）。"""
+        try:
+            from relay import tui
+            row = tui.fetch_message_full(self._cleanup_db(), int(message_id))
+            return row or {"error": "消息不存在"}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    def delete_messages_range(self, start: float, end: float) -> dict:
+        """清理原文：按 ts 范围删 messages（保留 requests）。"""
+        return self._storage_post("delete-messages-range", {"start": float(start), "end": float(end)})
+
+    def delete_message(self, message_id: int) -> dict:
+        """清理原文：删除单条 message。"""
+        return self._storage_post("delete-message", {"id": int(message_id)})
+
+    def delete_upstream_messages(self, upstream: str) -> dict:
+        """清理原文：删除某上游全部 message。"""
+        return self._storage_post("delete-upstream-messages", {"upstream": str(upstream)})
 
     # ------------------------------------------------------------------
     # 临时诊断：前端把自由模式状态写到 .relay-logs/diag-free-pos.json
@@ -1873,6 +2078,10 @@ class Api:
         models 从中继声明过的模型清单里抽裸模型名（OpenCode 认模型 id，
         不区分上游）；vision_models 是当前勾选的名单（upstreams.json
         顶层 vision_models）。
+
+        v0.202 追加 by_upstream：按上游分组返回"每个上游声明了哪些模型、
+        哪些是多模态"，供设置页逐上游渲染勾选框。key = 上游名，值为
+        {"platform": 所属平台, "models": {模型名: 是否支持图片}}。
         """
         s = self._app.settings
         # v0.192：图标带上游前缀 —— 同名模型可来自多个上游（catalog 用
@@ -1888,9 +2097,35 @@ class Api:
             {"model": m, "label": by_model[m]}
             for m in sorted(by_model)
         ]
+        # v0.202 per-upstream 多模态视图 —— 供设置页"各上游多模态"组。
+        # 单池（扁平 upstreams.json）下 platform 语义 = 按 wire 归类，
+        # 与前端 wireGroup() 一致：openai-chat/responses → openai，其余
+        # （anthropic-messages / 未知）→ anthropic。保存时前端用这个
+        # platform 调 update_upstream_quota（单池下后端忽略 platform，
+        # 传任一合法名都写同一份单池，这里给最接近真实的平台）。
+        def _wire_platform(c) -> str:
+            w = (getattr(c, "wire", None) or "").lower()
+            if w in ("openai-chat", "openai-responses"):
+                return "openai"
+            return "anthropic"
+
+        by_upstream: dict[str, dict] = {}
+        for c in s.upstreams_for():
+            vset = set(getattr(c, "vision_models", None) or [])
+            cands: list[str] = []
+            if c.model:
+                cands.append(c.model)
+            for m in (c.allowed_models or []):
+                if m not in cands:
+                    cands.append(m)
+            by_upstream[c.name] = {
+                "platform": _wire_platform(c),
+                "models": {m: (m in vset) for m in cands},
+            }
         return {
             "models": models,
             "vision_models": list(getattr(s, "vision_models", []) or []),
+            "by_upstream": by_upstream,
         }
 
     def set_vision_models(self, payload: list | None) -> dict:
@@ -2560,6 +2795,76 @@ class Api:
         except Exception as exc:
             return {"hidden": False, "error": str(exc)}
 
+    # ----- v0.122：引导教程侧栏聚焦 -----
+    # 主窗 tour 章节2 步骤3：真实侧栏存在时，经本 bridge 把聚焦指令注入
+    # 侧栏窗口（ghost_panel.html / live_panel.html 的 window.__tourPanel
+    # 协议）。payload 为 JSON：{"action":"highlight"|"guide"|"demo"|
+    # "expand"|"collapse"|"clear", "selector":"#lp-upstream",
+    # "type":"ripple|req-in|flow", "text":"…"}。
+    #   - highlight/demo/clear → 注入侧栏窗口 JS
+    #   - guide   → 高亮目标容器 + 弹一张引导卡（text 为说明文字）
+    #   - expand  → 真实把侧栏从悬浮球展开（走 pool._apply_expanded_state，
+    #     复用真实展开动画；_expanded=True + 立即显示面板 + 几何延展）
+    #   - collapse → 收回球帽（复原演示前的收起态）
+    # 窗口不存在/不可用返回 {"ok":false,"available":false} —— 前端据此退回
+    # 主窗 #tour-demo 模拟。
+    def tour_panel_highlight(self, payload: str) -> dict:
+        try:
+            data = json.loads(payload or "{}")
+            action = data.get("action") or "clear"
+            pool = getattr(self._app, "_panel_pool", None)
+            win = pool.always_one_window if pool is not None else None
+            if win is None:
+                return {"ok": False, "available": False}
+            if action == "expand":
+                # v0.208：真实展开（复用真实展开动画 + 几何）。教程展开走
+                # set_tour_collapsed(False) —— 与收起配对，球帽保持 56px，
+                # 不会出现"球先变大再展开"。
+                return pool.set_tour_collapsed(False)
+            if action == "collapse":
+                # v0.208：教程收起 —— 只隐藏面板 surface + 窗口缩到「引导带+
+                # 球帽」，球帽 56px 不占满（见 panel_pool.set_tour_collapsed）。
+                return pool.set_tour_collapsed(True)
+            if action == "highlight":
+                selector = data.get("selector") or "#lp-upstream"
+                js = f'window.__tourPanel && window.__tourPanel.highlight({json.dumps(selector)})'
+            elif action == "guide":
+                selector = data.get("selector") or "#lp-upstream"
+                # v0.208：把主窗气泡内容（章节/步骤标题 + 正文）传给侧栏，
+                # 在侧栏左侧按 #tour-bubble 样式画卡。text 参数同时拼接一份
+                # 纯文本兜底 —— 侧栏 HTML 若仍是旧版（未 reload/重建窗口）
+                # 不解析 extra，也能显示文字不至于空白卡。
+                card = {k: data.get(k, "") for k in ("chapter", "title", "body")}
+                text = (card.get("chapter") or "") + \
+                       ("\n" + card["title"] if card.get("title") else "") + \
+                       ("\n" + card["body"] if card.get("body") else "")
+                js = (f'window.__tourPanel && window.__tourPanel.guide('
+                      f'{json.dumps(selector)}, {json.dumps(text)}, '
+                      f'{json.dumps(card, ensure_ascii=False)})')
+            elif action == "demo":
+                dtype = data.get("type") or "ripple"
+                js = f'window.__tourPanel && window.__tourPanel.demo({json.dumps(dtype)})'
+            else:
+                js = "window.__tourPanel && window.__tourPanel.clear()"
+            pool._enqueue_op(lambda w=win, j=js: w.evaluate_js(j))
+            return {"ok": True, "available": True}
+        except Exception as exc:
+            return {"ok": False, "available": False, "error": str(exc)}
+
+    # ----- v0.205：引导教程侧栏聚焦 —— 引导带宽度（容器左扩） -----
+    # 教程章节2 步骤3 播放时前端上报引导带宽度（px）：非 0 = 展开引导
+    # 模式（容器从球位展开成「引导带 + 球帽 + 侧栏」，指引卡片悬浮在
+    # 悬浮球左侧）；0 = 教程结束，几何完全复原。
+    def set_tour_guide_width(self, width: int) -> dict:
+        try:
+            pool = getattr(self._app, "_panel_pool", None)
+            if pool is None or pool.always_one_window is None:
+                return {"ok": False, "available": False}
+            pool.set_tour_guide_width(int(width or 0))
+            return {"ok": True, "available": True}
+        except Exception as exc:
+            return {"ok": False, "available": False, "error": str(exc)}
+
     def set_autostart(self, enabled: bool) -> dict:
         """Enable / disable the login-time autostart entry (v0.11.3).
 
@@ -2820,10 +3125,64 @@ class Api:
             "name": name,
         }
 
+    def delete_upstream(self, name: str, platform: str = "") -> dict:
+        """「历史上游」彻底删除：配置还在则先删配置，再删该名全部 DB 行。
 
-# ------------------------------------------------------------------
-# Theme
-# ------------------------------------------------------------------
+        两步：
+          1) 配置仍存在 → 走 ``remove_upstream_cfg``（含 active 指针清理）
+             + reload，与 ``remove_upstream`` 完全同路径。flat 单池格式下
+             ``remove_upstream`` 只按 name 删扁平列表，platform 不影响匹配
+             （config.py:897-902 / 1827-1835）；旧 per-platform 格式才真正用
+             platform。
+          2) POST /api/storage/delete-upstream 剥掉该名的全部 DB 行 —— 必须
+             走 relay 进程（GUI 对 relay.db 只读）。
+
+        两步都完成才返回 ok。第二步失败会留下「配置没了、DB 行还在」的中间
+        态 —— 历史上游列表里它仍在（可再删一次，幂等），不回滚已删的配置。
+        """
+        if not isinstance(name, str) or not name.strip():
+            return {"ok": False, "error": "name 不能为空"}
+        name = name.strip()
+
+        # ---- 1) 配置仍配置着？→ 删除配置条目（复用现有 remove_upstream 路径）----
+        cfg_deleted = False
+        if self._app.settings:
+            try:
+                # flat 单池：upstreams_for(p) 返回同一个扁平列表，platform
+                # 只影响旧 per-platform 格式；从任一平台枚举所有名字即可。
+                for p in PLATFORMS:
+                    if any(c.name == name for c in self._app.settings.upstreams_for(p)):
+                        ok, msg = remove_upstream_cfg(
+                            self._app.settings, platform or p, name,
+                        )
+                        if not ok:
+                            return {"ok": False, "error": f"删除配置失败: {msg}"}
+                        cfg_deleted = True
+                        break
+            except Exception as exc:
+                return {"ok": False, "error": f"删除配置失败: {exc}"}
+        if cfg_deleted:
+            try:
+                reload_settings()
+                self._app.settings = get_settings()
+            except Exception as exc:
+                return {"ok": False, "error": f"配置已删但 reload 失败: {exc}"}
+
+        # ---- 2) 剥离 DB 行（走 relay 存储端点，幂等）----
+        res = self._storage_post("delete-upstream", {"upstream": name})
+        if not res.get("ok"):
+            return res  # 已是 {ok:False, error}
+        return {
+            "ok": True,
+            "name": name,
+            "platform": platform,
+            "deleted": res.get("deleted", 0),
+            "config_deleted": cfg_deleted,
+        }
+
+    # ------------------------------------------------------------------
+    # Theme
+    # ------------------------------------------------------------------
 
     def toggle_theme(self) -> str:
         """Flip between light and dark, persist to ``.env``, and return
@@ -3170,6 +3529,13 @@ class App:
             try:
                 # Electron 主窗：native 恒 None，走 get_screen RPC（主屏 DIP 尺寸）。
                 if self._using_electron_main:
+                    # v0.99.2: 与 _dock_getter 同构短路 —— App.__init__ 阶段
+                    # (PanelPool.start → _apply_geometry) electron 主窗尚未
+                    # start/TCP 未连，get_screen RPC 会 _connected.wait(3s)
+                    # 超时两次 ≈ 9s 启动延迟。未显示时返回 (0,0) 让调用方跳过，
+                    # 真实几何由主窗 loaded/moved 事件补上。
+                    if not getattr(self.window.events, "shown", None).is_set():
+                        return (0, 0)
                     w, h = self.window.get_screen()
                     return (w, h) if w > 0 and h > 0 else (0, 0)
                 import webview as _wv
@@ -3339,6 +3705,8 @@ class App:
             "upstreams": {},
             "active_per_platform": {},
             "models_by_upstream": {},
+            # v0.NNN：历史上游 —— 所有在 DB 出现过的 upstream（含已删配置）。
+            "history_upstreams": [],
             # v0.11.21：内外转换显示开关（前端渲染 live 转换条用）。
             "show_io_map": bool(getattr(self.settings, "relay_gui_show_io_map", False)),
             # v0.89：实时流侧栏开关（顶栏 btn-live-panel 用，避免切页回弹）。
@@ -3434,6 +3802,11 @@ class App:
                 snapshot["models_by_upstream"] = tui.fetch_models_by_upstream(db)
             except Exception:
                 snapshot["models_by_upstream"] = {}
+            # v0.NNN：历史上游 —— 所有在 DB 出现过的 upstream（含已删配置）。
+            try:
+                snapshot["history_upstreams"] = tui.fetch_history_upstreams(db)
+            except Exception:
+                snapshot["history_upstreams"] = []
             # fetch_by_upstream needs the configured names so it can
             # zero-fill missing ones. Also pre-format 5h_release via
             # tui._format_release so the frontend never has to duplicate
@@ -3529,6 +3902,10 @@ class App:
                         # v0.119：把该真实上游的 linked_upstreams 透传给
                         # 前端；设置页「链接上游」chip 直接读这个字段显示。
                         "linked_upstreams": list(c.linked_upstreams or []),
+                        # v0.205：该上游「支持图片输入」的模型名单 —— 设置页
+                        # 编辑卡的逐行勾选框回显用（与新建表单同一语义：
+                        # 裸模型名列表；空 = 该上游无多模态模型）。
+                        "vision_models": list(getattr(c, "vision_models", None) or []),
                     }
                     for c in self.settings.upstreams_for(p)
                 ]

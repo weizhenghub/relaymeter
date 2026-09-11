@@ -604,6 +604,7 @@ async def _anthropic_adapter_relay(
                 user_json=user_json,
                 assistant_text=parser.assembled_text() or None,
                 assistant_json=resp.text if resp.text else None,
+                thinking_text=parser.assembled_thinking() or None,
             )
         except Exception as exc:
             log.exception("db.record_messages failed in adapter path: %s", exc)
@@ -770,6 +771,7 @@ async def _anthropic_adapter_relay_sse(
                         user_json=user_json,
                         assistant_text=parser.assembled_text() or None,
                         assistant_json=None,  # SSE 没有 raw_response
+                        thinking_text=parser.assembled_thinking() or None,
                     )
                 except Exception as exc:
                     log.exception("db.record_messages failed in adapter SSE path: %s", exc)
@@ -3092,6 +3094,7 @@ async def _relay_cross_wire(
                     user_json=user_json,
                     assistant_text=parser.assembled_text() or None,
                     assistant_json=content.decode("utf-8", "replace") if content else None,
+                    thinking_text=parser.assembled_thinking() or None,
                 )
             except Exception as exc:
                 log.exception("db.record_messages failed in cross-wire non-stream: %s", exc)
@@ -3301,6 +3304,7 @@ async def _relay_cross_wire(
                         user_json=user_json,
                         assistant_text=parser.assembled_text() or None,
                         assistant_json=None,  # SSE 没有 raw_response
+                        thinking_text=parser.assembled_thinking() or None,
                     )
                 except Exception as exc:
                     log.exception("db.record_messages failed in cross-wire stream: %s", exc)
@@ -3963,6 +3967,7 @@ async def relay(
                     assistant_json=parser.raw_response.decode("utf-8", "replace")
                     if parser.raw_response
                     else None,
+                    thinking_text=parser.assembled_thinking() or None,
                 )
             except Exception as exc:
                 log.exception("db.record_messages failed for %s: %s", inf.request_id, exc)

@@ -34,6 +34,11 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 _logger = logging.getLogger("relay.gui.panel_pool")
 
+# v0.209：球拖动事件静默多久算「dragend 丢失」→ 自动解冻几何。拖动期间
+# ball_main 每 12ms 发一个 moved，正常远小于本阈值；事件全停（鼠标被系统
+# 抢走 / 窗口被隐藏 / IPC 断）才触发，作为防死锁兜底。
+_BALL_DRAG_STALE_SEC = 1.0
+
 
 def _ensure_pool_file_log() -> None:
     """把 pool 的球相关 INFO 也写进 ball-debug.log（GUI 无 --diag 时默认丢）。"""
@@ -180,6 +185,15 @@ class PanelPool:
         self._ball_pos: Optional[tuple[int, int]] = None
         self._show_sidebar_on_stream: bool = True  # S1 默认
         self._expanded: bool = False
+        # v0.205：引导教程侧栏聚焦 —— 教程阶段在容器左侧临时开一条引导带
+        # （指引卡片悬浮在悬浮球左侧）。非 0 时容器几何左扩并加宽；教程
+        # 结束归零，几何完全复原。只影响教程演示，不影响真实请求布局。
+        self._tour_guide_width: int = 0
+        # v0.208：教程收起演示专用态 —— 收起时只隐藏面板 surface + 窗口缩到
+        # 「引导带+球帽」，**球帽保持 56px 不占满窗**（走 ghostSetTourCollapsed，
+        # 不用 body.collapsed —— 后者会 `#ghost-cap{width:100%}` 把球帽拉成整窗
+        # 大球，展开时出现"球先变大再展开"）。教程结束复原。
+        self._tour_collapsed: bool = False
         # v0.170：悬浮球置顶（与侧栏同层级）。默认 True（沿用 v0.165 行为），
         # 由设置页「悬浮球置顶」开关控制；改时同步球 + 侧栏（gui._sync_panel_topmost）。
         self._float_ball_topmost: bool = True
@@ -214,6 +228,12 @@ class PanelPool:
         #                     后由 _apply_pending_snap 一次性落地。
         #   _drag_settle_timer —— 侧栏拖动结束检测（moved 静默定时器）。
         self._ball_dragging: bool = False
+        # v0.209：最后一次球拖动事件的时间戳（dragstart / moved 刷新）。拖动
+        # 期间面板内容在变（列数变 → 宽度补间）会在 op-worker 上继续跑几何，
+        # 与 ball_main 的 setPosition 互相拉扯 → 卡顿漂移。冻结期间靠本时间戳
+        # 自愈：超过 _BALL_DRAG_STALE_SEC 没有新事件 = dragend 丢失，自动解冻，
+        # 免得几何被永久冻结（侧栏再也收不回来）。
+        self._ball_drag_ts: float = 0.0
         self._panel_dragging: bool = False
         self._pending_snap: Optional[dict] = None
         self._drag_settle_timer: Optional[threading.Timer] = None
@@ -317,7 +337,9 @@ class PanelPool:
                 try:
                     # 球帽点击（drag-end 无位移）→ 切收起/展开。
                     w.events.clicked += self.ball_clicked
-                    # 容器拖动：moved 实时更新球位；dragend 落盘 settings。
+                    # 容器拖动：dragstart 立刻冻结几何；moved 实时更新球位；
+                    # dragend 落盘 settings。
+                    w.events.dragstart += self.begin_ball_drag
                     w.events.moved += self._ball_drag
                     w.events.dragend += self._persist_ball_pos
                 except Exception:
@@ -462,6 +484,65 @@ class PanelPool:
             self._deferred_expanded_render = False
         self._relayout()
 
+    def set_tour_guide_width(self, width: int) -> None:
+        """v0.205：引导教程侧栏聚焦 —— 设教程引导带宽度（容器左扩 px）。
+
+        教程章节2 步骤3 播放时前端上报引导带宽度（非 0 = 展开引导模式，
+        容器几何左扩 + 加宽，指引卡片悬浮在悬浮球左侧）；0 = 结束复原。
+        只改几何，不动 _expanded —— 教程开始先 _expanded=True 再 set
+        guide 宽度，容器从球位展开成「引导带 + 球帽 + 侧栏」。
+
+        渲染层同步：把引导带宽度写成 CSS 变量 + 置 data-tour-guide="1"
+        （ghost_panel.html 的 #tour-guide-band 据此撑开，把球帽推到带右）。
+        """
+        with self._lock:
+            w = max(0, int(width or 0))
+            if w == self._tour_guide_width:
+                return
+            self._tour_guide_width = w
+            ww = self.always_one_window
+            if ww is not None:
+                js = (
+                    f"document.documentElement.style.setProperty('--tour-guide-w','{w}px');"
+                    f"document.getElementById('tour-guide-band')&&"
+                    f"document.getElementById('tour-guide-band').setAttribute('data-tour-guide','{1 if w else 0}');"
+                )
+                self._enqueue_op(lambda wj=js: ww.evaluate_js(wj))
+            self._relayout()
+
+    def set_tour_collapsed(self, collapsed: bool) -> dict:
+        """v0.208：教程收起/展开演示 —— 只隐藏面板 surface + 窗口缩到
+        「引导带+球帽」，**球帽保持 56px 不占满**。
+
+        不用 _apply_expanded_state / body.collapsed —— 后者会在收起 on_done
+        时 `ghostSetExpanded(false)` 触发 `body.collapsed #ghost-cap{width:100%}`，
+        把球帽拉成整个窗口大球；再展开时球帽从大缩回 56px，观感就是
+        「展开时悬浮球先变大再展开」（用户反馈）。本方法走 ghostSetTourCollapsed
+        （只隐藏 surface，球帽仍 ball_size），收起期间指引卡留在引导带内可见。
+        """
+        with self._lock:
+            self._tour_collapsed = bool(collapsed)
+            if collapsed:
+                self._expanded = False
+            else:
+                self._expanded = True
+            w = self.always_one_window
+            if w is None:
+                return {"ok": False, "available": False}
+            self._ensure_op_worker()
+            # ⚠ 展开必须同时清 body.collapsed + ghostSetExpanded(true) —— 否则
+            # 教程开始前残留的 `body.collapsed #ghost-cap{width:100%}` 会把球帽
+            # 拉成整个窗口大球（"悬浮球全程巨大"，用户反馈）。收起只走
+            # tour-collapsed（球帽 56px 不占满），不动 body.collapsed。
+            if collapsed:
+                js = "ghostSetTourCollapsed(true)"
+            else:
+                js = ("document.body.classList.remove('collapsed'); "
+                      "ghostSetExpanded(true); ghostSetTourCollapsed(false)")
+            self._enqueue_op(lambda ww=w, j=js: ww.evaluate_js(j))
+            self._relayout()   # 按 _tour_collapsed 重算几何（带+球 / 带+球+面板）
+            return {"ok": True, "available": True}
+
     def refresh_ball_visibility(self) -> None:
         """主开关(实时流侧栏)/一键隐藏变化后重算容器显隐。
 
@@ -501,10 +582,16 @@ class PanelPool:
         v0.184：容器左上角即球帽锚点（收起态窗口=球帽，展开态球帽恒左上）。
         dragend 事件带 (x, y)（ball_main.js 已换算成屏幕点）；缺参时读窗口
         当前位兜底。拖动结束清 _ball_dragging（_apply_geometry 恢复接管）。
+
+        v0.209：解冻放在**最前**、且与位置解析解耦 —— 下面读位失败会走
+        早退分支，若解冻留在后面就漏掉，几何得等 1s 过期才恢复（表现为点完
+        球帽要愣一下才展开）。dragend 已改为点击也发，所以这里必然跑到。
         """
         if not self._float_ball_enabled:
             return
         with self._lock:
+            self._ball_dragging = False
+            self._ball_drag_ts = 0.0
             x, y = None, None
             if len(args) >= 2:
                 try:
@@ -523,7 +610,6 @@ class PanelPool:
             if sw > 0 and sh > 0:
                 x = max(0, min(x, sw - 8))
                 y = max(0, min(y, sh - 8))
-            self._ball_dragging = False
             self._ball_pos = (x, y)
             s = self._settings()
             if s is not None:
@@ -535,13 +621,49 @@ class PanelPool:
             if self.always_one_visible and not self._all_hidden:
                 self._relayout()
 
+    def _drag_freeze_geometry(self) -> bool:
+        """v0.209：拖动中 → 几何操作全部让位 ball_main 的 setPosition。
+
+        直接读属性（不取锁）：调用点可能已在持锁路径内，RLock 下虽可重入但
+        没必要。带过期判定 —— 事件流断了（dragend 丢失）即自动解冻，否则
+        几何被永久冻结、侧栏再也收不回来。
+        """
+        if not self._ball_dragging:
+            return False
+        return (time.monotonic() - self._ball_drag_ts) < _BALL_DRAG_STALE_SEC
+
+    def begin_ball_drag(self, *args) -> None:
+        """v0.209：球/容器拖拽**开始**（Electron mousedown 广播）→ 立刻冻结几何。
+
+        必须在第一个 moved 事件之前置位。旧实现只在 _ball_drag（首个 ≥4px
+        位移的 moved）里置位，于是"按下即拖"的头 4px 内 _apply_geometry 仍会
+        执行 —— 若侧栏此刻正好发生容器变化（列数变 → 宽度补间，或队列里残留
+        的 move），窗口会被拽回旧球位，与 tickDrag 的 setPosition 互相拉扯，
+        表现为拖拽卡顿 + 漂移（用户反馈）。
+
+        同时中止在飞的宽度补间：_anim_resize 会在 ~700ms 内持续 setSize，
+        拖动期间窗口被反复 resize 观感同样是卡顿。seq 自增让补间线程下一帧
+        退出；因没有后继补间接管，须手工复位 _resize_anim_active，否则
+        _apply_geometry 里「补间不在飞才 flush 延迟渲染」的分支永远进不去
+        （收起动画的延迟隐藏就落不了地）—— 复位后由拖动结束的 _relayout 补上。
+        """
+        if not self._float_ball_enabled:
+            return
+        with self._lock:
+            self._ball_dragging = True
+            self._ball_drag_ts = time.monotonic()
+            if self._resize_anim_active:
+                self._width_anim_seq += 1
+                self._resize_anim_active = False
+
     def _ball_drag(self, *args) -> None:
         """拖动容器过程中的实时跟随：更新球位缓存（不落盘，dragend 落盘）。
 
         v0.184：容器本身由 ball_main.js 轮询光标移动；这里只同步 _ball_pos
         供展开定位，并置 _ball_dragging=True —— 拖动期间 _apply_geometry 见
         此标志直接 return（几何归 ball_main 管，防 _relayout 反扑把容器拽回
-        旧球位）。"""
+        旧球位）。v0.209：同时刷新 _ball_drag_ts（冻结自愈用）；置位本身仍
+        保留为兜底，主路径已提前到 dragstart 的 begin_ball_drag。"""
         if not self._float_ball_enabled:
             return
         if len(args) >= 2:
@@ -551,6 +673,7 @@ class PanelPool:
                 return
             with self._lock:
                 self._ball_dragging = True
+                self._ball_drag_ts = time.monotonic()
                 self._ball_pos = (int(x), int(y))
 
     # ------------------------------------------------------------------
@@ -627,9 +750,18 @@ class PanelPool:
         self._on_drag_settle = cb
 
     def ball_dragging(self) -> bool:
-        """外部（gui._update_panel_snap）查询球是否处于拖动状态 —— True 则不磁吸。"""
+        """外部（gui._update_panel_snap）查询球是否处于拖动状态 —— True 则不磁吸。
+
+        v0.209：带过期自愈 —— dragend 丢失（鼠标被系统抢走 / 窗口隐藏 /
+        IPC 断）时，事件流停 >1s 即解除，否则面板磁吸会永久失效。
+        """
         with self._lock:
-            return self._ball_dragging
+            if not self._ball_dragging:
+                return False
+            if (time.monotonic() - self._ball_drag_ts) >= _BALL_DRAG_STALE_SEC:
+                self._ball_dragging = False
+                return False
+            return True
 
     def panel_dragging(self) -> bool:
         """外部查询侧栏是否处于拖动状态 —— True 则 snap 只缓存不执行。"""
@@ -1094,12 +1226,16 @@ class PanelPool:
                         self._schedule_clear(rid)
                 # v0.106：窗口 idle 行为按 _should_keep_idle_open 决定 ——
                 # 仅「磁吸 + 始终开启」空闲保留显示；否则空闲隐藏（球模式恒隐藏，
-                # 由球 S1/S2 控制）。
+                # 由球 S1/S2 控制）。v0.208：教程引导进行中（_tour_guide_width>0，
+                # 章节2 步骤3 侧栏演示展开）时绝不 idle 收起 —— 悬浮窗要在用户
+                # 手动点「下一步」前一直保持展开、动画持续；除非还开着 key 防
+                # 意外，也顺带跳过 _hide（教程自己会上报宽度 0 复原）。
                 if (self.always_one_window is not None
                         and self.always_one_visible
                         and not self._rids
                         and not self._all_hidden
-                        and not self._should_keep_idle_open()):
+                        and not self._should_keep_idle_open()
+                        and not (self._tour_guide_width > 0)):
                     _logger.info("watchdog hiding idle panel (no active rid)")
                     self._hide_always_one()
                     self.always_one_manually_hidden = False
@@ -1212,6 +1348,12 @@ class PanelPool:
             for i in range(1, steps + 1):
                 if self._width_anim_seq != seq:
                     return  # 被新一轮动画接管
+                if self._drag_freeze_geometry():
+                    # v0.209：拖动开始 → 中止补间，几何交给 ball_main 的
+                    # setPosition。无后继补间接管，手工复位 active 标志，让
+                    # 拖动结束的 _relayout 能正常补上延迟渲染。
+                    self._resize_anim_active = False
+                    return
                 w_now = int(cur_w + dw * _ease_out(i / steps))
                 h_now = int(cur_h + dh * _ease_out(i / steps))
                 self._enqueue_op(
@@ -1325,38 +1467,83 @@ class PanelPool:
         sw, sh = screen or (0, 0)
         # ---- 球模式：容器 = 球帽 + 侧栏 ----
         if self._float_ball_enabled:
-            if self._ball_dragging:
+            if self._drag_freeze_geometry():
                 return True  # 拖动中 ball_main 管几何
             if self._ball_pos is None:
                 self._ball_pos = self._default_ball_pos()
             bx, by = self._ball_pos
-            if self._expanded:
+            # v0.208：教程收起演示（_tour_collapsed）走 else 分支 → 窗口「引导带
+            # + 球帽」、球帽 56px 不占满；非收起展开才走全展开。
+            if self._expanded and not self._tour_collapsed:
                 side_w = self._target_width()
                 if sw > 0:
                     max_w = max(self._panel_width, sw - bx - 4)
                     side_w = min(side_w, max_w)
                 h = min(self._panel_height, sh) if sh > 0 else self._panel_height
                 width = self._ball_size + side_w
-                # 出屏 clamp：优先球锚定（容器左上=球位）；右侧放不下则整体
-                # 左移保整窗在屏内；下界同理上移。
-                xx = bx
+                # v0.205：教程阶段容器左侧临时开引导带（指引卡片悬浮在悬浮
+                # 球左侧）。引导带在**球帽左边** —— 窗口左缘左移 guide px、
+                # 宽度加 guide px（球帽仍在原 bx 处，见 ghost_panel 布局：
+                # #ghost-cap 在 #ghost-root 左侧）。宽度由 JS 上报
+                # （set_tour_guide_width）；出屏 clamp 保整窗在屏内。
+                guide = max(0, int(getattr(self, "_tour_guide_width", 0) or 0))
+                if guide:
+                    width += guide
+                    if sw > 0 and width > sw:
+                        width = sw
+                # 出屏 clamp：优先球锚定（容器左上=球位）；左侧引导带放不下
+                # 或右侧放不下则整体平移保整窗在屏内；下界同理上移。
+                xx = bx - guide
                 if sw > 0 and xx + width > sw:
                     xx = max(0, sw - width)
+                if xx < 0:
+                    xx = 0
                 yy = by
                 if sh > 0 and yy + h > sh:
                     yy = max(0, sh - h)
             else:
-                width = self._ball_size
-                h = self._ball_size
-                xx, yy = bx, by
+                # v0.208：仅**教程收起演示**（_tour_collapsed）保留「引导带 + 球帽」
+                # 宽度、面板高度 —— 指引卡继续悬浮在球帽左侧可见（窗口不缩成
+                # 56px 裁掉 fixed 卡）。**普通收起**（_tour_collapsed=False）仍缩
+                # 成 ball_size 方 —— 否则 body.collapsed 会把球帽拉成整窗大球，
+                # 出现"悬浮球全程巨大"（用户反馈）。
+                guide = max(0, int(getattr(self, "_tour_guide_width", 0) or 0))
+                if self._tour_collapsed and guide:
+                    width = self._ball_size + guide
+                    if sw > 0 and width > sw:
+                        width = sw
+                    h = min(self._panel_height, sh) if sh > 0 else self._panel_height
+                    xx = bx - guide
+                    if sw > 0 and xx + width > sw:
+                        xx = max(0, sw - width)
+                    if xx < 0:
+                        xx = 0
+                    yy = by
+                    if sh > 0 and yy + h > sh:
+                        yy = max(0, sh - h)
+                else:
+                    width = self._ball_size
+                    h = self._ball_size
+                    xx, yy = bx, by
             self._ensure_op_worker()
+            # v0.209：几何操作包一层「执行瞬间仍在拖动则丢弃」。本分支顶部的
+            # _drag_freeze_geometry 只拦"新的"几何计算；已被之前某次容器变化
+            # 入队、排在 op-worker 队列里的 move/resize 仍会执行 —— 那正是拖动
+            # 中被拽回旧球位的漂移来源（队列有延迟，入队时还没拖动）。
+            # 只包 move/resize：hide / show / evaluate_js 不包，隐藏必须随时生效。
+            def _geom(fn):
+                def _run():
+                    if self._drag_freeze_geometry():
+                        return
+                    fn()
+                return _run
             first = self._last_panel_w == 0
             if width != self._last_panel_w or h != self._last_panel_h:
                 self._last_panel_w = width
                 self._last_panel_h = h
                 if first:
-                    self._enqueue_op(
-                        lambda ww=w, cw=width, ch=h: self._resize_safe(ww, cw, ch))
+                    self._enqueue_op(_geom(
+                        lambda ww=w, cw=width, ch=h: self._resize_safe(ww, cw, ch)))
                     self._flush_deferred_render()
                 else:
                     # 收起动画收尾后再隐藏面板 + 翻转球帽（串行动画顺序）；
@@ -1369,7 +1556,7 @@ class PanelPool:
                 # 后恢复都能正确补上面板隐藏 + 球帽翻转。
                 if not self._resize_anim_active:
                     self._flush_deferred_render()
-            self._enqueue_op(lambda ww=w, x=xx, y=yy: ww.move(xx, yy))
+            self._enqueue_op(_geom(lambda ww=w, x=xx, y=yy: ww.move(xx, yy)))
             return True
         # ---- 磁吸模式 ----
         if not self._dock_getter:

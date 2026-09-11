@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RelayMeter</title>
-    <link rel="stylesheet" href="styles-20260817.css?v=20260830-10" />
+    <link rel="stylesheet" href="styles-20260817.css?v=20260902-69" />
   </head>
   <body>
     <!-- v0.41 背景：删除 canvas + rAF 动效。回到 v0.22 之前的纯静态
@@ -475,6 +475,16 @@
                 <div class="card-empty">加载中…</div>
               </div>
             </section>
+            <!-- v0.121：引导教程 —— 重放入口。首次启动自动触发，走完/跳过
+                 后想再看从这儿进。点击由 app.js 的 startTour() 接管。 -->
+            <section class="settings-section" data-card="settings-tour">
+              <div class="settings-section-title" data-i18n="引导教程">引导教程</div>
+              <div class="settings-section-subtitle" data-i18n="重新播放首次启动时的界面引导">重新播放首次启动时的界面引导</div>
+              <div class="card-body">
+                <button class="btn btn-ghost" id="btn-tour-replay" type="button"
+                        data-i18n="开始引导">开始引导</button>
+              </div>
+            </section>
           </div>
         </section>
 
@@ -494,7 +504,7 @@
 
 <script src="vendor/d3.v7.min.js"></script>
 <script src="vendor/chart.umd.min.js"></script>
-<script src="app.js?v=20260830-09"></script>
+<script src="app.js?v=20260902-69"></script>
 
     <!-- v0.36 请求详情 modal：点击历史页/最近活动行 显示完整对话。
          居中卡片 + 半透明遮罩；ESC / 点遮罩 / 点 X 都关闭。
@@ -785,6 +795,33 @@
           <div class="modal-title" id="qs-editor-title">快捷切换编辑器</div>
         </div>
         <div class="modal-body" id="qs-editor-body"></div>
+      </div>
+    </div>
+
+    <!-- v0.122：引导式教程 —— 三区块动画演示 + 聚焦（重写 v0.121 spotlight）。
+         #tour-overlay 全屏遮罩；#tour-highlight 镂空高亮框（box-shadow 画孔，
+         呼吸脉动动画）；#tour-chapters 顶部章节条（1主页面 / 2实时流 / 3上游，
+         可点跳章节）；#tour-bubble 气泡承载步骤文案与操作；#tour-demo 演示
+         容器（气泡下方跑动作动画：数字滚动 / 扫光 / 迷你侧栏 / 表单示意）。
+         内容与步骤由 app.js 的 tourChapters 定义，localStorage
+         relay-gui-tour-v1 记录是否已完成。 -->
+    <div class="tour-overlay" id="tour-overlay" hidden>
+      <div class="tour-highlight" id="tour-highlight"></div>
+      <div class="tour-chapters" id="tour-chapters"></div>
+      <div class="tour-bubble" id="tour-bubble" role="dialog" aria-modal="true">
+        <div class="tour-step" id="tour-step"></div>
+        <div class="tour-chapter-title" id="tour-chapter-title"></div>
+        <div class="tour-title" id="tour-title"></div>
+        <div class="tour-body" id="tour-body"></div>
+        <div class="tour-demo" id="tour-demo" hidden></div>
+        <div class="tour-footer">
+          <div class="tour-dots" id="tour-dots"></div>
+          <div class="tour-actions">
+            <button class="btn btn-ghost" id="tour-skip" type="button">跳过</button>
+            <button class="btn btn-ghost" id="tour-prev" type="button" hidden>上一步</button>
+            <button class="btn btn-primary" id="tour-next" type="button">下一步</button>
+          </div>
+        </div>
       </div>
     </div>
 

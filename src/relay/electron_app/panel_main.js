@@ -133,6 +133,8 @@ function createWindow() {
       preload: path.join(__dirname, "panel_preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // v0.205：不节流后台定时器（面板 demo 动画走 setTimeout）。
+      backgroundThrottling: false,
     },
   });
 

@@ -41,6 +41,9 @@ desktop.ini
 # Project-specific: keep DB out of git (recreated on first run)
 relay.db
 relay.db-*
+# 透传模式独立库（passthrough 中间件首次运行自建）
+passthrough.db
+passthrough.db-*
 relay-gui.log
 relay_trace.log
 .env

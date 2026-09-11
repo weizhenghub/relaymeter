@@ -19,8 +19,8 @@
     <!-- v0.89 复用主窗 styles-20260817.css，所有主题色都是 CSS 变量
          （[data-theme="light"|"day"|"dark"]），setTheme 切一次属性即
          可生效，不需要新写一份 CSS。 -->
-    <link rel="stylesheet" href="styles-20260817.css?v=20260824-05" />
-    <link rel="stylesheet" href="live_panel.css?v=20260823-59" />
+    <link rel="stylesheet" href="styles-20260817.css?v=20260902-69" />
+    <link rel="stylesheet" href="live_panel.css?v=20260902-37" />
   </head>
   <body class="live-panel-body">
     <!-- v0.95 收尾：与主窗同款背景光晕 —— 复用 styles-20260817.css 的
@@ -74,6 +74,415 @@
     </div>
 
     <script>
+      // ---- v0.122：引导教程侧栏聚焦协议 ----
+      // 主窗 tour 章节2 步骤3 经 Python evaluate_js 调本窗函数做真实跨窗聚焦：
+      //   __tourPanel.highlight(sel)  画呼吸高亮框（复用 styles 的 tour-breathe）
+      //   __tourPanel.guide(sel,text) 高亮目标容器 + 弹一张引导卡（text 说明）
+      //   __tourPanel.demo(type)      跑演示动画（"ripple"/"req-in"/"flow"）
+      //   __tourPanel.clear()         移除高亮 + 演示 + 引导卡
+      // pywebview（非 Electron）下 evaluate_js 不可用 → 这些函数静默 no-op。
+      window.__tourPanel = (function () {
+        var hl = null, demoRow = null, guideEl = null;
+        function ensureHl() {
+          if (!hl) {
+            hl = document.createElement("div");
+            hl.id = "__tour-panel-hl";
+            hl.style.cssText =
+              "position:fixed;pointer-events:none;z-index:99999;display:none;" +
+              "border:2px solid var(--accent,#4f7cff);border-radius:8px;" +
+              "box-shadow:0 0 0 4px rgba(79,124,255,.22), 0 0 20px 4px rgba(79,124,255,.40);" +
+              // v0.209：与指引卡同步 transition（top/left/width/height）——
+              // 否则卡平滑移动、高亮瞬间到位，视觉上卡追着高亮跑（错位）。
+              "transition:top .45s ease,left .45s ease,width .45s ease,height .45s ease;" +
+              // ⚠ 不能用 tour-breathe（主窗 spotlight 动画）—— 其 box-shadow
+              // 0 0 0 9999px 会把高亮框投成**全屏灰色聚焦层**盖住整个侧栏。
+              "animation:__tour-hl-breathe 1.9s ease-in-out infinite;";
+            document.body.appendChild(hl);
+          }
+          return hl;
+        }
+        // v0.208：高亮框定位 —— 目标贴窗口边时 clamp 进窗口内，保证 2px 描边
+        // 完整可见（否则球帽在角落时上/右边的高亮线被窗口裁掉）。
+        function positionHl(r) {
+          var h2 = ensureHl();
+          h2.style.display = "block";
+          var vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+          var pad = 3;
+          var l = Math.max(0, r.left - pad);
+          var t = Math.max(0, r.top - pad);
+          var w = r.width + pad * 2;
+          var h = r.height + pad * 2;
+          if (l + w > vw) w = Math.max(pad * 2, vw - l);
+          if (t + h > vh) h = Math.max(pad * 2, vh - t);
+          h2.style.left = l + "px";
+          h2.style.top = t + "px";
+          h2.style.width = w + "px";
+          h2.style.height = h + "px";
+          return h2;
+        }
+        function highlight(sel) {
+          var target = sel && document.querySelector(sel);
+          var el = ensureHl();
+          if (!target) { el.style.display = "none"; return { ok: false }; }
+          var r = target.getBoundingClientRect();
+          positionHl(r);
+          return { ok: true };
+        }
+        // 引导卡：v0.208 起 = 主窗口 #tour-bubble 同款引导气泡卡片，渲染在
+        // 侧栏窗口左侧指引带区，指向目标。结构（章节标题 / 步骤标题 / 正文）
+        // 与主窗一致；样式：白/深面板底 + hairline 边框 + 14px 圆角 + 柔和
+        // 投影 + 内边距，指针不拦截（pointer-events:none）不挡侧栏内容。
+        function ensureGuide() {
+          if (!guideEl) {
+            guideEl = document.createElement("div");
+            guideEl.id = "__tour-panel-guide";
+            guideEl.className = "__tour-panel-guide-card";
+            guideEl.style.cssText =
+              "position:fixed;pointer-events:none;z-index:99999;display:none;" +
+              "width:280px;" +
+              "background:var(--panel-bg,#fff);color:var(--text-primary,#0a0a0a);" +
+              "border:1px solid var(--hairline,rgba(0,0,0,.08));border-radius:14px;" +
+              "box-shadow:0 24px 60px rgba(0,0,0,.40);transition:top .45s ease;" +
+              "padding:14px 18px 12px;" +
+              "font-family:'Microsoft YaHei','Microsoft YaHei UI','PingFang SC',sans-serif;";
+            guideEl.innerHTML =
+              '<div class="tp-gc-chapter"></div>' +
+              '<div class="tp-gc-title"></div>' +
+              '<div class="tp-gc-body"></div>';
+            // 章节标题（accent 小字，同主窗 .tour-chapter-title）
+            var chp = guideEl.firstElementChild;
+            chp.style.cssText = "font-size:11px;font-weight:700;color:var(--accent,#4f7cff);" +
+              "letter-spacing:.02em;margin-bottom:2px;";
+            // 步骤标题（15px 600，同主窗 .tour-title）
+            var ttl = chp.nextElementSibling;
+            ttl.style.cssText = "font-size:15px;font-weight:600;color:var(--text-primary,#0a0a0a);" +
+              "margin-bottom:6px;line-height:1.35;";
+            // 正文（12.5px 600，同主窗 .tour-body）
+            var bdy = ttl.nextElementSibling;
+            bdy.style.cssText = "font-size:12.5px;line-height:1.55;color:var(--text-primary,#0a0a0a);" +
+              "font-weight:600;";
+            document.body.appendChild(guideEl);
+          }
+          return guideEl;
+        }
+        // guide(sel, text, extra)：extra = JSON 串 {chapter,title,body} 时按
+        // 主窗气泡卡结构渲染；否则 text 全文放进正文区做兼容回退（探针直接
+        // 调 guide(sel, "文字") 也能显示）。
+        function guide(sel, text, extra) {
+          var target = sel && document.querySelector(sel);
+          var g = ensureGuide();
+          if (!target) { g.style.display = "none"; return { ok: false }; }
+          var card = {};
+          try { if (extra) card = JSON.parse(extra) || {}; } catch (e) { card = {}; }
+          var chp = g.children[0], ttl = g.children[1], bdy = g.children[2];
+          if (card.chapter || card.title) {
+            if (chp) chp.textContent = card.chapter || "";
+            if (ttl) ttl.textContent = card.title || "";
+            if (bdy) bdy.textContent = card.body || text || "";
+          } else {
+            if (bdy) bdy.textContent = String(text);
+          }
+          g.style.display = "block";
+          var r = target.getBoundingClientRect();
+          // 悬浮在目标左侧：卡片**右缘对齐**目标左缘（留 4px 缝隙给箭头），
+          // 垂直居中于目标。先量文字实际宽，再把整卡往左排 —— 卡片主体落在
+          // 目标左边的指引带空白区，不盖住目标；箭头正对目标。
+          var gt = Math.max(6, r.top + r.height / 2 - 22);
+          var vh = window.innerHeight || 0;
+          if (gt + 80 > vh) gt = Math.max(6, vh - 80);
+          g.style.top = gt + "px";
+          var gw = g.offsetWidth || 0;   // display:block 后实测卡宽
+          g.style.left = Math.max(6, r.left - 4 - gw) + "px";
+          // 高亮目标（与 guide 共用呼吸框）—— demo("flow") 清过 hl，这里
+          // 必须重新 ensureHl()，否则后续 guide 不再画高亮。
+          positionHl(r);
+          return { ok: true };
+        }
+        function demo(type) {
+          var list = document.getElementById("lp-ep-list");
+          if (type === "ripple" && list && !demoRow) {
+            demoRow = document.createElement("div");
+            demoRow.className = "tour-demo-ripple";
+            demoRow.style.margin = "4px 0";
+            demoRow.innerHTML = "<span>tour-demo</span> · anthropic";
+            list.prepend(demoRow);
+            highlight && highlight("#lp-ep-list");
+          }
+          // v0.205：请求卡到达动画 —— 画一条假请求行流入（滑入 + 呼吸高亮
+          // 整卡），演示「实际侧栏有请求时」的样子。
+          if (type === "req-in" && list && !demoRow) {
+            demoRow = document.createElement("div");
+            demoRow.className = "live-panel-row tour-demo-req-in";
+            demoRow.innerHTML =
+              '<div class="live-panel-row-head"><span class="tour-demo-req-m">claude-sonnet-4-6</span>' +
+              '<span class="live-panel-badge" data-phase="streaming">streaming</span></div>' +
+              '<div class="tour-demo-req-line"></div>';
+            list.prepend(demoRow);
+            highlight && highlight("#lp-ep-list");
+          }
+          // v0.205：完整流模拟 —— 3 端点 + 思考流 + 请求卡依次流入，展示
+          // 「实际侧栏有请求在流」的完整画面。真实业务渲染（live_panel.js）
+          // 会被 __tourPanel 演示行盖住？不会 —— 演示行只画到 endpoint 区，
+          // 不动 _epRids/真实容器，clear() 即还原。
+          if (type === "flow") {
+            clear();
+            var col = document.getElementById("lp-col-1");
+            var anchor = document.getElementById("lp-tools-wrap");
+            if (!col) return { ok: true };
+            // v0.209：demo stage 容器（fixed，脱离 live_panel.js 管理）
+            var c1r = col.getBoundingClientRect();
+            var stage = document.getElementById("tour-demo-stage");
+            if (!stage) {
+              stage = document.createElement("div");
+              stage.id = "tour-demo-stage";
+              stage.style.cssText = "position:fixed;left:" + Math.round(c1r.left) + "px;top:0;width:400px;height:100vh;display:flex;flex-direction:row;gap:1px;box-sizing:border-box;padding:4px 4px 12px;z-index:4;overflow:hidden;pointer-events:none;";
+              document.body.appendChild(stage);
+            }
+            // ① 端点内容区：只画 1 个请求（放 colA，与并发列同层级）
+            var colA = document.createElement("div");
+            colA.className = "tour-demo-col tour-demo-col-a";
+            colA.style.cssText = "width:400px;height:100vh;display:flex;flex-direction:column;gap:1px;box-sizing:border-box;flex:0 0 auto;";
+            stage.appendChild(colA);
+            var it = document.createElement("div");
+            it.className = "live-panel-row tour-demo-req-in tour-demo-flow-ep";
+            it.innerHTML = '<div class="live-panel-row-head"><span class="tour-demo-req-m">claude-sonnet-4-6</span><span class="live-panel-badge" data-phase="streaming">streaming</span></div><div class="lp-ep-item-sub"><span class="live-panel-label">claude-sonnet-4-6 · anthropic</span><span class="lp-ep-wire tour-demo-wire">0 → 0 B/s</span></div>';
+            colA.appendChild(it);
+            // ② 思考/正文流请求卡：思考流开始填，正文流保持空白
+            // ⚠ 所有 demo 内容放独立 #tour-demo-stage（fixed，脱离 live_panel.js
+            // 管理）—— 窗口加宽触发 live_panel.js layout 的 placeColumns 会清空
+            // .lp-col 子元素，把插在 col1 里的 demo 卡/工具卡删掉（"并发展开时
+            // 侧栏没内容"）。stage 自带 endpoint 行 + 卡 + 工具，live_panel 不管。
+            var demoEl = function (tag, cls, html) { var e = document.createElement(tag); e.className = cls; e.innerHTML = html; return e; };
+            var buildTok = function (lab, val) { return '<div class="live-panel-token"><div class="live-panel-token-label">' + lab + '</div><div class="live-panel-token-value tour-demo-tok">' + val + '</div></div>'; };
+            var card = document.createElement("section");
+            card.className = "live-panel-card lp-rid live-panel-thinkstream tour-demo-rid";
+            card.innerHTML = '<div class="live-panel-rid-head"><span class="lp-rid-index">①</span><span class="lp-rid-meta">claude-sonnet-4-6 · anthropic</span><span class="live-panel-badge lp-rid-badge tour-demo-badge" data-phase="streaming">流式中</span></div>' + '<div class="live-panel-stats tour-demo-stats">' + buildTok("输入","1.8k") + buildTok("输出","0") + buildTok("缓存读取","1.2k") + buildTok("缓存创建","0") + '<div class="live-panel-cache-rate">命中率<span class="tour-demo-cr">78%</span></div></div>';
+            card.appendChild(demoEl('div', 'live-panel-think-card',
+              '<div class="live-panel-thinking-head"><span class="live-panel-thinking-title">思考</span></div>' +
+              '<pre class="live-panel-pre live-panel-thinking tour-demo-think"></pre>'));
+            card.appendChild(demoEl('section', 'live-panel-stream-wrap',
+              '<div class="live-panel-stream-head"><span class="live-panel-stream-title"><span class="live-panel-label">正文</span></span></div>' +
+              '<div class="live-panel-stream tour-demo-stream"></div>'));
+            colA.appendChild(card);
+            // ③ 读写与缓存工具卡
+            var tool = document.createElement("details");
+            tool.className = "live-panel-tool tour-demo-tool";
+            tool.open = true;
+            var tTool = (window.TOUR_DEMO_TEXT && window.TOUR_DEMO_TEXT.tool) || { name: "Read", input: { file_path: "/cache/ctx.hash" } };
+            tool.innerHTML = '<summary><span class="live-panel-tool-name">' + (tTool.name || "tool") + '</span><span class="live-panel-tool-age">刚刚</span></summary><pre class="live-panel-tool-args">' + JSON.stringify(tTool.input || {}, null, 2) + '</pre>';
+            colA.appendChild(tool);
+            // 捕获引用并启动「真实流式 + 指引卡三连动」
+            var toks = card.querySelectorAll(".tour-demo-tok");
+            var feeds = {
+              col: stage,
+              outTok: toks[1],             // 输出
+              crTok: toks[2],              // 缓存读取
+              ccTok: toks[3],              // 缓存创建
+              crVal: card.querySelector(".tour-demo-cr"),
+              thinkEl: card.querySelector(".tour-demo-think"),
+              streamEl: card.querySelector(".tour-demo-stream"),
+              wire: it.querySelector(".tour-demo-wire"),
+              regionEp: it,                // 端点区（指引卡三连动目标）
+              regionThink: card.querySelector(".live-panel-think-card"),
+              regionStats: card.querySelector(".tour-demo-stats"),
+              regionBody: card.querySelector(".live-panel-stream-wrap"),
+              regionTool: tool,
+            };
+            startDemoFlow(feeds);
+            return { ok: true };
+          }
+          return { ok: true };
+        }
+        // v0.208：真实流式 + 指引卡三连动 —— demo("flow") 建卡后，用 setInterval
+        // 持续生成到 20000 字清空从头循环；左侧指引卡按「端点→思考→正文」逐次
+        // 下移解说，移到正文区时思考停、正文流开始。⚠ 用 setInterval（隐藏窗口
+        // 也跑，backgroundThrottling 已由 ball_main.js 关掉）；clear() 先停。
+        var demoFeeds = null;
+        var demoGenTimer = null;
+        var demoWalkTimer = null;
+        var DEMO_TOK = ["输入","输出","缓存","命中","透传","流式","上下文","序列化","字段","映射","delta","content","role","finish","reason","usage","token","增量","累积","刷新","缓存片段","复用","等待下一段","解析","路由","上游","校验","通过","开始","透传响应","执行函数","写入缓存","读取参考","生成","返回"];
+        var DEMO_CAP = 20000;      // 最多 20000 字后清空从头循环
+        var DEMO_TICK_MS = 100;    // 每跳 100ms
+        var DEMO_CHARS_PER_TICK = 40; // 每跳 40 字 → ~100 token/s（真实文本）
+        var DEMO_TOK_PER_TICK = 10; // 保留（未用，语义 = 100 token/s）
+        var WALK_STOPS = [
+          { el: null, ball: true, title: "悬浮球", body: "可点击悬浮球展开或收起侧边栏。收起动画 ↓ 展开动画 ↓" },
+          { el: null, title: "端点内容", body: "正在使用的模型和协议" },
+          { el: null, title: "读写缓存展示区", body: "此次请求的输入、输出、缓存读写以及缓存命中率" },
+          { el: null, title: "思考流", body: "显示本次思考的思考流" },
+          { el: null, title: "正文流", body: "显示本次思考的正文流" },
+          { el: null, title: "工具调用", body: "显示本次请求的工具调用" },
+          { el: null, title: "并发", body: "多个请求同时流式展示，侧边栏自动延展" },
+        ];
+        function placeGuide(el, title, body, chapter) {
+          var g = ensureGuide();
+          if (!el) return;
+          var chp = g.children && g.children[0], ttl = g.children && g.children[1], bdy = g.children && g.children[2];
+          if (chp) chp.textContent = chapter || "";
+          if (ttl) ttl.textContent = title || "";
+          if (bdy) bdy.textContent = body || "";
+          g.style.display = "block";
+          var r = el.getBoundingClientRect();
+          var gt = Math.max(6, r.top + r.height / 2 - 22);
+          var vh = window.innerHeight || 0;
+          if (gt + 80 > vh) gt = Math.max(6, vh - 80);
+          g.style.top = gt + "px";           // transition:top 让它向下平滑平移
+          var gw = g.offsetWidth || 0;
+          g.style.left = Math.max(6, r.left - 4 - gw) + "px";
+          positionHl(r);
+        }
+        var _demoSticky = {};
+        function demoStickyScroll(el) {
+          if (!el) return;
+          var slack = 24, now = Date.now();
+          var key = el._stk || (el._stk = "e" + (Math.random() * 1e9 | 0));
+          var st = _demoSticky[key] || (_demoSticky[key] = { last: true, at: 0 });
+          var cur = el.scrollTop + el.clientHeight >= el.scrollHeight - slack;
+          if (cur) { st.last = true; st.at = now; }
+          else if (st.last && (now - st.at) < 500) { /* 离开底部 <500ms 仍粘底 */ }
+          else { st.last = false; return; }
+          el.scrollTop = el.scrollHeight;
+        }
+        function demoGenTick() {
+          var f = demoFeeds;
+          if (!f || !f.col) return;
+          // v0.209：多请求并发 —— 每请求独立 streams 条目，各自 pos/mode 生成
+          var streams = f.streams || [];
+          streams.forEach(function (st) {
+            var mode = st.mode || "think";
+            var el = mode === "think" ? st.thinkEl : st.streamEl;
+            var src = (window.TOUR_DEMO_TEXT || {})[mode === "think" ? "think" : "body"] || "";
+            var acc = el && el._acc !== undefined ? el._acc : "";
+            acc += src.slice((st.pos || 0), (st.pos || 0) + DEMO_CHARS_PER_TICK);
+            st.pos = (st.pos || 0) + DEMO_CHARS_PER_TICK;
+            if (acc.length >= DEMO_CAP || (st.pos || 0) >= src.length) { acc = ""; st.pos = 0; }
+            if (el) { el._acc = acc; el.textContent = acc; demoStickyScroll(el); }
+            // v0.209：真实单调累计 —— 输入/输出/缓存读都是**累计 token**（只增不减），
+            // 命中率 = 累计 cache_read/(cache_read+input) 稳定比例（不来回跳）；
+            // wire = 入/出向累计字节数（只增不减），不再随机跳动。
+            if (st.inTok) { st.in = (st.in || 5000) + (mode === "body" ? 4 : 1); st.inTok.textContent = (st.in / 1000).toFixed(1) + "k"; }
+            if (st.outTok) { st.out = (st.out || 120) + (mode === "body" ? 6 : 2); st.outTok.textContent = (st.out / 1000).toFixed(2) + "k"; }
+            if (st.crTok) { st.cr = (st.cr || 17700) + (mode === "body" ? 2 : 1); st.crTok.textContent = (st.cr / 1000).toFixed(1) + "k"; }
+            if (st.ccTok) { if (Math.random() > 0.95) st.cc = (st.cc || 0) + 1; st.ccTok.textContent = String(st.cc || 0); }
+            if (st.crVal) {
+              var cr2 = st.cr || 17700, in2 = st.in || 5000;
+              st.rate = (cr2 + in2) > 0 ? (cr2 / (cr2 + in2)) * 100 : null;
+              st.crVal.textContent = st.rate === null ? "—" : st.rate.toFixed(1) + "%";
+            }
+            if (st.wire) {
+              st.inB = (st.inB || 0) + Math.floor(80 + Math.random() * 60);
+              st.outB = (st.outB || 0) + Math.floor(60 + Math.random() * 50);
+              st.wire.textContent = (st.inB / 1000).toFixed(1) + "k → " + (st.outB / 1000).toFixed(1) + "k";
+            }
+          });
+        }
+        function demoWalkTick() {
+          var f = demoFeeds;
+          if (!f) return;
+          var s = WALK_STOPS[f.walkStep] || null;
+          if (s && s.el) placeGuide(s.el, s.title, s.body, "");
+          // 到正文区（第 4 步）→ 思考停、正文流开始
+          if (f.walkStep === 4 && f.mode !== "body") { f.mode = "body"; if (f.streams && f.streams[0]) f.streams[0].mode = "body"; f.ti = 0; }
+          // 工具卡（第 5 步）后 → 扩展侧边栏展示并发（步骤2）
+          if (f.walkStep === 5) extendConcurrent(f);
+          f.walkStep = (f.walkStep === undefined ? 0 : f.walkStep) + 1;
+          if (f.walkStep > 6) { if (demoWalkTimer) { clearInterval(demoWalkTimer); demoWalkTimer = null; } }
+        }
+        function extendConcurrent(f) {
+          // v0.209：步骤2 —— 侧边栏扩展展示并发。工具卡后延展出 col2/col3（各自
+          // 真实文本流式），上报列数让 Python 加宽窗口；指引卡移到整个侧边栏
+          // （高亮整窗）讲"并发"。
+          // ⚠ 并发列**不放进 .live-panel-main**（那是 live_panel.js 管理的，窗口
+          // 加宽触发它的 resize→layout 会把 demo 列清掉，用户反馈"没展开"）。
+          // 用独立 fixed 容器挂 body，样式复制 .lp-col（400px 宽 flex 列）。
+          if (!f || f._extended) return;
+          f._extended = true;
+          var stage = document.getElementById("tour-demo-stage") || document.querySelector(".live-panel-main");
+          if (!stage) return;
+          var wrap = stage;   // stage 本身 flex row，并发列直接追加
+          if (stage.style.width !== "1200px") stage.style.width = "1200px";
+          var extras = [
+            { idx: "\u2461", meta: "gpt-4o · openai" },
+            { idx: "\u2462", meta: "deepseek-v3 · deepseek" },
+          ];
+          extras.forEach(function (ex) {
+            var col = document.createElement("div");
+            col.className = "tour-demo-col";
+            col.style.cssText =
+              "width:400px;height:100vh;display:flex;flex-direction:column;gap:1px;" +
+              "box-sizing:border-box;flex:0 0 auto;";
+            var card = document.createElement("section");
+            card.className = "live-panel-card lp-rid live-panel-thinkstream tour-demo-rid";
+            card.innerHTML =
+              '<div class="live-panel-rid-head"><span class="lp-rid-index">' + ex.idx + '</span>' +
+              '<span class="lp-rid-meta">' + ex.meta + '</span>' +
+              '<span class="live-panel-badge lp-rid-badge tour-demo-badge" data-phase="streaming">\u6d41\u5f0f\u4e2d</span></div>' +
+              '<div class="live-panel-stats tour-demo-stats">' +
+              '<div class="live-panel-token"><div class="live-panel-token-label">\u8f93\u5165</div><div class="live-panel-token-value tour-demo-tok">0</div></div>' +
+              '<div class="live-panel-token"><div class="live-panel-token-label">\u8f93\u51fa</div><div class="live-panel-token-value tour-demo-tok">0</div></div>' +
+              '<div class="live-panel-token"><div class="live-panel-token-label">\u7f13\u5b58\u8bfb\u53d6</div><div class="live-panel-token-value tour-demo-tok">0</div></div>' +
+              '<div class="live-panel-token"><div class="live-panel-token-label">\u7f13\u5b58\u521b\u5efa</div><div class="live-panel-token-value tour-demo-tok">0</div></div>' +
+              '<div class="live-panel-cache-rate">\u547d\u4e2d\u7387<span class="tour-demo-cr">\u2014</span></div></div>';
+            var th = document.createElement("div"); th.className = "live-panel-think-card";
+            th.innerHTML = '<div class="live-panel-thinking-head"><span class="live-panel-thinking-title">\u601d\u8003</span></div><pre class="live-panel-pre live-panel-thinking tour-demo-think"></pre>';
+            var sw = document.createElement("section"); sw.className = "live-panel-stream-wrap";
+            sw.innerHTML = '<div class="live-panel-stream-head"><span class="live-panel-stream-title"><span class="live-panel-label">\u6b63\u6587</span></span></div><div class="live-panel-stream tour-demo-stream"></div>';
+            card.appendChild(th); card.appendChild(sw);
+            col.appendChild(card);
+            wrap.appendChild(col);
+            var toks = card.querySelectorAll(".tour-demo-tok");
+            f.streams.push({ thinkEl: card.querySelector(".tour-demo-think"),
+              streamEl: card.querySelector(".tour-demo-stream"), pos: 0, mode: "think",
+              outTok: toks[1], crTok: toks[2], ccTok: toks[3], crVal: card.querySelector(".tour-demo-cr") });
+          });
+          // 上报列数 → Python 加宽窗口（真机 Electron 有 pywebview 桥）
+          if (window.pywebview && window.pywebview.api && window.pywebview.api.live_panel_layout) {
+            try { window.pywebview.api.live_panel_layout(3); } catch (e) {}
+          }
+          // 指引卡指向整个侧边栏（高亮整窗）讲"并发"
+          f.regionConcurrent = stage;
+          WALK_STOPS[6].el = stage;
+        }
+        function startDemoFlow(r) {
+          stopDemoStream();
+          demoFeeds = r;
+          r.mode = "think"; r.ti = 0;
+          r.walkStep = 1;   // 从端点起（悬浮球卡+收起/展开由主窗 bridge 真实动画驱动）
+          r.regionEp = r.regionEp || r.col.querySelector(".tour-demo-flow-ep");
+          r.regionStats = r.regionStats || r.col.querySelector(".tour-demo-stats");
+          WALK_STOPS[0].el = document.getElementById("cap-ball") || r.regionEp;
+          WALK_STOPS[1].el = r.regionEp;
+          WALK_STOPS[2].el = r.regionStats;
+          WALK_STOPS[3].el = r.regionThink;
+          WALK_STOPS[4].el = r.regionBody;
+          WALK_STOPS[5].el = r.regionTool;
+          r.streams = [{ thinkEl: r.thinkEl, streamEl: r.streamEl, pos: 0, mode: "think",
+            outTok: r.outTok, crTok: r.crTok, ccTok: r.ccTok, crVal: r.crVal, wire: r.wire }];
+          demoGenTimer = setInterval(demoGenTick, DEMO_TICK_MS);
+          // v0.209：展开后立刻显示端点指引（首次立即），后续容器每 1s 切换
+          demoWalkTick();
+          demoWalkTimer = setInterval(demoWalkTick, 1000);
+        }
+        function stopDemoStream() {
+          if (demoGenTimer) { clearInterval(demoGenTimer); demoGenTimer = null; }
+          if (demoWalkTimer) { clearInterval(demoWalkTimer); demoWalkTimer = null; }
+          demoFeeds = null;
+        }
+
+        function clear() {
+          stopDemoStream();
+          if (hl) { hl.remove(); hl = null; }
+          if (guideEl) { guideEl.remove(); guideEl = null; }
+          if (demoRow) { demoRow.remove(); demoRow = null; }
+          document.querySelectorAll(".tour-demo-flow-ep, .tour-demo-req-think, .tour-demo-rid, .tour-demo-tool, .tour-demo-col, #tour-demo-concurrent").forEach(function (el) {
+            el.remove();
+          });
+          return { ok: true };
+        }
+        return { highlight: highlight, guide: guide, demo: demo, clear: clear };
+      })();
+    </script>
+    <script>
       // ---- Electron 拖拽接线（v0.183）----
       // 顶栏拖拽区 mousedown -> panelDrag.start()，document mouseup -> end()。
       // 主进程 panel_main.js 轮询光标跟手，只有用户拖动才发 moved 事件。
@@ -100,6 +509,7 @@
         });
       })();
     </script>
+    <script src="tour_demo_text.js?v=20260902-25"></script>
     <script src="live_panel.js?v=20260825-01"></script>
   </body>
 </html>

@@ -176,6 +176,11 @@ function createWindow() {
       preload: path.join(__dirname, "main_preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // v0.205：不节流后台定时器。教程/演示动画全走 setTimeout 节奏
+      // （tour 定位 + 2s 切换 + 悬浮球展开），Chromium 默认对隐藏/最小化
+      // 窗口把后台 timer 砍到 1Hz（甚至更狠），步骤切换/演示动画在真实
+      // GUI 里卡住不动。关掉后 timer 照常按设定毫秒跑（无头探针已如此）。
+      backgroundThrottling: false,
     },
   });
 

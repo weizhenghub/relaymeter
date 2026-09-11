@@ -1848,6 +1848,48 @@ body[data-view-dir="up"] .view:not([hidden]) {
   }
 }
 
+/* 教程演示专用：把 bump 波纹染成红色（教程文字「该上游被调用一次时，
+ * 闪过红色动画」）。演示行同时挂 upstream-row-bumped + tour-bump-red，
+ * 只覆盖 ::after 的渐变颜色（动画/结构仍走 bumped 的 live-ripple）。 */
+.tour-bump-red.upstream-row-bumped::after {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--text-error) 46%, transparent) calc(50% - var(--flash-width, 88%) / 4),
+    color-mix(in srgb, var(--text-error) 88%, transparent) calc(50% - var(--flash-width, 88%) / 8),
+    var(--text-error) 50%,
+    color-mix(in srgb, var(--text-error) 88%, transparent) calc(50% + var(--flash-width, 88%) / 8),
+    color-mix(in srgb, var(--text-error) 46%, transparent) calc(50% + var(--flash-width, 88%) / 4),
+    transparent 100%
+  );
+}
+
+/* 教程演示专用：动画扫光时文字悬浮在光芒之上、去掉金色渐变扫字。
+ *
+ * 真实应用里 bump 波纹时 `.upstream-row-bumped .upstream-name` 会变成
+ * 透明 + 金色渐变裁剪文字（name-gold-sweep），且 ::after 波纹层
+ * (absolute inset:0) 盖在整行文字上 —— 扫光瞬间文字既被金色带遮、又被
+ * 波纹层盖住。教程里用户明确要「文字悬浮在动画光芒上面，不用金色渐变，
+ * 直接黑色」。
+ *
+ * 只作用于演示行（tour-demo-row）：文字层 z-index 提到波纹(::after)之上，
+ * 名字固定主题文字色（--text-primary，浅色=黑），金色扫字被关闭。
+ * 父 row 没有显式 z-index，子元素的 z-index 只跟兄弟 ::after 比，能盖住
+ * 波纹层且不会跟页面其它层打架；行内 flex 子项相对定位即可。 */
+.tour-demo-row.upstream-row > .upstream-name,
+.tour-demo-row.upstream-row > .upstream-windows,
+.tour-demo-row.upstream-row > .upstream-release {
+  position: relative;
+  z-index: 2;
+}
+.tour-demo-row.upstream-row-bumped .upstream-name {
+  color: var(--text-primary);
+  background-image: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+  animation: none;
+}
+
 /* v0.53：count 减少时的反向波纹。
  *
  * 跟 bumped 同一思路 —— 复用 .upstream-row::after 的 base 结构
@@ -2581,11 +2623,10 @@ body[data-view-dir="up"] .view:not([hidden]) {
    * position:relative 让 offsetParent=.grid，与 JS 坐标语义对齐。
    * clampFreePos 用的 clientWidth 也正好以 .grid 为基准。 */
   position: relative;
-  /* gap: 16px + !important —— 不写 !important 会被某条更深特异性规则
+  /* gap: 8px + !important —— 不写 !important 会被某条更深特异性规则
    * 压成 6px（CDP 实测发现），原因排查中；!important 兜底更稳。
-   * gap 数值 16px 等于 --spacing-lg，硬编码避免 var() 在某些 WebView2
-   * 环境下解析的不确定性。 */
-  gap: 16px !important;
+   * v0.NNN：卡片间距 16px → 8px（更紧凑，用户要求「排列更紧密」）。 */
+  gap: 8px !important;
   align-items: flex-start;
 }
 .view[data-view="overview"] > .grid > .glass-card {
@@ -3180,6 +3221,172 @@ body.card-resizing-both * {
   font-size: 16px;
   line-height: 1;
   cursor: not-allowed;
+}
+
+/* v0.NNN：总览「历史上游」卡 —— 所有在 DB 出现过、含已删配置的 upstream。
+ * 卡片 body 固定高度可滚动，行紧凑；每条带现存/已删除 badge + 彻底删除 ×。 */
+.upstream-history-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  letter-spacing: .04em;
+  vertical-align: middle;
+}
+.upstream-history-badge.badge-live {
+  background: var(--text-success);
+  color: #fff;
+}
+.upstream-history-badge.badge-gone {
+  background: var(--glass-surface);
+  color: var(--text-muted);
+}
+#card-history-upstreams-body {
+  max-height: 400px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* 总览卡片 body 内边距由 .card-body 统一给，这里贴合行排版。 */
+.uhist-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  width: fit-content;
+  max-width: 440px;
+  padding: 5px 10px;
+  margin: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: transparent;
+}
+.uhist-row.uhist-gone {
+  opacity: .72;
+}
+.uhist-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.uhist-name-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.uhist-name .upstream-detail-platform {
+  flex: 0 0 auto;
+}
+.uhist-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  flex: 0 1 auto;
+}
+.uhist-meta b {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.uhist-del {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+}
+.uhist-del:hover {
+  color: var(--quota-exhausted);
+  background: var(--glass-surface);
+}
+
+/* v0.NNN：上游页「历史上游」区 —— 所有在 DB 出现过、含已删配置的 upstream。
+ * 标题 + 全部条目包在一个容器里，容器自控内部间距（flex gap），避免父
+ * .card-body 的 12px gap 把每一条目撑开。 */
+.upstream-history-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+.upstream-history-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.upstream-history-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.upstream-history-row {
+  display: block;
+  position: relative;
+  /* padding-right 预留右侧彻底删除按钮空间（按钮 absolute right:8, 22px 宽），
+     fit-content 让行宽贴内容，按钮不重叠也不留大片空白。 */
+  padding: 6px 92px 6px 10px;
+  margin: 0;
+  width: fit-content;
+  max-width: 440px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: transparent;
+}
+.upstream-history-gone {
+  opacity: .72;
+}
+.upstream-history-row .upstream-detail-name {
+  padding-right: 96px; /* 给右侧删除按钮留位 */
+}
+.upstream-history-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.upstream-history-meta b {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.upstream-history-delete {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--quota-exhausted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.upstream-history-delete:hover {
+  background: rgba(229, 57, 53, .1);
+  border-color: var(--quota-exhausted);
 }
 
 /* v0.11.8: 设置页一体化 —— 不再用大块玻璃卡片容器（白框白块），
@@ -4671,6 +4878,75 @@ select:focus {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--platform-anthropic) 30%, transparent);
 }
 
+/* v0.202：各上游多模态 —— 设置页逐上游模型列表。容器继承
+ * .settings-item-control（flex 单行），覆盖成纵向多列，让每个上游区块
+ * 独占一块、模型勾选行在父块内堆叠。 */
+.settings-upstream-vision-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cfg-upstream-vision-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cfg-upstream-vision-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cfg-upstream-vision-platform {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.cfg-upstream-vision-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 每行 = 模型名 + 勾选框，沿用 .cfg-model-row 的配色/圆角。 */
+.cfg-upstream-vision-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.cfg-upstream-vision-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.cfg-upstream-vision-cb {
+  accent-color: var(--accent, #4c9aff);
+  cursor: pointer;
+}
+
+.cfg-upstream-vision-flag {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 /* Bare input that lives inside the chip box — no border of its own so
  * the surrounding .cfg-chips reads as the single field. */
 .cfg-chip-input {
@@ -4979,6 +5255,54 @@ select:focus {
   font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
 }
 
+/* v0.NNN：消息正文折叠 —— 前 200 字符 + 剩余折叠，三角箭头展开，可滚动 */
+.modal-msg-fold {
+  margin-top: 6px;
+}
+.modal-msg-fold summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 0;
+  user-select: none;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.modal-msg-fold summary::-webkit-details-marker { display: none; }
+.modal-msg-fold summary:hover { color: var(--text-primary); }
+/* v0.NNN：展开后按钮隐藏 —— 内容已全展示，不再需要「展开剩余」提示。 */
+.modal-msg-fold[open] summary { display: none; }
+.modal-msg-fold-arrow {
+  display: inline-block;
+  transition: transform .12s ease;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.modal-msg-fold[open] .modal-msg-fold-arrow { transform: rotate(90deg); }
+.modal-msg-fold-body {
+  margin-top: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 10px;
+  border-left: 2px solid var(--hairline);
+  background: var(--panel-alt);
+  border-radius: var(--radius-sm);
+  /* v0.NNN：中文长串修复 —— 去掉 word-break:break-word（会把 flex 里的
+   * 无空格中文按字符压窄成 60-80px 细条），改 overflow-wrap:anywhere 让
+   * 长串在容器内换行但容器保持撑满宽度。 */
+  width: 100%;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
 .modal-msg-json {
   margin-top: 8px;
   font-size: 11px;
@@ -5137,6 +5461,10 @@ select:focus {
   word-break: break-word;
   padding: 16px 24px;
 }
+/* v0.NNN：多按钮对话框（删除上游两级流程）富文本正文。
+   .dlg-danger 红加粗 / .dlg-safe 绿加粗 —— 语义强调，不改变排版。 */
+.dialog-html-body b.dlg-danger { color: var(--quota-exhausted); font-weight: 700; }
+.dialog-html-body b.dlg-safe   { color: var(--text-success);  font-weight: 700; }
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -5144,6 +5472,98 @@ select:focus {
   padding: 12px 24px 16px;
   border-top: 1px solid var(--hairline);
 }
+
+/* ---------------------------------------------------------------------
+ * v0.NNN：设置页「清理原文」两级弹窗。
+ * --------------------------------------------------------------------- */
+.origin-dialog { width: 640px; max-width: 92vw; }
+.origin-msg-dialog { width: 820px; max-width: 94vw; }
+.origin-dlg-body { display: flex; flex-direction: column; gap: 10px; }
+.origin-tabs { display: flex; gap: 6px; }
+.origin-tab { border: 1px solid var(--hairline); color: var(--text-secondary); }
+.origin-tab.active { border-color: var(--text-primary); color: var(--text-primary); }
+.origin-pane { display: flex; flex-direction: column; gap: 8px; }
+.origin-nav { display: flex; align-items: center; justify-content: center; gap: 6px; }
+/* GitHub 风格最近一年热力图：7 行 × ~53 周列，每格=一天，颜色深度按体量 */
+.gh { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; overflow-x: auto; padding-bottom: 2px; }
+.gh-months {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 8px;
+  gap: 2px;
+  margin-left: 16px; /* 对齐 cells（让出左侧周标签列） */
+}
+.gh-month { font-size: 9px; color: var(--text-muted); line-height: 12px; white-space: nowrap; }
+.gh-body { display: flex; gap: 3px; }
+.gh-wd-col { display: grid; grid-template-rows: repeat(7, 8px); gap: 2px; }
+.gh-wd { font-size: 8px; color: var(--text-muted); line-height: 8px; text-align: right; }
+.gh-cells {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 8px);
+  grid-auto-columns: 8px;
+  gap: 2px;
+}
+.gh-cell { width: 8px; height: 8px; border-radius: 2px; cursor: pointer; user-select: none; }
+.gh-cell:hover { outline: 1px solid var(--text-primary); }
+/* 颜色档：GitHub 绿阶 */
+.gh-l0 { background: transparent; border: 1px solid var(--hairline); }
+.gh-l1 { background: rgba(46, 160, 67, .22); }
+.gh-l2 { background: rgba(46, 160, 67, .45); }
+.gh-l3 { background: rgba(46, 160, 67, .72); }
+.gh-l4 { background: #1f883d; }
+.gh-legend { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-muted); }
+.gh-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.gh-swatch.gh-l0 { border: 1px solid var(--hairline); background: transparent; }
+.gh-swatch.gh-l1 { background: rgba(46, 160, 67, .22); }
+.gh-swatch.gh-l2 { background: rgba(46, 160, 67, .45); }
+.gh-swatch.gh-l3 { background: rgba(46, 160, 67, .72); }
+.gh-swatch.gh-l4 { background: #1f883d; }
+/* 按上游筛选列表 */
+.origin-up-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; }
+.origin-up-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--hairline); border-radius: var(--radius-md); cursor: pointer;
+}
+.origin-up-item:hover { border-color: var(--text-primary); }
+.origin-up-name { font-weight: 600; color: var(--text-primary); }
+.origin-up-meta { font-size: 11px; color: var(--text-muted); }
+.origin-msg-dialog .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.origin-msg-dialog .modal-title { margin-bottom: 0; }
+.origin-msg-head-btns { display: inline-flex; gap: 6px; flex: 0 0 auto; }
+/* 消息列表（二级弹窗） */
+.origin-msg-body { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 6px; }
+.origin-msg-head, .origin-msg-row {
+  display: grid; grid-template-columns: 70px 1fr 2fr 1fr 56px; gap: 8px; align-items: center;
+}
+.origin-msg-head { font-size: 11px; color: var(--text-muted); padding: 4px 8px; border-bottom: 1px solid var(--hairline); }
+.origin-msg-list { display: flex; flex-direction: column; gap: 2px; max-height: 360px; overflow-y: auto; }
+.origin-msg-row {
+  padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px;
+  color: var(--text-primary); background: transparent;
+}
+.origin-msg-row:hover { background: var(--glass-surface); }
+.origin-msg-time { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.origin-msg-model { font-weight: 600; }
+.origin-msg-content { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.origin-msg-up { color: var(--text-muted); }
+.origin-msg-err { color: var(--quota-exhausted); }
+/* 右键上下文菜单 */
+.origin-ctx {
+  position: fixed; z-index: 5000; min-width: 120px;
+  background: var(--panel-bg); border: 1px solid var(--hairline); border-radius: var(--radius-md);
+  box-shadow: 0 6px 20px rgba(0,0,0,.25); padding: 4px;
+}
+.origin-ctx-item {
+  display: block; width: 100%; text-align: left; border: none; background: transparent;
+  color: var(--quota-exhausted); padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px;
+}
+.origin-ctx-item:hover { background: rgba(229, 57, 53, .1); }
 
 /* ---------------------------------------------------------------------
  * v0.46 — "新建上游" modal.
@@ -6328,4 +6748,674 @@ body.card-dragging-free .view[data-view="overview"] .glass-card.card-free-positi
   /* active 态 hover 不变灰 —— 已经是 primary 背景 */
   background: var(--button-primary, var(--accent));
   filter: brightness(1.05);
+}
+
+/* ---------------------------------------------------------------------------
+ * v0.121：引导教程（spotlight 聚光灯漫游）
+ * 结构：.tour-overlay（全屏容器）> .tour-highlight（镂空高亮框，box-shadow
+ * 画孔）+ .tour-bubble（气泡）。孔的位置由 app.js 每步写 CSS 变量
+ * --tour-l/t/w/h/r 到 #tour-highlight；遮罩颜色与 modal 一致，z-index 压过
+ * modal（9000）确保教程在最顶层。暗/亮主题全部走 --panel-bg / --hairline /
+ * --text-primary 等变量，无主题分支。
+ * ------------------------------------------------------------------------ */
+
+.tour-open { overflow: hidden; }
+
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  pointer-events: none;   /* 遮罩本身不拦点击 —— 孔上的元素仍可交互/被点 */
+}
+
+.tour-overlay[hidden] { display: none; }
+
+.tour-highlight {
+  position: fixed;
+  left: var(--tour-l, 0);
+  top: var(--tour-t, 0);
+  width: var(--tour-w, 0);
+  height: var(--tour-h, 0);
+  border-radius: var(--tour-r, 8px);
+  /* 聚光孔：一圈大阴影即深色遮罩，孔内无阴影 = 目标露出来 */
+  box-shadow: 0 0 0 9999px rgba(10, 10, 10, 0.6);
+  /* 呼吸脉动：柔光 + 描边一起涨落，克制动效 */
+  animation: tour-breathe 1.9s ease-in-out infinite;
+  transition: left .28s cubic-bezier(.22,.61,.36,1),
+              top .28s cubic-bezier(.22,.61,.36,1),
+              width .28s cubic-bezier(.22,.61,.36,1),
+              height .28s cubic-bezier(.22,.61,.36,1),
+              border-radius .28s ease;
+  pointer-events: none;
+}
+@keyframes tour-breathe {
+  0%, 100% { outline: 2px solid rgba(255, 255, 255, 0.7); box-shadow: 0 0 0 9999px rgba(10, 10, 10, 0.6), 0 0 0 1px rgba(255,255,255,0.25), 0 0 10px 2px rgba(255, 255, 255, 0.18); }
+  50%      { outline: 3px solid rgba(255, 255, 255, 0.95); box-shadow: 0 0 0 9999px rgba(10, 10, 10, 0.6), 0 0 0 2px rgba(255,255,255,0.45), 0 0 18px 5px rgba(255, 255, 255, 0.35); }
+}
+
+/* --- 章节条（顶部胶囊，可点跳章节） --- */
+.tour-chapters {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9501;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  background: var(--panel-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+.tour-chapter {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+  font-family: "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+}
+.tour-chapter:hover { color: var(--text-primary); }
+.tour-chapter.active {
+  background: var(--button-primary, var(--accent));
+  color: var(--button-primary-fg, #fff);
+}
+
+.tour-bubble {
+  position: fixed;
+  z-index: 9501;
+  /* 覆盖 .tour-overlay 的 pointer-events:none —— 气泡上的按钮必须可点 */
+  pointer-events: auto;
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+  padding: 14px 18px 12px;
+  font-family: "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  max-width: min(360px, calc(100vw - 24px));
+  animation: tour-bubble-in .22s ease-out;
+}
+/* 侧栏步骤：气泡放宽 —— 迷你侧栏要并排容纳左侧指引卡 + 右侧面板 */
+.tour-bubble.tour-bubble-wide {
+  max-width: min(560px, calc(100vw - 24px));
+}
+/* v0.212：全局倒计时自动切换进度条 —— 气泡最底部。
+   柔和样式：底槽 hairline 浅色 + 内填充 accent 淡渐变。
+   ⚠ 必须**大幅内缩**避开气泡 14px 圆角弧（像素验证：bottom:6/left:10 时轨道
+   直角仍伸出弧外）。left/right 14px + bottom 10px，轨道两端胶囊圆角，完全落在
+   弧内侧；不能用气泡 overflow:hidden 裁剪（会裁掉 anchored-right 箭头）。 */
+.tour-countdown {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 10px;
+  height: 4px;
+  width: auto;
+  border-radius: 999px;
+  background: var(--hairline, rgba(127, 127, 127, .28));
+  overflow: hidden;
+  pointer-events: none;
+}
+/* 填充：柔和琥珀橙（时间流逝语义，不刺眼） */
+.tour-countdown::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: var(--cd-w, 100%);
+  background: linear-gradient(90deg,
+    color-mix(in srgb, #e8a33d 88%, transparent),
+    #e8a33d);
+  transition: width .12s linear;
+}
+@keyframes tour-bubble-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.tour-step {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: .04em;
+  margin-bottom: 4px;
+}
+.tour-chapter-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--button-primary, var(--accent));
+  letter-spacing: .02em;
+  margin-bottom: 2px;
+}
+.tour-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+.tour-body {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+/* v0.208：侧栏步骤 + 真实侧栏时 —— 卡片内容（章节/步骤标题 + 正文）已移往
+   侧栏窗口左侧渲染，主窗气泡只留底部导航按钮，隐藏重复文案。 */
+.tour-bubble.tour-bubble-panel .tour-step,
+.tour-bubble.tour-bubble-panel .tour-chapter-title,
+.tour-bubble.tour-bubble-panel .tour-title,
+.tour-bubble.tour-bubble-panel .tour-body {
+  display: none;
+}
+
+/* --- 演示容器（气泡下方，跑动作动画） --- */
+.tour-demo {
+  margin: 2px 0 10px;
+  border: 1px dashed var(--hairline);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--panel-alt);
+  overflow: hidden;
+  min-height: 46px;
+}
+
+/* 迷你侧栏模拟（无真实侧栏时章节2步骤3的演示）——
+ * 复刻真实 live_panel 的 endpoint 卡：上游名 + phase 徽标 + api-key
+ * + 入/出向 wire + 思考流。 */
+/* 章节2 步骤3 迷你侧栏演示 —— 分镜时间轴（JS 驱动，见 _tourDemoPanel）：
+ *   t=0      指引卡片悬浮在悬浮球左侧（tdp-guide）
+ *   t=0.6s   悬浮球呼吸 + 侧栏面板展开（tdp-ball-expand + tdp-slide-open）
+ *   t=2.2s   流的完整模拟动画：端点/思考流/请求卡逐个流入（tdp-flow-in）
+ *   t=3.7s   从上到下依次指引每个容器（tdp-target 高亮 + 左侧指引卡）。 */
+.tour-demo-panel {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  /* 左侧留出指引卡区（卡绝对定位在左 padding 区，不压球/侧栏面板） */
+  padding-left: 184px;
+}
+/* 左侧悬浮指引卡 —— 复刻真实侧栏：卡在左侧预留区，绝对定位左对齐，
+   垂直对齐被指引的容器（JS alignGuide 写 top），箭头指向右侧侧栏面板。
+   进入步骤即出现。卡宽 172 + 12 间距 = 184 与 padding 对应。 */
+.tour-demo-panel .tdp-guide {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  width: 172px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel-bg);
+  border: 1px solid var(--accent, #4f7cff);
+  border-radius: 10px;
+  padding: 6px 10px;
+  box-shadow: 0 4px 14px rgba(79, 124, 255, .25);
+  animation: tdp-guide-in .35s ease-out both;
+  transition: top .3s ease;
+  opacity: 0;
+  visibility: hidden;
+}
+@keyframes tdp-guide-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.tour-demo-panel .tdp-guide::after {
+  /* 箭头指向右侧悬浮球/侧栏 */
+  content: "";
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  margin-top: -5px;
+  border: 5px solid transparent;
+  border-left-color: var(--accent, #4f7cff);
+}
+.tour-demo-panel .tdp-guide-tag {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent, #4f7cff);
+}
+.tour-demo-panel .tdp-guide-text {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+/* 指引卡可见（被点名的容器高亮时显示） */
+.tour-demo-panel .tdp-guide.tdp-guide-show {
+  opacity: 1;
+  visibility: visible;
+}
+.tour-demo-panel .tdp-guide:not(.tdp-guide-show) {
+  opacity: 0;
+  visibility: hidden;
+}
+/* 悬浮球：先呼吸，0.6s 后放大表示「正在展开」。
+   球在面板左侧（row 布局第一个流内元素），顶部对齐面板起点。 */
+.tour-demo-panel .tdp-ball {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent, #4f7cff);
+  color: #fff;
+  font-size: 16px;
+  line-height: 34px;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(79, 124, 255, .5);
+  margin-bottom: 4px;
+  animation: tdp-ball-pulse 1.4s ease-in-out infinite;
+}
+@keyframes tdp-ball-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(79, 124, 255, .5), 0 0 0 0 rgba(79, 124, 255, .35); }
+  50%      { box-shadow: 0 2px 8px rgba(79, 124, 255, .5), 0 0 0 7px rgba(79, 124, 255, 0); }
+}
+.tour-demo-panel .tdp-ball.tdp-ball-expand {
+  animation: tdp-ball-expand 1.1s ease-out forwards;
+}
+@keyframes tdp-ball-expand {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.55); }
+  100% { transform: scale(1); }
+}
+/* 侧栏面板：默认隐藏（从球位缩着），0.6s 后 JS 加 slide-open 展开。
+   固定宽 ~250px 让迷你侧栏看起来像真侧栏面板（球在左侧、面板在右）。 */
+.tour-demo-panel .tdp-slide {
+  transform-origin: right center;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 250px;
+  opacity: 0;
+  transform: translateX(26px) scale(.55);
+  transition: opacity .3s ease, transform .45s cubic-bezier(.22, .61, .36, 1);
+}
+.tour-demo-panel .tdp-slide.tdp-slide-open {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+}
+.tour-demo-panel .tdp-req {
+  font-size: 10px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  color: var(--text-primary);
+  background: var(--panel-alt);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 流模拟元素（endpoint/think/req）统一入场：滑入 + 扫光，JS 错峰 delay */
+.tour-demo-panel .tdp-endpoint,
+.tour-demo-panel .tdp-think,
+.tour-demo-panel .tdp-req {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.tour-demo-panel .tdp-endpoint.tdp-flow-in,
+.tour-demo-panel .tdp-think.tdp-flow-in,
+.tour-demo-panel .tdp-req.tdp-flow-in {
+  animation: tdp-flow-in .5s ease-out forwards;
+}
+@keyframes tdp-flow-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* 被指引点名的容器：呼吸高亮框。
+   ⚠ animation 同名覆盖坑：endpoint 在 t=2.2s 加 tdp-flow-in（opacity 0→1），
+   而 tdp-target 在 t=0（showGuide0）就挂上了 —— 两者特异性相同（0,2,0），
+   靠样式表顺序，.tdp-target 排在 .tdp-flow-in 后面会把 animation 整个覆盖，
+   endpoint 停在 opacity:0 → 内容全不可见（「一整块灰底」根因）。所以凡是
+   可能同时带 flow-in + target 的元素（endpoint/think/req）必须显式组合。 */
+.tour-demo-panel .tdp-endpoint.tdp-target,
+.tour-demo-panel .tdp-ep-key-row.tdp-target,
+.tour-demo-panel .tdp-think.tdp-target,
+.tour-demo-panel .tdp-req.tdp-target {
+  position: relative;
+  outline: 2px solid var(--accent, #4f7cff);
+  outline-offset: 2px;
+  border-radius: 8px;
+  animation: tdp-target-breathe 1.6s ease-in-out infinite;
+}
+/* endpoint / req：流入 + 呼吸（flow-in forwards 保持 opacity:1） */
+.tour-demo-panel .tdp-endpoint.tdp-flow-in.tdp-target,
+.tour-demo-panel .tdp-req.tdp-flow-in.tdp-target {
+  animation: tdp-flow-in .5s ease-out forwards,
+             tdp-target-breathe 1.6s ease-in-out infinite;
+}
+/* think：流入 + 打字机 + 呼吸（tdp-think.tdp-flow-in 自带 typing） */
+.tour-demo-panel .tdp-think.tdp-flow-in.tdp-target {
+  animation: tdp-flow-in .5s ease-out forwards,
+             tdp-typing 2.4s steps(30) .4s infinite,
+             tdp-target-breathe 1.6s ease-in-out infinite;
+}
+@keyframes tdp-target-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 124, 255, 0); }
+  50%      { box-shadow: 0 0 0 6px rgba(79, 124, 255, .28); }
+}
+.tour-demo-panel .tdp-endpoint {
+  background: var(--panel-bg);
+  border: 0.5px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tour-demo-panel .tdp-ep-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.tour-demo-panel .tdp-ep-upstream {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tour-demo-panel .tdp-ep-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: rgba(37, 99, 235, .12);
+  color: var(--seg-input);
+  border: 1px solid var(--seg-input);
+}
+.tour-demo-panel .tdp-ep-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--seg-input);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.tour-demo-panel .tdp-ep-key-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.tour-demo-panel .tdp-ep-label {
+  color: var(--text-secondary);
+}
+.tour-demo-panel .tdp-ep-key {
+  font-size: 10px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  color: var(--text-primary);
+  background: var(--panel-alt);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  max-width: 65%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tour-demo-panel .tdp-ep-wire {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.tour-demo-panel .tdp-wire-num {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.tour-demo-panel .tdp-think {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  display: inline-block;
+  max-width: 100%;
+  /* 光标：思考流打字机观感 */
+  position: relative;
+}
+.tour-demo-panel .tdp-think::after {
+  content: "▍";
+  color: var(--accent, #4f7cff);
+  margin-left: 1px;
+  animation: tdp-caret-blink .8s steps(1) infinite;
+}
+@keyframes tdp-caret-blink {
+  50% { opacity: 0; }
+}
+.tour-demo-panel .tdp-think.tdp-flow-in {
+  animation: tdp-flow-in .5s ease-out forwards, tdp-typing 2.4s steps(30) .4s infinite;
+}
+@keyframes tdp-typing {
+  0%   { max-width: 0; }
+  70%  { max-width: 100%; }
+  100% { max-width: 100%; }
+}
+
+/* 扫光带演示（章节1步骤2：上游行波纹） */
+.tour-demo-ripple {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel-bg);
+  border: 1px solid var(--hairline);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.tour-demo-ripple::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0;
+  height: 100%;
+  width: 220%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  animation: live-ripple 1.8s linear infinite;
+}
+
+/* 假 live 行演示（章节2步骤4：主窗 live 视图） */
+.tour-demo-live {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tour-demo-live .tdl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 5px 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  animation: tdl-row-in .4s ease-out backwards;
+}
+.tour-demo-live .tdl-row:nth-child(2) { animation-delay: .15s; }
+.tour-demo-live .tdl-row:nth-child(3) { animation-delay: .3s; }
+@keyframes tdl-row-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tour-demo-live .tdl-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--seg-input, #2563eb);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.tour-demo-live .tdl-bar {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--hairline);
+  overflow: hidden;
+  position: relative;
+}
+.tour-demo-live .tdl-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--seg-input, #2563eb);
+  animation: tdl-bar-grow 2s ease-in-out infinite alternate;
+}
+@keyframes tdl-bar-grow {
+  from { width: 15%; }
+  to   { width: 85%; }
+}
+
+/* 表单字段演示（章节3：字段高亮呼吸） */
+.tour-demo-field {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.tour-demo-field .tdf-label { font-weight: 600; color: var(--text-primary); }
+.tour-demo-field .tdf-box {
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--panel-bg);
+  font-size: 11px;
+  color: var(--text-muted);
+  animation: tdf-cursor 1.1s step-end infinite;
+  overflow: hidden;
+  white-space: nowrap;
+}
+@keyframes tdf-cursor {
+  0%, 49%  { border-color: var(--button-primary, var(--accent)); }
+  50%, 100% { border-color: var(--hairline); }
+}
+
+/* 提交成功演示（章节3 最后） */
+.tour-demo-ok {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-success);
+  padding: 6px 0;
+}
+.tour-demo-ok .tdok-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text-success);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  animation: tdok-pop .35s ease-out;
+}
+@keyframes tdok-pop {
+  0%   { transform: scale(.4); opacity: 0; }
+  70%  { transform: scale(1.15); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* 章节2 步骤1：气泡移到侧栏「实时」菜单项右侧 —— 左缘加箭头指向菜单项。
+ * .tour-bubble-anchored-right 由 app.js 在定位时挂上（锚点=菜单项）。 */
+.tour-bubble.tour-bubble-anchored-right::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -10px;
+  transform: translateY(-50%);
+  width: 0;
+  height: 0;
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  border-right: 10px solid var(--panel-bg);
+  filter: drop-shadow(-1px 0 1px var(--hairline));
+}
+
+/* 章节2 步骤1 演示：实时页「进行中的请求」两条请求按 2s 间隔切换、不循环
+ * —— 复用真实 .live-row 结构 + live-marquee 跑马灯，由 app.js 用
+ * _tourSeqGen 控制第 1/2 条的进出场 class 切换。 */
+.tour-seq-enter {
+  animation: tour-seq-in .4s ease-out forwards;
+}
+.tour-seq-exit {
+  animation: tour-seq-out .4s ease-out forwards;
+}
+@keyframes tour-seq-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes tour-seq-out {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(-6px); }
+}
+/* 常驻的演示行（.tour-seq-enter 不带 forwards 的 animation 属性）：进场
+ * 动画播完后停在自然态（opacity:1）长期可见 —— 第一条请求始终存在，第二
+ * 条出现时两条并存（app.js _tourDemoLive 时间轴）。live 徽标跑马灯 / 进度
+ * 条扫光由 .live-phase-streaming / .live-progress-fill 自带动画持续循环。 */
+
+.tour-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tour-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--hairline);
+  transition: background-color .15s ease, width .15s ease;
+}
+.tour-dot.active {
+  width: 16px;
+  background: var(--button-primary, var(--accent));
+}
+.tour-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tour-actions .btn {
+  padding: 5px 12px;
+  font-size: 12.5px;
+  border-radius: var(--radius-sm, 6px);
+  white-space: nowrap;   /* 跳过/上一步/下一步内部文字不换行 */
+}
+.tour-actions .btn-primary {
+  background: var(--button-primary, var(--accent));
+  color: var(--button-primary-fg, #fff);
+  border: none;
 }

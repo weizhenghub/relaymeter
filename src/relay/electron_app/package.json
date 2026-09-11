@@ -4,5 +4,8 @@
   "description": "Electron renderer for the live panel (replaces pywebview/WebView2 window)",
   "main": "panel_main.js",
   "private": true,
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^44.0.0"
+  }
 }

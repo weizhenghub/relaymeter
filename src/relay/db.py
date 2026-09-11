@@ -89,6 +89,10 @@ MIGRATIONS: list[tuple[str, str]] = [
     # 归类」列出真实出现过的 UA，让用户逐条配置 ua_rules 归类。旧行
     # NULL（迁移前没存），GUI 只展示存量之后新到的请求；不参与聚合。
     ("raw_ua", "TEXT"),
+    # v0.NNN：思考流独立列 —— thinking 从 messages 的 role='thinking' 行
+    # 迁到 requests.thinking（per-request 单块，天然落在 user/assistant
+    # 之间，不再依赖插入/排序）。旧行由 init() 一次性回填 + 删旧行。
+    ("thinking", "TEXT"),
 ]
 
 
@@ -110,6 +114,20 @@ class Database:
             for col, decl in MIGRATIONS:
                 if col not in existing:
                     await c.execute(f"ALTER TABLE requests ADD COLUMN {col} {decl}")
+            # v0.NNN：thinking 迁移 —— 把 messages 表 role='thinking' 行并入
+            # requests.thinking，再删旧行。幂等：二次运行时已无 thinking 行可搬。
+            # messages 表对极旧库可能不存在，包 try 兜底。
+            try:
+                await c.execute(
+                    "UPDATE requests SET thinking = ("
+                    "  SELECT m.content FROM messages m "
+                    "  WHERE m.request_id = requests.id AND m.role = 'thinking' "
+                    "  ORDER BY m.id ASC LIMIT 1"
+                    ") WHERE thinking IS NULL"
+                )
+                await c.execute("DELETE FROM messages WHERE role = 'thinking'")
+            except Exception:
+                pass
             # v0.143：endpoint 列加完后建复合索引 + 一次性回填 openai 旧行。
             # 顺序：索引必须在 endpoint 列存在后再建（CREATE INDEX 不能引用
             # 不存在的列）；回填同样必须在列存在后再写 UPDATE。SQLite 的
@@ -276,14 +294,14 @@ class Database:
     ) -> None:
         """Persist the user prompt + assembled assistant reply (+ thinking).
 
-        v0.89：新增 `thinking_text` —— extended-thinking 推理正文落进
-        `messages` 表作为单独一行（`role='thinking'`）。`messages.role`
-        是自由 TEXT 无 CHECK 约束，无需 schema 迁移。
+        v0.NNN：thinking 重写 —— 思考流不再作为 messages 的 role='thinking'
+        独立行（旧方案依赖插入/排序，历史页渲染不可靠），改为写进
+        ``requests.thinking`` 单列（per-request 单块）。流式过程中可能多次
+        调用本方法，每次 UPDATE 覆盖成当前累计值即可。
 
         Either side may be omitted (e.g. the request body was malformed or
         the upstream stream was cut short). Empty strings are not stored —
-        we just skip that row. 同样适用于 thinking —— 流式未产生任何
-        reasoning 时不再建空行。
+        we just skip that row.
         """
         ts = time.time()
         rows = []
@@ -291,19 +309,21 @@ class Database:
             rows.append((request_id, ts, "user", user_text, user_json))
         if assistant_text or assistant_json:
             rows.append((request_id, ts, "assistant", assistant_text, assistant_json))
-        if thinking_text:
-            # role='thinking' 行：content 存推理正文，content_json 留空
-            # （thinking 块没有 tool_use 那种结构化 payload）。
-            rows.append((request_id, ts, "thinking", thinking_text, None))
-        if not rows:
+        if not rows and not thinking_text:
             return
         async with self._lock:
             async with aiosqlite.connect(self.path) as c:
-                await c.executemany(
-                    "INSERT INTO messages(request_id, ts, role, content, content_json) "
-                    "VALUES(?, ?, ?, ?, ?)",
-                    rows,
-                )
+                if rows:
+                    await c.executemany(
+                        "INSERT INTO messages(request_id, ts, role, content, content_json) "
+                        "VALUES(?, ?, ?, ?, ?)",
+                        rows,
+                    )
+                if thinking_text:
+                    await c.execute(
+                        "UPDATE requests SET thinking = ? WHERE id = ?",
+                        (thinking_text, request_id),
+                    )
                 await c.commit()
 
     async def search_messages(
@@ -344,7 +364,9 @@ class Database:
 
         Used by the GUI's "view conversation" dialog (double-click on the
         recent table). Messages are returned in insertion order so a request
-        row's user message comes before its assistant reply.
+        row's user message comes before its assistant reply. Thinking 块在
+        ``request.thinking``（per-request 单列，前端在 user/assistant 之间
+        渲染）。
         """
         async with aiosqlite.connect(self.path) as c:
             c.row_factory = aiosqlite.Row
@@ -353,7 +375,7 @@ class Database:
                     "SELECT id, ts, platform, model, request_id, "
                     "input_tokens, output_tokens, "
                     "cache_read_input_tokens, cache_creation_input_tokens, "
-                    "status_code, error, upstream "
+                    "status_code, error, upstream, thinking "
                     "FROM requests WHERE id = ?",
                     (request_id,),
                 )
@@ -363,7 +385,10 @@ class Database:
             msgs = await (
                 await c.execute(
                     "SELECT role, ts, content, content_json "
-                    "FROM messages WHERE request_id = ? ORDER BY id ASC",
+                    "FROM messages WHERE request_id = ? "
+                    "ORDER BY "
+                    "  CASE role WHEN 'user' THEN 0 WHEN 'thinking' THEN 1 WHEN 'assistant' THEN 2 ELSE 3 END, "
+                    "  id ASC",
                     (request_id,),
                 )
             ).fetchall()
@@ -394,6 +419,27 @@ class Database:
                 await c.commit()
                 return cur.rowcount or 0
 
+    async def delete_request_rows_by_upstream(self, upstream: str) -> int:
+        """Delete every request row for one upstream name, plus its messages.
+
+        历史上游「彻底删除」—— 按上游名删行。messages 行随 requests 一起
+        清掉（本工程从不开 PRAGMA foreign_keys，FK 级联不生效，所以这里
+        显式先删 messages 再删 requests，保证该上游的对话内容也一并剥离）。
+        返回删除的请求条数（0 = 该名本就没有行，幂等）。"""
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as c:
+                cur = await c.execute(
+                    "DELETE FROM messages WHERE request_id IN ("
+                    "  SELECT id FROM requests WHERE upstream = ?"
+                    ")",
+                    (upstream,),
+                )
+                cur2 = await c.execute(
+                    "DELETE FROM requests WHERE upstream = ?", (upstream,)
+                )
+                await c.commit()
+                return cur2.rowcount or 0
+
     async def vacuum(self) -> None:
         """VACUUM the database to reclaim space freed by deletions.
 
@@ -405,6 +451,61 @@ class Database:
             async with aiosqlite.connect(self.path) as c:
                 await c.execute("VACUUM")
                 await c.commit()
+
+    async def delete_messages_between(self, start_ts: float, end_ts: float) -> int:
+        """Delete message rows with ts in [start_ts, end_ts).
+
+        v0.NNN 设置页「清理原文」按天清除 —— 只删 messages（原文），保留
+        requests（请求统计/令牌消耗还在）。thinking 存于 requests 单列，
+        这里一并清掉（否则对话视图只剩 thinking 没有正文）。返回删除的
+        message 条数。
+        """
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as c:
+                # 先清受影响 requests 的 thinking，再删 messages。
+                await c.execute(
+                    "UPDATE requests SET thinking = NULL WHERE id IN ("
+                    "  SELECT DISTINCT request_id FROM messages WHERE ts >= ? AND ts < ?"
+                    ")",
+                    (start_ts, end_ts),
+                )
+                cur = await c.execute(
+                    "DELETE FROM messages WHERE ts >= ? AND ts < ?",
+                    (start_ts, end_ts),
+                )
+                await c.commit()
+                return cur.rowcount or 0
+
+    async def delete_message_by_id(self, message_id: int) -> int:
+        """Delete a single message row by its id (清理原文右键「删除此条」)."""
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as c:
+                cur = await c.execute(
+                    "DELETE FROM messages WHERE id = ?", (message_id,)
+                )
+                await c.commit()
+                return cur.rowcount or 0
+
+    async def delete_messages_by_upstream(self, upstream: str) -> int:
+        """Delete every message row whose request went to ``upstream``.
+
+        清理原文「按上游筛选」的全部清除 —— 只删 messages，保留 requests。
+        同样清掉该上游 requests 的 thinking。
+        """
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as c:
+                await c.execute(
+                    "UPDATE requests SET thinking = NULL WHERE upstream = ?",
+                    (upstream,),
+                )
+                cur = await c.execute(
+                    "DELETE FROM messages WHERE request_id IN ("
+                    "  SELECT id FROM requests WHERE upstream = ?"
+                    ")",
+                    (upstream,),
+                )
+                await c.commit()
+                return cur.rowcount or 0
 
     async def aggregate(
         self, platform: str | None = None, since: float | None = None

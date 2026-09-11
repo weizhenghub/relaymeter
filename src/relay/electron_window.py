@@ -42,6 +42,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
@@ -412,10 +413,29 @@ class ElectronWindowBase:
             try:
                 proc.wait(timeout=2.0)
             except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                if sys.platform == "win32":
+                    # 优雅退出失败 → taskkill /F /T 杀整个 electron 进程树
+                    # （含 gpu/renderer 等子进程）。只 kill 主进程会把子进程
+                    # 留成孤儿 —— 重启后旧球进程残留，与新球并存 = 双球。
+                    # 复用 server.py / gui.py 的既有 taskkill 范式。
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                            capture_output=True,
+                            check=False,
+                            timeout=10.0,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+                    except Exception:
+                        try:
+                            proc.kill()   # 最后兜底
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
         self._proc = None
         self._closed.set()
 

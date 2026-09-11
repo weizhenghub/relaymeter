@@ -1108,6 +1108,7 @@ def apply_quota_edit(
       ``model``              optional string; ``None`` clears the override
       ``default_model``      v0.74: "auto" 兜底模型名; ``None`` clears it
       ``linked_upstreams``   v0.119: 同平台 peer 上游名列表；空 list 表示不链接
+      ``vision_models``      v0.202: 该上游支持图片输入的模型名列表；None 不动
 
     Returns ``(ok, message)`` — message is the written path on success,
     a human-readable Chinese error otherwise. Does **not** reload
@@ -1185,6 +1186,24 @@ def apply_quota_edit(
         if name in [s.strip() for s in linked_v if isinstance(s, str) and s.strip()]:
             return False, "linked_upstreams 不能包含自己"
 
+    # v0.202 该上游支持图片输入的模型名（裸模型名）。None 时不动（保留
+    # JSON 旧值）；否则必须是字符串列表，trim + 去重 + 丢空串，空列表
+    # 语义 = 该上游无多模态模型。与 add_upstream 的 vision_models 同款
+    # 校验，让"编辑上游"卡片保存路径能写 per-upstream 多模态。
+    vision_v = payload.get("vision_models", None)
+    if vision_v is not None:
+        if not isinstance(vision_v, list) or not all(
+            isinstance(m, str) for m in vision_v
+        ):
+            return False, "vision_models 必须是字符串列表"
+        vision_clean: list[str] = []
+        for m in vision_v:
+            m = m.strip()
+            if m and m not in vision_clean:
+                vision_clean.append(m)
+    else:
+        vision_clean = None
+
     def _mutate(data: dict) -> None:
         # v0.12 扁平格式。旧格式就地迁移。
         if not isinstance(data.get("upstreams"), list):
@@ -1225,6 +1244,8 @@ def apply_quota_edit(
                             continue
                         cleaned.append(s)
                     entry["linked_upstreams"] = cleaned
+                if vision_clean is not None:
+                    entry["vision_models"] = list(vision_clean)
                 return
         # Refuse to invent an upstream: a typo'd name would otherwise
         # silently create a half-formed entry with no url.

@@ -51,7 +51,7 @@ class ElectronBallWindow(ElectronWindowBase):
             app_root=app_root,
             api_handler=api_handler,
             event_names=("loaded", "closing", "moved", "resized",
-                         "dragend", "clicked"),
+                         "dragstart", "dragend", "clicked"),
             main_js_name="ball_main.js",
             args_log_tag="electron-ball-args",
         )

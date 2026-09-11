@@ -1028,7 +1028,7 @@ def fetch_conversation(db_path: str, request_id: int) -> Optional[dict[str, Any]
             "SELECT id, ts, platform, model, request_id, "
             "input_tokens, output_tokens, "
             "cache_read_input_tokens, cache_creation_input_tokens, "
-            "status_code, error, upstream "
+            "status_code, error, upstream, thinking "
             "FROM requests WHERE id = ?",
             (request_id,),
         ).fetchone()
@@ -1036,7 +1036,10 @@ def fetch_conversation(db_path: str, request_id: int) -> Optional[dict[str, Any]
             return None
         msgs = c.execute(
             "SELECT role, ts, content, content_json "
-            "FROM messages WHERE request_id = ? ORDER BY id ASC",
+            "FROM messages WHERE request_id = ? "
+            "ORDER BY "
+            "  CASE role WHEN 'user' THEN 0 WHEN 'thinking' THEN 1 WHEN 'assistant' THEN 2 ELSE 3 END, "
+            "  id ASC",
             (request_id,),
         ).fetchall()
     return {
@@ -1190,7 +1193,7 @@ def fetch_conversation(db_path: str, request_id: int) -> Optional[dict]:
             "SELECT id, ts, platform, model, request_id, "
             "input_tokens, output_tokens, "
             "cache_read_input_tokens, cache_creation_input_tokens, "
-            "status_code, error, upstream "
+            "status_code, error, upstream, thinking "
             "FROM requests WHERE id = ?",
             (request_id,),
         ).fetchone()
@@ -1811,6 +1814,285 @@ def fetch_route_heatmap(
             ups, plat, n = row["upstream"], row["platform"], int(row["n"] or 0)
             out.setdefault(ups, {"anthropic": 0, "openai": 0})[plat] = n
     return out
+
+
+def fetch_history_upstreams(db_path: str) -> list[dict[str, object]]:
+    """历史上游数据 —— 所有在 requests 表出现过的 upstream（含已删配置）。
+
+    上游页「历史上游」卡片。与 ``fetch_route_heatmap`` 同构，但**不加**
+    ``IN (configured)`` 过滤 —— 已删配置的历史行仍保留其名，因此能列出来。
+    按 ``(upstream, platform)`` 分组，返回每平台的请求数 / token 总和 / 末次
+    使用时间。``total_tokens`` 口径与 ``fetch_total_tokens_by_upstream``
+    （input + output + cache_read + cache_creation）一致。
+    """
+    out: list[dict[str, object]] = []
+    if not Path(db_path).exists():
+        return out
+    sql = (
+        "SELECT upstream, platform, COUNT(*) AS requests, "
+        "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
+        "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
+        "COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens, "
+        "COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens, "
+        "MAX(ts) AS last_ts "
+        "FROM requests "
+        "WHERE upstream IS NOT NULL AND upstream != '' "
+        "GROUP BY upstream, platform "
+        "ORDER BY upstream, platform"
+    )
+    try:
+        with _connect(db_path) as c:
+            for row in c.execute(sql).fetchall():
+                name = row["upstream"]
+                if not name:
+                    continue
+                total = (
+                    (row["input_tokens"] or 0)
+                    + (row["output_tokens"] or 0)
+                    + (row["cache_read_input_tokens"] or 0)
+                    + (row["cache_creation_input_tokens"] or 0)
+                )
+                out.append({
+                    "name": name,
+                    "platform": row["platform"],
+                    "requests": int(row["requests"] or 0),
+                    "input_tokens": int(row["input_tokens"] or 0),
+                    "output_tokens": int(row["output_tokens"] or 0),
+                    "cache_read_input_tokens": int(row["cache_read_input_tokens"] or 0),
+                    "cache_creation_input_tokens": int(row["cache_creation_input_tokens"] or 0),
+                    "total_tokens": int(total),
+                    "last_ts": row["last_ts"],
+                })
+    except Exception:
+        return []
+    return out
+
+
+# ---------------------------------------------------------------------------
+# v0.NNN：设置页「清理原文」—— 按天/按上游浏览已缓存的消息原文。
+#
+# 读（列表 / 日历统计 / 单条完整）由 GUI 本地只读 relay.db（_connect 是
+# 只读 sqlite），删除走 relay HTTP（storage 端点，见 routers/api.py）。
+# 日历按本地时区的自然日聚合（strftime('%d', ts, 'localtime')）。
+# ---------------------------------------------------------------------------
+
+
+def fetch_message_calendar(
+    db_path: str,
+    year: int,
+    month: int,
+) -> dict[int, dict[str, int]]:
+    """某月每天的 messages 统计：``{day: {count, bytes}}``。
+
+    ``bytes`` = 该天所有 content + content_json 的 UTF-8 字节和（SQLite
+    ``LENGTH()`` 对 TEXT 返回字符数，CAST 成 BLOB 后按字节计，避免 CJK
+    3 倍差）。无消息的天不出现（前端 0 补齐）。失败回落空 dict。
+    """
+    out: dict[int, dict[str, int]] = {}
+    if not Path(db_path).exists():
+        return out
+    import calendar as _cal
+    import datetime as _dt
+
+    ndays = _cal.monthrange(year, month)[1]
+    start = _dt.datetime(year, month, 1)
+    end = _dt.datetime(year, month, ndays, 23, 59, 59, 999999)
+    try:
+        sql = (
+            "SELECT CAST(strftime('%d', ts, 'unixepoch', 'localtime') AS INTEGER) AS day, "
+            "COUNT(*) AS cnt, "
+            "SUM(LENGTH(CAST(COALESCE(content,'') AS BLOB))) "
+            "  + SUM(LENGTH(CAST(COALESCE(content_json,'') AS BLOB))) AS bytes "
+            "FROM messages "
+            "WHERE ts >= ? AND ts <= ? "
+            "GROUP BY day"
+        )
+        with _connect(db_path) as c:
+            for row in c.execute(sql, (start.timestamp(), end.timestamp())):
+                out[int(row["day"])] = {
+                    "count": int(row["cnt"] or 0),
+                    "bytes": int(row["bytes"] or 0),
+                }
+    except Exception:
+        return {}
+    return out
+
+
+def fetch_message_year(
+    db_path: str,
+    days: int = 365,
+) -> dict[str, dict[str, int]]:
+    """最近 N 天（含今天，本地日界）每天的 messages 统计。
+
+    GitHub contributions 图数据源：``{date(YYYY-MM-DD): {count, bytes}}``。
+    按本地自然日聚合（strftime '%Y-%m-%d' + 'localtime'）。失败回落空 dict。
+    """
+    out: dict[str, dict[str, int]] = {}
+    if not Path(db_path).exists() or days <= 0:
+        return out
+    import datetime as _dt
+
+    today0 = _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    start = today0 - _dt.timedelta(days=days - 1)
+    end = today0 + _dt.timedelta(days=1)
+    try:
+        sql = (
+            "SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') AS day, "
+            "COUNT(*) AS cnt, "
+            "SUM(LENGTH(CAST(COALESCE(content,'') AS BLOB))) "
+            "  + SUM(LENGTH(CAST(COALESCE(content_json,'') AS BLOB))) AS bytes "
+            "FROM messages "
+            "WHERE ts >= ? AND ts < ? "
+            "GROUP BY day"
+        )
+        with _connect(db_path) as c:
+            for row in c.execute(sql, (start.timestamp(), end.timestamp())):
+                out[row["day"]] = {
+                    "count": int(row["cnt"] or 0),
+                    "bytes": int(row["bytes"] or 0),
+                }
+    except Exception:
+        return {}
+    return out
+
+
+def fetch_day_messages(
+    db_path: str,
+    start_ts: float,
+    end_ts: float,
+    limit: int = 500,
+) -> list[dict[str, object]]:
+    """某自然日 [start_ts, end_ts) 内的消息列表（JOIN requests 拿模型/上游/状态）。
+
+    每条返回：``{id, ts, role, model, upstream, platform, status_code, error,
+    snippet}`` —— snippet 只取 content 前 200 字符（列表「只加载前面字符」）；
+    完整内容由 ``fetch_message_full`` 单独拉。
+    """
+    out: list[dict[str, object]] = []
+    if not Path(db_path).exists():
+        return out
+    try:
+        sql = (
+            "SELECT m.id, m.request_id, m.ts, m.role, m.content, "
+            "r.model, r.upstream, r.platform, r.status_code, r.error "
+            "FROM messages m "
+            "LEFT JOIN requests r ON r.id = m.request_id "
+            "WHERE m.ts >= ? AND m.ts < ? "
+            "ORDER BY m.ts DESC LIMIT ?"
+        )
+        with _connect(db_path) as c:
+            for row in c.execute(sql, (start_ts, end_ts, limit)):
+                content = row["content"] or ""
+                out.append({
+                    "id": int(row["id"]),
+                    "request_id": row["request_id"],
+                    "ts": row["ts"],
+                    "role": row["role"],
+                    "model": row["model"],
+                    "upstream": row["upstream"],
+                    "platform": row["platform"],
+                    "status_code": row["status_code"],
+                    "error": row["error"],
+                    "snippet": content[:200],
+                })
+    except Exception:
+        return []
+    return out
+
+
+def fetch_message_upstreams(db_path: str) -> list[dict[str, object]]:
+    """出现过消息的上游汇总：``{upstream, count, bytes}``，按字节降序。
+
+    「按上游筛选」模式列出候选上游用。bytes 口径与日历一致。
+    """
+    out: list[dict[str, object]] = []
+    if not Path(db_path).exists():
+        return out
+    try:
+        sql = (
+            "SELECT r.upstream, COUNT(*) AS cnt, "
+            "SUM(LENGTH(CAST(COALESCE(m.content,'') AS BLOB))) "
+            "  + SUM(LENGTH(CAST(COALESCE(m.content_json,'') AS BLOB))) AS bytes "
+            "FROM messages m "
+            "LEFT JOIN requests r ON r.id = m.request_id "
+            "WHERE r.upstream IS NOT NULL AND r.upstream != '' "
+            "GROUP BY r.upstream "
+            "ORDER BY bytes DESC"
+        )
+        with _connect(db_path) as c:
+            for row in c.execute(sql):
+                out.append({
+                    "upstream": row["upstream"],
+                    "count": int(row["cnt"] or 0),
+                    "bytes": int(row["bytes"] or 0),
+                })
+    except Exception:
+        return []
+    return out
+
+
+def fetch_upstream_messages(
+    db_path: str,
+    upstream: str,
+    limit: int = 500,
+) -> list[dict[str, object]]:
+    """某上游的全部消息列表（JOIN requests 拿模型/平台/状态）。形状同
+    ``fetch_day_messages``（含 snippet 截断）。"""
+    out: list[dict[str, object]] = []
+    if not Path(db_path).exists():
+        return out
+    try:
+        sql = (
+            "SELECT m.id, m.request_id, m.ts, m.role, m.content, "
+            "r.model, r.upstream, r.platform, r.status_code, r.error "
+            "FROM messages m "
+            "LEFT JOIN requests r ON r.id = m.request_id "
+            "WHERE r.upstream = ? "
+            "ORDER BY m.ts DESC LIMIT ?"
+        )
+        with _connect(db_path) as c:
+            for row in c.execute(sql, (upstream, limit)):
+                content = row["content"] or ""
+                out.append({
+                    "id": int(row["id"]),
+                    "request_id": row["request_id"],
+                    "ts": row["ts"],
+                    "role": row["role"],
+                    "model": row["model"],
+                    "upstream": row["upstream"],
+                    "platform": row["platform"],
+                    "status_code": row["status_code"],
+                    "error": row["error"],
+                    "snippet": content[:200],
+                })
+    except Exception:
+        return []
+    return out
+
+
+def fetch_message_full(db_path: str, message_id: int) -> Optional[dict[str, object]]:
+    """单条消息完整内容 + 元信息（点列表行「查看完整信息」用）。
+
+    附带 ``request_id`` —— 前端查看完整时可顺带拉同一请求的 thinking /
+    上下文（thinking 是 messages 表里独立的 role='thinking' 行）。
+    """
+    if not Path(db_path).exists():
+        return None
+    try:
+        sql = (
+            "SELECT m.id, m.request_id, m.ts, m.role, m.content, m.content_json, "
+            "r.model, r.upstream, r.platform, r.status_code, r.error "
+            "FROM messages m "
+            "LEFT JOIN requests r ON r.id = m.request_id "
+            "WHERE m.id = ?"
+        )
+        with _connect(db_path) as c:
+            row = c.execute(sql, (message_id,)).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+    except Exception:
+        return None
 
 
 def fetch_calendar(

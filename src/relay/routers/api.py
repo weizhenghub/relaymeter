@@ -241,6 +241,11 @@ class QuotaBody(BaseModel):
     # doesn't mention them is a true no-op for these fields.
     billing_unit: str | None = None
     token_fields: dict[str, bool] | None = None
+    # v0.205: 该上游「支持图片输入」模型名单 —— 与 GUI 桥同一口径
+    # （apply_quota_edit：None 不动、[] 清空）。缺了这个字段，外部
+    # HTTP PUT 带 vision_models 会被 pydantic 静默剥掉，两条写入口径
+    # 不一致。
+    vision_models: list[str] | None = None
 
 
 @router.post("/upstreams/refresh")
@@ -510,6 +515,80 @@ async def vacuum_storage(request: Request, body: VacuumBody) -> dict[str, Any]:
     if body.target in ("passthrough", "both"):
         await pt_db.vacuum()
     return {"ok": True}
+
+
+class DeleteUpstreamBody(BaseModel):
+    """彻底删除某上游的全部请求行（配置移除由 GUI 侧负责）。"""
+    upstream: str
+
+
+@router.post("/storage/delete-upstream")
+async def delete_upstream_storage(
+    request: Request, body: DeleteUpstreamBody,
+) -> dict[str, Any]:
+    """按上游名删除 relay 库里该上游的全部请求行（messages 级联）。
+
+    历史上游「彻底删除」的 DB 半场 —— relay 进程持有 Database 写句柄，
+    GUI 进程只读不写。纯 DB 清理：配置移除由 GUI 调 remove_upstream_cfg
+    完成后，再 POST 到这里剥掉该上游的 DB 行。幂等：名不存在 → 删 0 行。
+    """
+    if not body.upstream or not body.upstream.strip():
+        return {"ok": False, "error": "upstream 不能为空"}
+    db = request.app.state.db
+    deleted = await db.delete_request_rows_by_upstream(body.upstream.strip())
+    return {"ok": True, "upstream": body.upstream.strip(), "deleted": deleted}
+
+
+class DeleteMessagesRangeBody(BaseModel):
+    """清理原文：按 ts 范围删 messages（保留 requests）。"""
+    start: float
+    end: float
+
+
+@router.post("/storage/delete-messages-range")
+async def delete_messages_range_storage(
+    request: Request, body: DeleteMessagesRangeBody,
+) -> dict[str, Any]:
+    """按 ts 范围删除 messages 行（设置页「清理原文」按天全部清除）。"""
+    if body.end <= body.start:
+        return {"ok": False, "error": "end 必须大于 start"}
+    db = request.app.state.db
+    deleted = await db.delete_messages_between(body.start, body.end)
+    return {"ok": True, "deleted": deleted}
+
+
+class DeleteMessageBody(BaseModel):
+    """清理原文：删除单条 message（列表右键菜单）。"""
+    id: int
+
+
+@router.post("/storage/delete-message")
+async def delete_message_storage(
+    request: Request, body: DeleteMessageBody,
+) -> dict[str, Any]:
+    """删除单条 message 行。"""
+    if body.id <= 0:
+        return {"ok": False, "error": "id 必须为正数"}
+    db = request.app.state.db
+    deleted = await db.delete_message_by_id(body.id)
+    return {"ok": True, "id": body.id, "deleted": deleted}
+
+
+class DeleteUpstreamMessagesBody(BaseModel):
+    """清理原文：按上游删除 messages（保留 requests 与配置）。"""
+    upstream: str
+
+
+@router.post("/storage/delete-upstream-messages")
+async def delete_upstream_messages_storage(
+    request: Request, body: DeleteUpstreamMessagesBody,
+) -> dict[str, Any]:
+    """删除某上游名下所有 message 行（设置页「清理原文」按上游全部清除）。"""
+    if not body.upstream or not body.upstream.strip():
+        return {"ok": False, "error": "upstream 不能为空"}
+    db = request.app.state.db
+    deleted = await db.delete_messages_by_upstream(body.upstream.strip())
+    return {"ok": True, "upstream": body.upstream.strip(), "deleted": deleted}
 
 
 @router.post("/storage/clear-logs")

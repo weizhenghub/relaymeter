@@ -95,6 +95,10 @@
     // v0.130：自动延展侧栏（宽度）。
     getLivePanelAutoExtend() { return this._call("get_live_panel_auto_extend"); },
     setLivePanelAutoExtend(enabled) { return this._call("set_live_panel_auto_extend", [enabled]); },
+    // v0.122：引导教程侧栏聚焦（跨窗注入 __tourPanel 协议）。
+    tourPanelHighlight(payload) { return this._call("tour_panel_highlight", [payload]); },
+    // v0.205：引导教程侧栏聚焦 —— 引导带宽度（容器左扩，指引卡悬浮在球左侧）。
+    setTourGuideWidth(width) { return this._call("set_tour_guide_width", [width]); },
     // v0.165：悬浮球（侧栏从球位置展开）。
     getFloatBall()        { return this._call("get_float_ball"); },
     setFloatBall(enabled) { return this._call("set_float_ball", [enabled]); },
@@ -134,6 +138,16 @@
     vacuumStorage(target)      { return this._call("vacuum_storage", [target || "both"]); },
     clearLogs()          { return this._call("clear_logs"); },
     moveStorage(kind, path) { return this._call("move_storage", [kind, path]); },
+    // v0.NNN：设置页「清理原文」—— 读日历/消息列表（本地 tui）+ 删除（relay HTTP）。
+    getMessageCalendar(year, month) { return this._call("get_message_calendar", [year, month]); },
+    getMessageYear(days)   { return this._call("get_message_year", [days || 365]); },
+    getDayMessages(year, month, day) { return this._call("get_day_messages", [year, month, day]); },
+    getMessageUpstreams()   { return this._call("get_message_upstreams"); },
+    getUpstreamMessages(upstream) { return this._call("get_upstream_messages", [upstream]); },
+    getMessageFull(id)      { return this._call("get_message_full", [id]); },
+    deleteMessagesRange(start, end) { return this._call("delete_messages_range", [start, end]); },
+    deleteMessage(id)       { return this._call("delete_message", [id]); },
+    deleteUpstreamMessages(upstream) { return this._call("delete_upstream_messages", [upstream]); },
     // v0.104：顶栏「实时流」按钮新语义 = 一键全部显示/隐藏。
     toggleAllPanels()        { return this._call("toggle_all_panels"); },
     // v0.11.18 高级切换（实验性）。
@@ -294,6 +308,14 @@
       return this._call(
         "remove_upstream",
         [platform, name],
+        { ok: false, error: "bridge unavailable" }
+      );
+    },
+    // v0.NNN：上游页「历史上游」彻底删除 —— 删配置（若还在）+ 剥 DB 行。
+    async deleteUpstreamHistory(name, platform) {
+      return this._call(
+        "delete_upstream",
+        [name, platform],
         { ok: false, error: "bridge unavailable" }
       );
     },
@@ -633,6 +655,12 @@
       body.innerHTML = '<div class="card-empty">暂无数据</div>';
       return;
     }
+    // 教程演示期间（步骤2 上游卡片扫光把真实 #card-upstream-body 写成
+    // 模拟预设行）：真实 tick 不写卡片 —— 否则 startTour 时已在途的
+    // 真实 tick（越过 pollPaused 检查、正在 await bridge）会在演示写入
+    // 之后把真实行盖回来，演示就变成了真实数据。演示结束由
+    // _tourRestoreRipple 还原原内容后、pollPaused 也已复位，这里再放行。
+    if (pollPaused) return;
     const up = snap.by_upstream || {};
     const entries = Object.entries(up);
     // v0.204：空状态不再显示「暂无请求」占位 —— 用户要求删掉该字段，
@@ -892,6 +920,62 @@
     applyUpstreamRowOrder(body, entries);
     // v0.11.15: 全页闪烁 —— 本次 tick 有新 bump 时整窗闪一次。
     if (newBumps.length) triggerWholeFlash();
+  }
+
+  // v0.NNN：历史上游排序 —— 现存上游排前、已删除排后；两组各自按累计
+  // total_tokens 降序（消耗量大在前）。`isLive(name)` 判断配置是否存在。
+  function sortHistoryUpstreams(rows, isLive) {
+    const live = [];
+    const gone = [];
+    (rows || []).forEach((h) => {
+      if (!h || !h.name) return;
+      (isLive(h.name) ? live : gone).push(h);
+    });
+    const byTokens = (a, b) => (b.total_tokens || 0) - (a.total_tokens || 0);
+    live.sort(byTokens);
+    gone.sort(byTokens);
+    return live.concat(gone);
+  }
+
+  // v0.NNN：总览页「历史上游」卡片 —— 所有在 DB 出现过的 upstream
+  //（含已删配置），每条可彻底删除。历史来自 relay snapshot 的
+  // history_upstreams（GUI 进程从 requests 表 GROUP BY 得到）。
+  // 空态不写占位（跟前两张卡一致留白）。
+  function renderHistoryUpstreams(body, snap) {
+    if (!body) return;
+    const rows = (snap && snap.history_upstreams) || [];
+    if (!rows.length) {
+      body.innerHTML = "";
+      return;
+    }
+    // 已配置名集合 —— 判断「现存 / 已删除」（配置查 snapshot.upstreams 扁平池）。
+    const configuredNames = new Set();
+    if (snap && snap.upstreams) {
+      Object.values(snap.upstreams).forEach((list) => {
+        (list || []).forEach((c) => { if (c && c.name) configuredNames.add(c.name); });
+      });
+    }
+    const sorted = sortHistoryUpstreams(rows, (n) => configuredNames.has(n));
+    const parts = sorted.map((h) => {
+      // 若同名出现在多个平台，各记一条；都保留删除按钮。
+      const isLive = configuredNames.has(h.name);
+      const lastText = _fmtTs(h.last_ts);
+      return `<div class="uhist-row ${isLive ? "uhist-live" : "uhist-gone"}"
+                 data-del-upstream="${attr(h.name)}" data-del-platform="${attr(h.platform || "")}">
+        <div class="uhist-name">
+          <span class="uhist-name-text" data-i18n-keep>${escape(h.name)}</span>
+          <span class="upstream-history-badge ${isLive ? "badge-live" : "badge-gone"}" data-i18n-keep>${isLive ? t("现存") : t("已删除")}</span>
+          <span class="upstream-detail-platform" data-i18n-keep>${escape(h.platform || "—")}</span>
+        </div>
+        <div class="uhist-meta">
+          <span>${t("请求")} <b>${fmtNum(h.requests)}</b></span>
+          <span>${t("总 token")} <b>${fmtTokens(h.total_tokens)}</b></span>
+          <span>${t("最后使用")} <b>${escape(lastText)}</b></span>
+        </div>
+        <button type="button" class="uhist-del" title="${t("彻底删除")}">×</button>
+      </div>`;
+    }).join("");
+    body.innerHTML = parts;
   }
 
   function renderPlatform(body, snap) {
@@ -1659,6 +1743,12 @@
     // so the colour cues map to something the user already knows.
     const root = $("top-model-spotlight");
     if (!root) return;
+    // 教程演示期间（步骤1 数字滚动把真实 #tms-total/图例写成模拟值）：
+    // 真实 tick 不写 spotlight —— 否则 startTour 时已在途的真实 tick
+    // （越过 pollPaused 检查、正在 await bridge）会在演示写入之后把
+    // 真实值盖回，演示数字就变成了真实数据。演示结束由
+    // _tourRestoreRoll 还原原值后、pollPaused 也已复位，这里再放行。
+    if (pollPaused) return;
     const models = snap && snap.by_model;
     if (!models) {
       // 隐藏也递增代际，停掉上一轮仍在跑的入场动画（避免它继续往隐藏
@@ -1992,6 +2082,10 @@
   const CARD_DEFS = [
     { key: "hourly", title: "Token 消耗 · 近 24h", cls: "card-chart-row" },
     { key: "upstream", title: "上游统计", cls: "" },
+    // v0.NNN：历史上游 —— 所有在 DB 出现过的 upstream（含已删配置）。
+    // cls 给 card-chart-row → naturalSpan=2，卡占双倍宽（同 hourly），
+    // 让历史列表更宽敞。
+    { key: "history-upstreams", title: "历史上游", cls: "card-chart-row" },
     { key: "today", title: "今日用量", cls: "" },
     { key: "platform", title: "协议分布", cls: "" },
     { key: "agent", title: "平台流量", cls: "" },
@@ -4209,6 +4303,11 @@
         ov.recent && ov.recent[0] && ov.recent[0].id,
         ov.by_hour && ov.by_hour.length,
         ov.by_hour && ov.by_hour.length && ov.by_hour[ov.by_hour.length - 1].tokens,
+        // v0.NNN：小时窗口滑动 —— 24h 图固定取最近 24 个整点，idle 时
+        // 也要随当前小时推进（否则长时间无请求图表不前进）。
+        Math.floor(Date.now() / 3600000),
+        // v0.NNN：历史上游卡 —— 变更（请求数/成员增减）时重渲。
+        (snap && snap.history_upstreams || []).map(h => h.name + ":" + (h.requests || 0) + ":" + (h.total_tokens || 0)).join("|"),
       ]);
       if (sig !== lastCardsSig || cardResizingNow()) {
         lastCardsSig = sig;
@@ -4234,6 +4333,8 @@
           };
           forEachCardBody("today",    b => { renderToday(b, ov);    markFade(b); });
           forEachCardBody("upstream", b => { renderUpstream(b, ov, mode === "relay" ? status : null); markFade(b); });
+          // 历史上游卡只读真实 relay snapshot（透传档无该字段，不随档位跳）。
+          forEachCardBody("history-upstreams", b => { renderHistoryUpstreams(b, snap); markFade(b); });
           forEachCardBody("platform", b => { renderPlatform(b, ov); markFade(b); });
           forEachCardBody("agent",    b => { renderAgent(b, ov);    markFade(b); });
           forEachCardBody("models",   b => { renderModels(b, ov);   markFade(b); });
@@ -4287,23 +4388,18 @@
       return;
     }
     const buckets = (snap && snap.by_hour) || [];
-    if (!buckets.length) {
-      // 有旧实例也要先 destroy —— 否则换成空态文案后旧 Chart 还挂在
-      // window resize 监听上，每次转换都漏一个实例。
-      _destroyHourChart();
-      body.innerHTML = '<div class="card-empty">近 24h 暂无请求</div>';
-      return;
-    }
-    // Zero-fill any missing hours between min and max so the X axis is a
-    // contiguous 24h strip. Without this, a quiet relay would render a
-    // sparse chart that looks broken (gaps in the bar run).
+    // v0.NNN：无论有没有请求都渲染完整 24h 颗粒度 —— 空数据也构造
+    // 最近 24 个整点零桶（X 轴固定 24 刻度，完全空白也展示），不再
+    // 显示「近 24h 暂无请求」占位。bucket.hour 是 UTC 整点对齐的 unix
+    // 秒，显示时转本地小时。
     const BUCKET = 3600;
-    const minH = Math.floor(buckets[0].hour / BUCKET) * BUCKET;
-    const maxH = Math.floor(buckets[buckets.length - 1].hour / BUCKET) * BUCKET;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const lastBucketH = Math.floor(nowSec / BUCKET) * BUCKET;
+    const startBucketH = lastBucketH - 23 * BUCKET;
     const byHour = new Map();
     buckets.forEach(b => byHour.set(Math.floor(b.hour / BUCKET) * BUCKET, b));
     const padded = [];
-    for (let h = minH; h <= maxH; h += BUCKET) {
+    for (let h = startBucketH; h <= lastBucketH; h += BUCKET) {
       padded.push(byHour.get(h) || { hour: h, requests: 0, in_tokens: 0, out_tokens: 0, tokens: 0 });
     }
     const labels = padded.map(b => {
@@ -4415,6 +4511,10 @@
   let lastLiveSig = null;
   function renderLive(body, snap) {
     if (!body) return;
+    // 教程演示期间（章节2 步骤2 把真实 #card-live-body 写成模拟行）：
+    // 真实 tick 不写实时卡（与 renderUpstream/renderTopModelSpotlight 的
+    // pollPaused 守卫同理，见 tourActive 注释）。
+    if (pollPaused) return;
     const rows = (snap && snap.live) || [];
     // "正在进行的请求"只显示已经离开上传阶段、往返上游的条目:
     //   - 保留 calling(请求已发出,等上游首个响应包)
@@ -4702,11 +4802,20 @@
         ${req.error ? `<span class="modal-meta-error"><b>错误</b> ${escape(req.error)}</span>` : ""}
         ${req.request_id ? `<span class="modal-meta-mono"><b>request_id</b> ${escape(req.request_id)}</span>` : ""}
       </div>`;
-    if (!msgs.length) {
+    if (!msgs.length && !(req.thinking)) {
       body.innerHTML = `<div class="modal-empty">未保存对话内容。<br><br>如需保存消息原文与回复，请把 <code>RELAY_SAVE_MESSAGES=1</code> 写入 .env 后重启。</div>`;
       return;
     }
-    body.innerHTML = msgs.map((m, i) => {
+    // v0.NNN：thinking 存于 requests.thinking 单列 —— 在 user 与 assistant
+    // 之间插入一个 thinking 消息块（不再依赖 messages 表里的独立行）。
+    let list = msgs;
+    if (req.thinking) {
+      const trow = { role: "thinking", ts: req.ts, content: req.thinking, content_json: null };
+      list = msgs.slice();
+      const idx = msgs.findIndex(m => String(m.role || "").toLowerCase() === "assistant");
+      if (idx === -1) list.push(trow); else list.splice(idx, 0, trow);
+    }
+    body.innerHTML = list.map((m) => {
       const role = String(m.role || "msg").toLowerCase();
       // v0.89: thinking 单独一类，便于样式区分（推理块通常比正文长，
       // 显示成折叠样式让对话详情重点仍在正文）。
@@ -4715,6 +4824,21 @@
         : role === "thinking" ? "modal-msg-thinking"
         : "modal-msg-other";
       const text = m.content || "";
+      // v0.NNN：消息正文默认只展示前 200 字符，剩余折叠；
+      // 点三角箭头展开，展开后内容可滚动看完整。
+      const FOLD = 200;
+      let textHtml;
+      if (text.length > FOLD) {
+        const head = escape(text.slice(0, FOLD));
+        const tail = escape(text.slice(FOLD));
+        textHtml = `<div class="modal-msg-text">${head}` +
+          `<details class="modal-msg-fold">` +
+            `<summary><span class="modal-msg-fold-arrow">▸</span> 展开剩余 ${text.length - FOLD} 字</summary>` +
+            `<div class="modal-msg-fold-body">${tail}</div>` +
+          `</details></div>`;
+      } else {
+        textHtml = `<div class="modal-msg-text">${escape(text)}</div>`;
+      }
       const json = m.content_json;
       let jsonBlock = "";
       if (json && json !== text) {
@@ -4732,7 +4856,7 @@
             <span class="modal-msg-role">${escape(role)}</span>
             <span class="modal-msg-ts">${escape(fmtTime(m.ts || 0))}</span>
           </div>
-          <div class="modal-msg-text">${escape(text)}</div>
+          ${textHtml}
           ${jsonBlock}
         </div>`;
     }).join("");
@@ -4998,9 +5122,11 @@
 
   function alertModal(title, body, opts) {
     return new Promise((resolve) => {
-      // 关掉上一个未关的对话框
-      const prev = document.querySelector(".modal-overlay[data-dynamic-dialog]");
-      if (prev) _closeDialog(prev);
+      // 关掉上一个未关的对话框（嵌套调用时传 keepStack 跳过）
+      if (!(opts && opts.keepStack)) {
+        const prev = document.querySelector(".modal-overlay[data-dynamic-dialog]");
+        if (prev) _closeDialog(prev);
+      }
       const seq = ++_dialogSeq;
       const overlay = document.createElement("div");
       overlay.className = "modal-overlay";
@@ -5037,6 +5163,49 @@
     });
   }
 
+  // v0.NNN：多按钮 + HTML 正文对话框（删除上游两级流程用）。
+  // 比 confirmModal 多：任意按钮个数（各带 label/value/danger/primary）与
+  // 富文本正文（插 <b class="dlg-danger">/<b class="dlg-safe"> 高亮）。
+  // resolve：所点按钮的 value；取消 / × / Esc / 背景点击 → "__cancel"。
+  function dialogModal({ title, html, buttons } = {}) {
+    return new Promise((resolve) => {
+      const prev = document.querySelector(".modal-overlay[data-dynamic-dialog]");
+      if (prev) _closeDialog(prev);
+      const seq = ++_dialogSeq;
+      const overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.setAttribute("data-dynamic-dialog", String(seq));
+      overlay.hidden = false;
+      const btnHtml = (buttons || [])
+        .map(b => `<button type="button" class="btn ${b.danger ? "btn-danger" : (b.primary ? "btn-primary" : "")}" data-dlg-choice="${b.value}">${escape(b.label || "")}</button>`)
+        .join("");
+      overlay.innerHTML = `
+        <div class="modal-card modal-card-dialog" role="dialog" aria-modal="true">
+          <button class="modal-close" aria-label="关闭" type="button">×</button>
+          <div class="modal-header">
+            <div class="modal-title">${escape(title || "")}</div>
+          </div>
+          <div class="modal-body dialog-body dialog-html-body">${html || ""}</div>
+          <div class="dialog-actions">${btnHtml}</div>
+        </div>`;
+      document.body.appendChild(overlay);
+      document.body.classList.add("modal-open");
+      const close = (val) => { _closeDialog(overlay); resolve(val); };
+      const card = overlay.querySelector(".modal-card");
+      if (card) card.addEventListener("click", (e) => e.stopPropagation());
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) close("__cancel"); });
+      overlay.querySelector(".modal-close").addEventListener("click", () => close("__cancel"));
+      overlay.querySelectorAll("[data-dlg-choice]").forEach(btn => {
+        btn.addEventListener("click", () => close(btn.dataset.dlgChoice));
+      });
+      const escHandler = (ev) => {
+        if (ev.key === "Escape" && !overlay.hidden) close("__cancel");
+      };
+      document.addEventListener("keydown", escHandler);
+      overlay._escHandler = escHandler;
+    });
+  }
+
   function confirmModal(title, body, opts) {
     // v0.75：opts 兼容 {ok, cancel} 和 {okText, cancelText} 两种命名,
     // 之前只认 okText,__qsDel 传 ok 时按钮文案就退化成默认的"确定"。
@@ -5044,8 +5213,11 @@
     const cancelText = (opts && (opts.cancelText || opts.cancel)) || "取消";
     const danger = !!(opts && opts.danger);  // 红按钮
     return new Promise((resolve) => {
-      const prev = document.querySelector(".modal-overlay[data-dynamic-dialog]");
-      if (prev) _closeDialog(prev);
+      // 嵌套调用（父弹窗之上再确认）时传 keepStack 跳过关闭旧弹窗。
+      if (!(opts && opts.keepStack)) {
+        const prev = document.querySelector(".modal-overlay[data-dynamic-dialog]");
+        if (prev) _closeDialog(prev);
+      }
       const seq = ++_dialogSeq;
       const overlay = document.createElement("div");
       overlay.className = "modal-overlay";
@@ -5216,6 +5388,7 @@
     const sig = JSON.stringify([
       byUp,
       (snap && snap.upstreams) || {},
+      (snap && snap.history_upstreams) || [],
       (status && status.active_per_platform) || {},
       {
         enabled: !!(status && status.autoswitch_enabled),
@@ -5347,6 +5520,42 @@
     body.innerHTML = rows.length
       ? rows.join("")
       : '<div class="card-empty">暂无上游配置</div>';
+
+    // v0.NNN：历史上游 —— 所有在 DB 出现过的 upstream（含已删配置）。
+    // 标题 + 全部条目包在一个 .upstream-history-section 容器里，容器自控
+    // 内部间距（父 .card-body 的 flex gap 12px 只作用于容器一次，不会把
+    // 每一条目撑开）。
+    const histRows = (snap && snap.history_upstreams) || [];
+    const configuredNames = new Set();
+    pooledUpstreams(cfg).forEach(({ cfg: c }) => configuredNames.add(c.name));
+    if (histRows.length) {
+      const sorted = sortHistoryUpstreams(histRows, (n) => configuredNames.has(n));
+      let histInner =
+        '<div class="upstream-history-title" data-i18n="历史上游">' + t("历史上游") + '</div>' +
+        '<div class="upstream-history-sub">' + t("所有在本机出现过、含已删除配置的上游") + '</div>';
+      sorted.forEach((h) => {
+        if (!h || !h.name) return;
+        const isLive = configuredNames.has(h.name);
+        const lastText = _fmtTs(h.last_ts);
+        histInner +=
+          `<div class="upstream-history-row ${isLive ? "upstream-history-live" : "upstream-history-gone"}"
+               data-history-upstream="${attr(h.name)}" data-history-platform="${attr(h.platform || "")}">
+            <div class="upstream-detail-name">
+              <span data-i18n-keep>${escape(h.name)}</span>
+              <span class="upstream-history-badge ${isLive ? "badge-live" : "badge-gone"}" data-i18n-keep>${isLive ? t("现存") : t("已删除")}</span>
+              <span class="upstream-detail-platform" data-i18n-keep>${escape(h.platform || "—")}</span>
+            </div>
+            <div class="upstream-history-meta">
+              <span>${t("请求")}: <b>${fmtNum(h.requests)}</b></span>
+              <span>${t("总 token")}: <b>${fmtTokens(h.total_tokens)}</b></span>
+              <span>${t("最后使用")}: <b>${escape(lastText)}</b></span>
+            </div>
+            <button type="button" class="upstream-history-delete"
+                    data-del-upstream="${attr(h.name)}" data-del-platform="${attr(h.platform || "")}">${t("彻底删除")}</button>
+          </div>`;
+      });
+      body.innerHTML += `<div class="upstream-history-section">${histInner}</div>`;
+    }
   }
 
   let lastRelaySig = null;
@@ -5580,7 +5789,12 @@
         const multRows = Object.entries(mults)
           .map(([m, v]) => multiplierRow(m, v))
           .join("");
-        const chips = (c.allowed_models || []).map(allowedChip).join("");
+        // v0.205：与新建表单同款 —— 逐行模型列表（模型名 + 「支持图片输入」
+        // 勾选框 + 移除钮），替换旧 chip 横排。勾选态来自 cfg.vision_models
+        //（snapshot v0.205 起携带）。外层沿用 .cfg-chips 容器 + 输入框，
+        // 行放在 .cfg-model-list（flex-basis:100% 纵向堆叠，同 create 表单）。
+        const visionSet = new Set(c.vision_models || []);
+        const chips = (c.allowed_models || []).map(m => allowedModelRow(m, visionSet.has(m))).join("");
         return `
         <details class="upstream-config" data-platform="${attr(plat)}" data-name="${attr(c.name)}">
           <summary>
@@ -5653,10 +5867,10 @@
             <div class="cfg-field">
               <label class="cfg-label">
                 允许的模型
-                <span class="cfg-hint">留空 = 不限制。回车添加</span>
+                <span class="cfg-hint">留空 = 不限制。回车添加，勾选标记支持图片输入</span>
               </label>
               <div class="cfg-chips">
-                ${chips}
+                <div class="cfg-model-list">${chips}</div>
                 <input class="cfg-chip-input" type="text" placeholder="输入模型名后回车" />
               </div>
             </div>
@@ -5727,25 +5941,39 @@
       const chipBox = card.querySelector(".cfg-chips");
       const chipInput = card.querySelector(".cfg-chip-input");
       if (chipBox && chipInput) {
+        // v0.205：与新建表单同款 —— 回车添加进 .cfg-model-list 逐行渲染
+        // （带「支持图片输入」勾选框），移除钮按 .cfg-model-row 删行。
+        // 旧 .cfg-chip chip 语义保留兜底（存量 DOM 兼容）。
+        const modelList = () => chipBox.querySelector(".cfg-model-list");
+        const existingModels = () => Array.from(
+          chipBox.querySelectorAll(".cfg-model-row"),
+        ).map(el => el.getAttribute("data-model"));
         chipInput.addEventListener("keydown", (e) => {
           if (e.key !== "Enter") return;
           e.preventDefault();
           const value = chipInput.value.trim();
           if (!value) return;
-          const existing = Array.from(chipBox.querySelectorAll(".cfg-chip"))
-            .map(el => el.getAttribute("data-model"));
-          if (!existing.includes(value)) {
-            chipInput.insertAdjacentHTML("beforebegin", allowedChip(value));
+          const ml = modelList();
+          if (ml && !existingModels().includes(value)) {
+            ml.insertAdjacentHTML("beforeend", allowedModelRow(value, false));
           }
           chipInput.value = "";
           setStatus("");
         });
         chipBox.addEventListener("click", (e) => {
           const btn = e.target.closest(".cfg-chip-remove");
-          if (!btn) return;
-          const chip = btn.closest(".cfg-chip");
-          if (chip) chip.remove();
-          setStatus("");
+          if (btn) {
+            const chip = btn.closest(".cfg-chip");
+            if (chip) chip.remove();
+            setStatus("");
+            return;
+          }
+          const rowBtn = e.target.closest(".cfg-row-remove");
+          if (rowBtn) {
+            const row = rowBtn.closest(".cfg-model-row");
+            if (row) row.remove();
+            setStatus("");
+          }
         });
       }
 
@@ -5831,7 +6059,15 @@
             return;
           }
 
-          const allowed = Array.from(card.querySelectorAll(".cfg-chip"))
+          // v0.205：模型行逐行收集（与新建表单同款）—— allowed = 所有行；
+          // vision = 勾选了「支持图片输入」的行。空数组也照传：Python
+          // apply_quota_edit 语义 = None 不动、[] 清空该上游多模态名单。
+          const modelRows = Array.from(card.querySelectorAll(".cfg-model-row"));
+          const allowed = modelRows
+            .map(el => el.getAttribute("data-model"))
+            .filter(Boolean);
+          const visionModels = modelRows
+            .filter(el => el.querySelector(".cfg-model-vision-cb")?.checked)
             .map(el => el.getAttribute("data-model"))
             .filter(Boolean);
 
@@ -5861,6 +6097,7 @@
             quota_5h: quota,
             model_multipliers: multipliers,
             allowed_models: allowed,
+            vision_models: visionModels,
             linked_upstreams: linked,
             billing_unit: billing_unit,
             default_model: defaultModelRaw || null,
@@ -6331,6 +6568,16 @@
     lang: _resolveLang(_intent0),
     en: {
       "透传上游（自动发现）": "Passthrough upstreams (auto-discovered)",
+      "历史上游": "History upstreams",
+      "所有在本机出现过、含已删除配置的上游": "All upstreams ever seen locally, including deleted configs",
+      "现存": "Active",
+      "已删除": "Deleted",
+      "总 token": "Total tokens",
+      "最后使用": "Last used",
+      "彻底删除": "Delete permanently",
+      "彻底删除上游": "Delete upstream permanently",
+      "彻底删除失败": "Permanent delete failed",
+      "删除失败，请确认中继正在运行": "Delete failed — check the relay is running",
       "透传模式开启后，客户端请求自动发现的上游。可重命名，不可删除。": "Upstreams auto-discovered from passthrough requests. Renamable, not deletable.",
       "中继状态": "Relay status",
       "界面与偏好": "Interface & preferences",
@@ -6410,6 +6657,11 @@
       // v0.190：开发者模式子项 —— 支持图片的模型（搬到 dev 组后文案）。
       "支持图片的模型": "Vision-capable models",
       "允许 OpenCode 向勾选的模型发图；中继 /models/api.json 会标成 image-capable。点击切换勾选，保存后立即生效。默认全不勾。": "Allow OpenCode to send images to the selected models; relay marks them image-capable in /models/api.json. Click to toggle; save takes effect immediately. Empty by default.",
+      // v0.202：各上游多模态（设置页 per-upstream 多模态开关）。
+      "各上游多模态": "Per-upstream vision",
+      "设置各上游模型是否支持图片输入": "Set whether each upstream's models accept images",
+      "按上游列出模型，勾选即标记为多模态（发图不剥离）。保存后立即生效。": "Models are grouped by upstream; check to mark multimodal (images are not stripped). Save takes effect immediately.",
+      "图片": "Images",
       // 存储管理区块（v0.113n）
       "存储空间管理": "Storage usage",
       "存储位置管理": "Storage locations",
@@ -6778,9 +7030,67 @@
       "（未配置上游模型）": "(no upstream model configured)",
       "释放": "release",
       "调用": "calls",
+      // v0.122：引导教程（tour）三区块 —— 主页面 / 实时流 / 上游添加。
+      "引导教程": "Guided tour",
+      "重新播放首次启动时的界面引导": "Replay the first-launch interface tour",
+      "开始引导": "Start tour",
+      "跳过": "Skip",
+      "上一步": "Previous",
+      "下一步": "Next",
+      "完成": "Done",
+      "章节": "Chapter",
+      "第 1 章 · 主页面": "Ch.1 · Home",
+      "第 2 章 · 实时流": "Ch.2 · Live stream",
+      "第 3 章 · 上游添加": "Ch.3 · Add upstream",
+      // 章节1 主页面
+      "总 token 栏": "Total tokens",
+      "这里是全部模型的 token 总消耗：输入、输出、缓存分别统计，一眼看清用量。": "Total token consumption across all models — input, output and cache are tracked separately, so usage is clear at a glance.",
+      "上游统计卡片": "Upstream stats card",
+      "可按token或按调用次数统计上游的消耗\n该上游被调用一次时，闪过红色动画\n5小时释放次数时，闪过绿色动画": "Track each upstream's usage by token or by call count.\nWhen this upstream is called once, a red animation flashes.\nWhen the 5-hour quota releases, a green animation flashes.",
+      // 章节2 实时流
+      "实时流入口": "Live stream entry",
+      "正在进行中的请求会显示在这里": "In-flight requests show up here",
+      "进行中的请求": "In-flight requests",
+      "有正在进行的流会在此显示": "Streams currently in progress show up here",
+      "实时流侧栏": "Live stream sidebar",
+      "右侧独立窗口实时展示当前请求：api-key、入/出向 wire、token 用量与思考 / 正文流，方便调试。": "The standalone window on the right shows the current request live: api-key, in/out wire, token usage and the reasoning / text stream — handy for debugging.",
+      "正在流式输出…": "streaming…",
+      "思考中": "thinking",
+      "端点与并发请求": "Endpoint & concurrent requests",
+      "上游与当前请求的并发列表，实时刷新。": "The upstream and its in-flight requests, refreshed live.",
+      "api-key": "api-key",
+      "该上游的明文密钥，请求鉴权用。": "This upstream's plaintext key, used to authenticate requests.",
+      "思考流": "Thinking stream",
+      "模型推理过程逐字流出，先于正文。": "The model's reasoning streams out word by word, before the text.",
+      "请求卡": "Request card",
+      "每条请求的入/出向状态与结果。": "Each request's in/out wire status and result.",
+      // 章节3 上游添加
+      "新建上游": "New upstream",
+      "进入上游页，点「新建上游」弹出创建表单。": "Go to the Upstreams page and click \"New upstream\" to open the create form.",
+      "填写名称": "Fill in a name",
+      "给上游起一个唯一名称，之后在切换上游时用这个名字识别。": "Give the upstream a unique name — this is how it's identified when switching.",
+      "填写地址": "Fill in the URL",
+      "上游 API endpoint，指向你接入的模型服务地址。": "The upstream API endpoint, pointing to the model service you're connecting.",
+      "填写 API Key": "Fill in the API key",
+      "上游的鉴权密钥，明文保存在本地配置文件。": "The upstream auth key, stored in plaintext in the local config file.",
+      "选择预设": "Pick a preset",
+      "可选：选择预设后名称与允许模型自动填好，只需补 API Key。": "Optional: picking a preset auto-fills the name and allowed models — you only add the API key.",
+      "提交创建": "Submit",
+      "点「创建」保存 —— 上游立即生效，无需重启。": "Click \"Create\" to save — the upstream takes effect immediately, no restart needed.",
+      "创建成功！": "Upstream created!",
     },
     "zh-TW": {
       "透传上游（自动发现）": "透傳上游（自動發現）",
+      "历史上游": "歷史上游",
+      "所有在本机出现过、含已删除配置的上游": "所有在本機出現過、含已刪除設定的上游",
+      "现存": "現存",
+      "已删除": "已刪除",
+      "总 token": "總 token",
+      "最后使用": "最後使用",
+      "彻底删除": "徹底刪除",
+      "彻底删除上游": "徹底刪除上游",
+      "彻底删除失败": "徹底刪除失敗",
+      "删除失败，请确认中继正在运行": "刪除失敗，請確認中繼正在執行",
       "透传模式开启后，客户端请求自动发现的上游。可重命名，不可删除。": "透傳模式開啟後，用戶端請求自動發現的上游。可重新命名，不可刪除。",
       "中继状态": "中繼狀態",
       "界面与偏好": "介面與偏好",
@@ -6850,6 +7160,11 @@
       // v0.190：开发者模式子项 —— 支持图片的模型。
       "支持图片的模型": "支援圖片的模型",
       "允许 OpenCode 向勾选的模型发图；中继 /models/api.json 会标成 image-capable。点击切换勾选，保存后立即生效。默认全不勾。": "允許 OpenCode 向勾選的模型發送圖片；中繼 /models/api.json 會標成 image-capable。點擊切換勾選，儲存後立即生效。預設全不勾選。",
+      // v0.202：各上游多模态。
+      "各上游多模态": "各上游多模態",
+      "设置各上游模型是否支持图片输入": "設定各上游模型是否支援圖片輸入",
+      "按上游列出模型，勾选即标记为多模态（发图不剥离）。保存后立即生效。": "按上游列出模型，勾選即標記為多模態（發圖不剝離）。儲存後立即生效。",
+      "图片": "圖片",
       "存储空间管理": "儲存空間管理",
       "存储位置管理": "儲存位置管理",
       "消息数据库 (relay.db)": "訊息資料庫 (relay.db)",
@@ -7205,9 +7520,63 @@
       "（未配置上游模型）": "（未設定上游模型）",
       "释放": "釋放",
       "调用": "調用",
+      "引导教程": "引導教學",
+      "重新播放首次启动时的界面引导": "重新播放首次啟動時的介面引導",
+      "开始引导": "開始引導",
+      "跳过": "跳過",
+      "上一步": "上一步",
+      "下一步": "下一步",
+      "完成": "完成",
+      "章节": "章節",
+      "第 1 章 · 主页面": "第 1 章 · 主頁面",
+      "第 2 章 · 实时流": "第 2 章 · 即時串流",
+      "第 3 章 · 上游添加": "第 3 章 · 新增上游",
+      "总 token 栏": "總 Token 欄",
+      "这里是全部模型的 token 总消耗：输入、输出、缓存分别统计，一眼看清用量。": "這裡是全部模型的 Token 總消耗：輸入、輸出、快取分別統計，一眼看清用量。",
+      "上游统计卡片": "上游統計卡片",
+      "可按token或按调用次数统计上游的消耗\n该上游被调用一次时，闪过红色动画\n5小时释放次数时，闪过绿色动画": "可按 Token 或按呼叫次數統計上游的消耗\n該上游被呼叫一次時，閃過紅色動畫\n5 小時釋放次數時，閃過綠色動畫",
+      "实时流入口": "即時串流入口",
+      "正在进行中的请求会显示在这里": "進行中的請求會顯示在這裡",
+      "进行中的请求": "進行中的請求",
+      "有正在进行的流会在此显示": "正在進行的串流會在此顯示",
+      "实时流侧栏": "即時串流側欄",
+      "右侧独立窗口实时展示当前请求：api-key、入/出向 wire、token 用量与思考 / 正文流，方便调试。": "右側獨立視窗即時展示目前請求：api-key、入/出向 wire、Token 用量與思考 / 正文流，方便除錯。",
+      "正在流式输出…": "串流輸出中…",
+      "思考中": "思考中",
+      "端点与并发请求": "端點與並發請求",
+      "上游与当前请求的并发列表，实时刷新。": "上游與目前請求的並發列表，即時重新整理。",
+      "api-key": "api-key",
+      "该上游的明文密钥，请求鉴权用。": "該上游的明文金鑰，供請求鑑權使用。",
+      "思考流": "思考流",
+      "模型推理过程逐字流出，先于正文。": "模型推理過程逐字流出，先於正文。",
+      "请求卡": "請求卡",
+      "每条请求的入/出向状态与结果。": "每條請求的入/出向狀態與結果。",
+      "新建上游": "新增上游",
+      "进入上游页，点「新建上游」弹出创建表单。": "進入上游頁，點「新增上游」彈出建立表單。",
+      "填写名称": "填寫名稱",
+      "给上游起一个唯一名称，之后在切换上游时用这个名字识别。": "給上游一個唯一名稱，之後在切換上游時用這個名稱識別。",
+      "填写地址": "填寫位址",
+      "上游 API endpoint，指向你接入的模型服务地址。": "上游 API Endpoint，指向你接取的模型服務位址。",
+      "填写 API Key": "填寫 API Key",
+      "上游的鉴权密钥，明文保存在本地配置文件。": "上游的鑑權金鑰，明文儲存在本機設定檔。",
+      "选择预设": "選擇預設",
+      "可选：选择预设后名称与允许模型自动填好，只需补 API Key。": "可選：選擇預設後名稱與允許模型自動填好，只需補 API Key。",
+      "提交创建": "提交建立",
+      "点「创建」保存 —— 上游立即生效，无需重启。": "點「建立」儲存 —— 上游立即生效，無需重啟。",
+      "创建成功！": "建立成功！",
     },
     ja: {
       "透传上游（自动发现）": "パススルー上流（自動検出）",
+      "历史上游": "履歴上流",
+      "所有在本机出现过、含已删除配置的上游": "この端末で一度は使われた全上流（削除済み設定を含む）",
+      "现存": "稼働中",
+      "已删除": "削除済み",
+      "总 token": "総 token",
+      "最后使用": "最終使用",
+      "彻底删除": "完全削除",
+      "彻底删除上游": "上流を完全削除",
+      "彻底删除失败": "完全削除に失敗",
+      "删除失败，请确认中继正在运行": "削除失敗 — 中継が稼働しているか確認してください",
       "透传模式开启后，客户端请求自动发现的上游。可重命名，不可删除。": "Upstreams auto-discovered from passthrough requests. Renamable, not deletable.",
       "中继状态": "中継ステータス",
       "界面与偏好": "UI と設定",
@@ -7277,6 +7646,11 @@
       // v0.190：开发者模式子项 —— 支持图片的模型。
       "支持图片的模型": "画像対応モデル",
       "允许 OpenCode 向勾选的模型发图；中继 /models/api.json 会标成 image-capable。点击切换勾选，保存后立即生效。默认全不勾。": "OpenCode がチェックを入れたモデルに画像を送れるようにします。リレーの /models/api.json で image-capable としてマークされます。クリックでチェックを切り替え、保存で即時反映。デフォルトはすべて未チェック。",
+      // v0.202：各上游多模态。
+      "各上游多模态": "上游別マルチモーダル",
+      "设置各上游模型是否支持图片输入": "各上游のモデルが画像入力に対応するかを設定",
+      "按上游列出模型，勾选即标记为多模态（发图不剥离）。保存后立即生效。": "上游ごとにモデルを一覧表示し、チェックでマルチモーダル（画像送信が剥がされない）に。保存で即時反映。",
+      "图片": "画像",
       "存储空间管理": "ストレージ使用量",
       "存储位置管理": "ストレージ場所",
       "消息数据库 (relay.db)": "メッセージ DB (relay.db)",
@@ -7632,9 +8006,63 @@
       "（未配置上游模型）": "（未設定の上流モデル）",
       "释放": "解放",
       "调用": "呼び出し",
+      "引导教程": "ガイドツアー",
+      "重新播放首次启动时的界面引导": "初回起動時のインターフェースガイドを再生",
+      "开始引导": "ガイド開始",
+      "跳过": "スキップ",
+      "上一步": "前へ",
+      "下一步": "次へ",
+      "完成": "完了",
+      "章节": "章",
+      "第 1 章 · 主页面": "第 1 章 · ホーム",
+      "第 2 章 · 实时流": "第 2 章 · ライブストリーム",
+      "第 3 章 · 上游添加": "第 3 章 · 上流の追加",
+      "总 token 栏": "総 Token 欄",
+      "这里是全部模型的 token 总消耗：输入、输出、缓存分别统计，一眼看清用量。": "全モデルの Token 総消費量です。入力・出力・キャッシュを個別に集計し、使用量が一目で分かります。",
+      "上游统计卡片": "上流統計カード",
+      "可按token或按调用次数统计上游的消耗\n该上游被调用一次时，闪过红色动画\n5小时释放次数时，闪过绿色动画": "上流の消費を Token または呼び出し回数で統計できます。\nこの上流が 1 回呼び出されると赤いアニメーションが走ります。\n5 時間の解放回数時には緑のアニメーションが走ります。",
+      "实时流入口": "ライブストリーム入口",
+      "正在进行中的请求会显示在这里": "進行中のリクエストがここに表示されます",
+      "进行中的请求": "進行中のリクエスト",
+      "有正在进行的流会在此显示": "進行中のストリームがここに表示されます",
+      "实时流侧栏": "ライブストリームサイドバー",
+      "右侧独立窗口实时展示当前请求：api-key、入/出向 wire、token 用量与思考 / 正文流，方便调试。": "右側の独立ウィンドウが現在のリクエストをリアルタイム表示します：api-key、入/出 wire、トークン使用量、思考・本文ストリーム。デバッグに便利です。",
+      "正在流式输出…": "ストリーム出力中…",
+      "思考中": "思考中",
+      "端点与并发请求": "エンドポイントと並行リクエスト",
+      "上游与当前请求的并发列表，实时刷新。": "上流と進行中のリクエストの一覧をリアルタイム表示します。",
+      "api-key": "api-key",
+      "该上游的明文密钥，请求鉴权用。": "この上流の平文キーで、リクエスト認証に使用します。",
+      "思考流": "思考ストリーム",
+      "模型推理过程逐字流出，先于正文。": "モデルの推論過程が本文より先に逐次出力されます。",
+      "请求卡": "リクエストカード",
+      "每条请求的入/出向状态与结果。": "各リクエストの入/出ワイヤの状態と結果です。",
+      "新建上游": "上流の新規作成",
+      "进入上游页，点「新建上游」弹出创建表单。": "上流ページで「新規作成」をクリックすると作成フォームが開きます。",
+      "填写名称": "名前を入力",
+      "给上游起一个唯一名称，之后在切换上游时用这个名字识别。": "上流に一意の名前を付けます。以後、上流の切替時にこの名前で識別されます。",
+      "填写地址": "URL を入力",
+      "上游 API endpoint，指向你接入的模型服务地址。": "接続するモデルサービスを指す上流 API エンドポイントです。",
+      "填写 API Key": "API Key を入力",
+      "上游的鉴权密钥，明文保存在本地配置文件。": "上流の認証キーで、ローカル設定ファイルに平文で保存されます。",
+      "选择预设": "プリセットを選択",
+      "可选：选择预设后名称与允许模型自动填好，只需补 API Key。": "任意：プリセットを選ぶと名前と許可モデルが自動入力され、API Key を補うだけです。",
+      "提交创建": "作成を送信",
+      "点「创建」保存 —— 上游立即生效，无需重启。": "「作成」をクリックして保存 — 上流は即座に有効になり、再起動は不要です。",
+      "创建成功！": "作成成功！",
     },
     ko: {
       "透传上游（自动发现）": "패스스루 업스트림 (자동 발견)",
+      "历史上游": "과거 업스트림",
+      "所有在本机出现过、含已删除配置的上游": "이 기기에서 한 번이라도 사용된 전체 업스트림 (삭제된 설정 포함)",
+      "现存": "활성",
+      "已删除": "삭제됨",
+      "总 token": "총 token",
+      "最后使用": "마지막 사용",
+      "彻底删除": "영구 삭제",
+      "彻底删除上游": "업스트림 영구 삭제",
+      "彻底删除失败": "영구 삭제 실패",
+      "删除失败，请确认中继正在运行": "삭제 실패 — 중계 실행 여부를 확인하세요",
       "透传模式开启后，客户端请求自动发现的上游。可重命名，不可删除。": "Upstreams auto-discovered from passthrough requests. Renamable, not deletable.",
       "中继状态": "릴레이 상태",
       "界面与偏好": "UI 및 설정",
@@ -7704,6 +8132,11 @@
       // v0.190：开发者模式子项 —— 支持图片的模型。
       "支持图片的模型": "이미지 지원 모델",
       "允许 OpenCode 向勾选的模型发图；中继 /models/api.json 会标成 image-capable。点击切换勾选，保存后立即生效。默认全不勾。": "OpenCode 가 선택한 모델에 이미지를 보낼 수 있도록 허용합니다. 릴레이 /models/api.json 에서 image-capable 로 표시됩니다. 클릭으로 선택을 전환하고, 저장하면 즉시 적용됩니다. 기본값은 모두 미선택.",
+      // v0.202：各上游多模态。
+      "各上游多模态": "업스트림별 멀티모달",
+      "设置各上游模型是否支持图片输入": "각 업스트림 모델이 이미지 입력을 지원하는지 설정",
+      "按上游列出模型，勾选即标记为多模态（发图不剥离）。保存后立即生效。": "업스트림별로 모델을 나열하고, 체크하면 멀티모달(이미지가 제거되지 않음)로 표시됩니다. 저장 후 즉시 적용됩니다.",
+      "图片": "이미지",
       "存储空间管理": "저장소 사용량",
       "存储位置管理": "저장소 위치",
       "消息数据库 (relay.db)": "메시지 DB (relay.db)",
@@ -8059,6 +8492,76 @@
       "（未配置上游模型）": "(미구성된 업스트림 모델)",
       "释放": "해제",
       "调用": "호출",
+      "引导教程": "가이드 투어",
+      "重新播放首次启动时的界面引导": "최초 실행 시 인터페이스 가이드를 다시 재생",
+      "开始引导": "가이드 시작",
+      "跳过": "건너뛰기",
+      "上一步": "이전",
+      "下一步": "다음",
+      "完成": "완료",
+      "章节": "장",
+      "第 1 章 · 主页面": "제 1장 · 홈",
+      "第 2 章 · 实时流": "제 2장 · 라이브 스트림",
+      "第 3 章 · 上游添加": "제 3장 · 업스트림 추가",
+      "总 token 栏": "총 토큰",
+      "这里是全部模型的 token 总消耗：输入、输出、缓存分别统计，一眼看清用量。": "전체 모델의 총 토큰 소비량입니다. 입력·출력·캐시를 각각 집계하여 사용량을 한눈에 볼 수 있습니다.",
+      "上游统计卡片": "업스트림 통계 카드",
+      "可按token或按调用次数统计上游的消耗\n该上游被调用一次时，闪过红色动画\n5小时释放次数时，闪过绿色动画": "토큰 또는 호출 횟수로 업스트림 소비량을 집계할 수 있습니다.\n이 업스트림이 한 번 호출되면 빨간 애니메이션이 스쳐 지나갑니다.\n5시간 해제 횟수 시 녹색 애니메이션이 스쳐 지나갑니다.",
+      "实时流入口": "라이브 스트림 진입점",
+      "正在进行中的请求会显示在这里": "진행 중인 요청이 여기에 표시됩니다",
+      "进行中的请求": "진행 중인 요청",
+      "有正在进行的流会在此显示": "진행 중인 스트림이 여기에 표시됩니다",
+      "实时流侧栏": "라이브 스트림 사이드바",
+      "右侧独立窗口实时展示当前请求：api-key、入/出向 wire、token 用量与思考 / 正文流，方便调试。": "오른쪽 독립 창이 현재 요청을 실시간 표시합니다: api-key, 입/출력 wire, 토큰 사용량, 생각·본문 스트림. 디버깅에 유용합니다.",
+      "正在流式输出…": "스트리밍 중…",
+      "思考中": "생각하는 중",
+      "端点与并发请求": "엔드포인트 및 동시 요청",
+      "上游与当前请求的并发列表，实时刷新。": "업스트림과 진행 중인 요청 목록을 실시간으로 갱신합니다.",
+      "api-key": "api-key",
+      "该上游的明文密钥，请求鉴权用。": "이 업스트림의 평문 키로, 요청 인증에 사용됩니다.",
+      "思考流": "생각 스트림",
+      "模型推理过程逐字流出，先于正文。": "모델 추론 과정이 본문보다 먼저 한 글자씩 흘러나옵니다.",
+      "请求卡": "요청 카드",
+      "每条请求的入/出向状态与结果。": "각 요청의 입/출력 와이어 상태와 결과입니다.",
+      "新建上游": "업스트림 만들기",
+      "进入上游页，点「新建上游」弹出创建表单。": "업스트림 페이지에서 \"새로 만들기\"를 클릭하면 생성 양식이 열립니다.",
+      "填写名称": "이름 입력",
+      "给上游起一个唯一名称，之后在切换上游时用这个名字识别。": "업스트림에 고유한 이름을 지정합니다. 이후 업스트림 전환 시 이 이름으로 식별됩니다.",
+      "填写地址": "URL 입력",
+      "上游 API endpoint，指向你接入的模型服务地址。": "연결할 모델 서비스를 가리키는 업스트림 API 엔드포인트입니다.",
+      "填写 API Key": "API Key 입력",
+      "上游的鉴权密钥，明文保存在本地配置文件。": "업스트림 인증 키로, 로컬 설정 파일에 평문으로 저장됩니다.",
+      "选择预设": "프리셋 선택",
+      "可选：选择预设后名称与允许模型自动填好，只需补 API Key。": "선택 사항: 프리셋을 고르면 이름과 허용 모델이 자동으로 채워지고 API Key만 추가하면 됩니다.",
+      "提交创建": "생성 제출",
+      "点「创建」保存 —— 上游立即生效，无需重启。": "\"만들기\"를 클릭하여 저장 — 업스트림이 즉시 적용되고 재시작이 필요 없습니다.",
+      "创建成功！": "생성 성공!",
+      "启动 / 停止中继": "릴레이 시작 / 중지",
+      "这是中继的总开关：启动后客户端即可连接 127.0.0.1:8088；再次点击则停止中继。": "릴레이의 메인 스위치입니다. 시작하면 클라이언트가 127.0.0.1:8088에 연결할 수 있고, 다시 클릭하면 중지됩니다.",
+      "切换主题": "테마 전환",
+      "在浅色 / 暖白 / 深色之间切换配色，偏好会自动保存。": "라이트 / 웜 / 다크 색상을 전환하며, 설정은 자동 저장됩니다.",
+      "运行状态": "실행 상태",
+      "这里显示中继当前状态：运行中、已停止、端口被占用等。": "릴레이의 현재 상태(실행 중, 중지됨, 포트 점유 등)를 표시합니다.",
+      "上游管理": "업스트림 관리",
+      "进入上游页，集中管理所有接入的 API 上游。": "업스트림 페이지에서 연결된 모든 API 업스트림을 한곳에서 관리합니다.",
+      "设置页": "설정 페이지",
+      "主题、自启、存储位置、报错分析等所有偏好都集中在这里。": "테마, 자동 시작, 저장 위치, 오류 분석 등 모든 설정이 여기 모여 있습니다.",
+      "用量统计": "사용량 통계",
+      "进入统计页，查看按上游、按模型的 token 消耗与请求趋势。": "통계 페이지에서 업스트림·모델별 토큰 소비와 요청 추이를 확인합니다.",
+      "回到总览": "개요로 돌아가기",
+      "总览聚合今日用量、上游状态与最近活动，是最常用的一页。": "개요는 오늘의 사용량, 업스트림 상태, 최근 활동을 모아 보여주는 가장 자주 쓰는 페이지입니다.",
+      "模型排行": "모델 순위",
+      "用量最大的模型在这里高亮展示，一眼看到主要消耗来源。": "가장 많이 사용한 모델을 강조 표시하여 주요 소비원을 한눈에 볼 수 있습니다.",
+      "每时请求": "시간별 요청",
+      "近 24h 请求数按小时分布，方便看出峰值时段。": "최근 24시간 요청 수를 시간별로 분포시켜 피크 시간대를 파악하기 쉽습니다.",
+      "平台占比": "플랫폼 비율",
+      "各平台（Claude Code / OpenCode 等）的用量占比一目了然。": "각 플랫폼(Claude Code / OpenCode 등)의 사용량 비율을 한눈에 볼 수 있습니다.",
+      "最近请求": "최근 요청",
+      "最新的调用记录，点击可查看完整请求与回复。": "최신 호출 기록입니다. 클릭하면 전체 요청과 응답을 볼 수 있습니다.",
+      "点击打开右侧实时流窗口，查看 api-key、入/出向 wire、token 用量与思考/正文流。": "클릭하면 오른쪽 라이브 스트림 창이 열려 api-key, 입/출력 wire, 토큰 사용량, 생각·본문 스트림을 확인할 수 있습니다.",
+      "点击新建一个上游，填入平台、Endpoint 与 API Key 即可接入。": "클릭하여 업스트림을 새로 만들고 플랫폼, Endpoint, API Key를 입력하면 연결됩니다.",
+      "选择中继的运行口径：转发 / 透传 / 混合，按使用场景配置。": "릴레이 실행 모드(전달 / 패스스루 / 혼합)를 선택하고 사용 사례에 맞게 설정합니다.",
+      "总览卡片可在这里增删与排序，按你的习惯自定义。": "개요 카드를 여기서 추가·삭제·정렬하여 자신의 습관에 맞게 커스터마이즈할 수 있습니다.",
     },
   };
   function _i18nKey(s) { return (s || "").replace(/\s+/g, " ").trim(); }
@@ -8990,11 +9493,33 @@
           </div>
         </div>
 
+        <!-- v0.202：各上游多模态模型 —— 逐上游列出模型 +「支持图片输入」勾选
+             框，保存写回每条上游内部的 cfg.vision_models（与新建上游表单的勾选
+             同一套），不必回「编辑上游」表单就能改已建模型的多模态。渲染函数
+             renderSettingsUpstreamVision()。 -->
+        <div class="settings-group">
+          <div class="settings-group-label" data-i18n="各上游多模态">各上游多模态</div>
+          <div class="settings-item">
+            <div class="settings-item-info">
+              <div class="settings-item-title" data-i18n="设置各上游模型是否支持图片输入">设置各上游模型是否支持图片输入</div>
+              <div class="settings-item-hint" data-i18n="按上游列出模型，勾选即标记为多模态（发图不剥离）。保存后立即生效。">按上游列出模型，勾选即标记为多模态（发图不剥离）。保存后立即生效。</div>
+            </div>
+            <div class="settings-item-control settings-upstream-vision-list" id="prefs-upstream-vision">
+              <div class="card-empty">加载中…</div>
+            </div>
+            <div class="settings-item-control settings-storage-actions">
+              <button type="button" class="btn btn-ghost" id="prefs-upstream-vision-save" data-i18n="保存">保存</button>
+            </div>
+          </div>
+        </div>
+
       </div>
     `;
     // v0.190：开发者模式子项 —— 在 prefs body 整体渲染完成后异步填充
     // vision chip 列表。容器已在开发者模式组里（HTML 模板），此处不重写。
     renderSettingsVision(body, snap);
+    // v0.202：各上游多模态 —— 异步填充 per-upstream 勾选列表。
+    renderSettingsUpstreamVision(body);
     // 更新日志：异步拉取 docs/CHANGELOG.txt 全文填入 #prefs-changelog-box。
     renderSettingsChangelog(body);
     wireSettingsPrefs(body, snap);
@@ -9956,6 +10481,7 @@
           <div class="storage-card-path" data-storage-loc="db">—</div>
           <div class="storage-card-stats" data-storage-detail="db">加载中…</div>
           <div class="storage-card-actions">
+            <button type="button" class="btn btn-ghost btn-sm" data-storage-op="cleanup-origin" data-target="relay">清理原文</button>
             <button type="button" class="btn btn-ghost btn-sm" data-storage-op="cleanup" data-target="relay">清理消息记录</button>
             <button type="button" class="btn btn-ghost btn-sm" data-storage-op="vacuum" data-target="relay">压缩</button>
             <button type="button" class="btn btn-ghost btn-sm" data-move="relay">修改位置</button>
@@ -10060,6 +10586,410 @@
     });
   }
 
+  // =====================================================================
+  // v0.NNN：设置页「清理原文」—— 两级弹窗。
+  //   一级：按时间筛选（月份滚轮 + 日历网格）/ 按上游筛选 双 tab。
+  //   二级：某天或某上游的消息列表（时间/模型/内容截断/上游/状态），
+  //         「全部清除」删该天/该上游全部消息；右键删单条；点行看完整。
+  // =====================================================================
+  const ORIGIN_10MB = 10 * 1024 * 1024;
+  const ORIGIN_30MB = 30 * 1024 * 1024;
+
+  function _originLocalMidnight(y, m, d) {
+    const start = new Date(y, m - 1, d).getTime() / 1000;
+    return { start, end: start + 86400 };
+  }
+
+  function _fmtOriginBytes(b) {
+    b = Number(b || 0);
+    if (b <= 0) return "0 B";
+    if (b < 1024) return b + " B";
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+    if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + " MB";
+    return (b / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  }
+
+  async function openCleanupOriginDialog() {
+    // 复用 _dialogSeq / _closeDialog（与 dialogModal 同设施）。
+    const prev = document.querySelector(".modal-overlay[data-dynamic-dialog]");
+    if (prev) _closeDialog(prev);
+    const seq = ++_dialogSeq;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.setAttribute("data-dynamic-dialog", String(seq));
+    overlay.hidden = false;
+    overlay.innerHTML = `
+      <div class="modal-card modal-card-dialog origin-dialog" role="dialog" aria-modal="true">
+        <button class="modal-close" aria-label="关闭" type="button">×</button>
+        <div class="modal-header"><div class="modal-title">清理数据库缓存的消息原文</div></div>
+        <div class="modal-body dialog-body origin-dlg-body">
+          <div class="origin-tabs">
+            <button type="button" class="btn btn-sm origin-tab active" data-origin-mode="time">按时间筛选</button>
+            <button type="button" class="btn btn-sm origin-tab" data-origin-mode="upstream">按上游筛选</button>
+          </div>
+          <div class="origin-pane" data-origin-pane="time">
+            <div class="gh" data-origin-gh>
+              <div class="gh-months" data-gh-months></div>
+              <div class="gh-body">
+                <div class="gh-wd-col" data-gh-wd></div>
+                <div class="gh-cells" data-gh-cells></div>
+              </div>
+            </div>
+            <div class="gh-legend">
+              <span>少</span>
+              <i class="gh-swatch gh-l0"></i>
+              <i class="gh-swatch gh-l1"></i>
+              <i class="gh-swatch gh-l2"></i>
+              <i class="gh-swatch gh-l3"></i>
+              <i class="gh-swatch gh-l4"></i>
+              <span>多</span>
+            </div>
+          </div>
+          <div class="origin-pane" data-origin-pane="upstream" hidden>
+            <div class="origin-up-list" data-origin-up-list><div class="card-empty">加载上游…</div></div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    document.body.classList.add("modal-open");
+
+    const state = { mode: "time" };
+    const ghEl = overlay.querySelector("[data-origin-gh]");
+    const monthsEl = overlay.querySelector("[data-gh-months]");
+    const wdEl = overlay.querySelector("[data-gh-wd]");
+    const cellsEl = overlay.querySelector("[data-gh-cells]");
+    const upListEl = overlay.querySelector("[data-origin-up-list]");
+
+    const close = () => _closeDialog(overlay);
+    const card = overlay.querySelector(".modal-card");
+    if (card) card.addEventListener("click", (e) => e.stopPropagation());
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    // Esc 只在「本层是当前最上层可见弹窗」时生效（二级弹窗叠在上面时，
+    // 一级的 Esc 处理器也要让位，避免一次按 Esc 连关两层）。
+    const isTopOverlay = () => {
+      const vis = Array.from(document.querySelectorAll(".modal-overlay[data-dynamic-dialog]")).filter(o => !o.hidden);
+      return vis.length ? vis[vis.length - 1] === overlay : false;
+    };
+    const escHandler = (ev) => { if (ev.key === "Escape" && !overlay.hidden && isTopOverlay()) close(); };
+    document.addEventListener("keydown", escHandler);
+    overlay._escHandler = escHandler;
+
+    // tab 切换
+    overlay.querySelectorAll("[data-origin-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.mode = btn.dataset.originMode;
+        overlay.querySelectorAll(".origin-tab").forEach(b => b.classList.toggle("active", b === btn));
+        overlay.querySelector('[data-origin-pane="time"]').hidden = state.mode !== "time";
+        overlay.querySelector('[data-origin-pane="upstream"]').hidden = state.mode !== "upstream";
+        if (state.mode === "upstream") loadUpstreams();
+      });
+    });
+
+    // 年度热力图格子点击 → 二级弹窗（当日消息列表）。
+    cellsEl.addEventListener("click", (e) => {
+      const cell = e.target.closest("[data-origin-date]");
+      if (!cell) return;
+      const date = cell.dataset.originDate; // YYYY-MM-DD
+      const [y, m, d] = date.split("-").map(Number);
+      openOriginMsgList({ kind: "day", y, m, d });
+    });
+
+    // 上游列表点击 → 二级弹窗
+    upListEl.addEventListener("click", (e) => {
+      const item = e.target.closest("[data-origin-up]");
+      if (!item) return;
+      openOriginMsgList({ kind: "upstream", name: item.dataset.originUp });
+    });
+
+    async function loadUpstreams() {
+      upListEl.innerHTML = '<div class="card-empty">加载上游…</div>';
+      // 后端首算约 5s，超时拉长到 10s；失败与「真没数据」分开显示。
+      const res = await api._call("get_message_upstreams", [], null, 10000);
+      if (!res || res.error) { upListEl.innerHTML = `<div class="card-empty">加载失败：${escape((res && res.error) || "桥不可用")}</div>`; return; }
+      const items = (res && res.items) || [];
+      if (!items.length) { upListEl.innerHTML = '<div class="card-empty">没有已缓存原文的上游</div>'; return; }
+      upListEl.innerHTML = items.map((u) => `
+        <div class="origin-up-item" data-origin-up="${attr(u.upstream)}">
+          <span class="origin-up-name" data-i18n-keep>${escape(u.upstream)}</span>
+          <span class="origin-up-meta">${fmtNum(u.count)} 条 · ${_fmtOriginBytes(u.bytes)}</span>
+        </div>`).join("");
+    }
+
+    // GitHub 风格最近一年热力图：7 行（周日→周六）× 约 53 列（每周一列），
+    // 每格代表一天，颜色深度按当日消息体量分档。无日期数字。
+    const _GH_LEVELS = 4;
+
+    function _ghLevel(stat) {
+      if (!stat || !stat.count) return 0;
+      const b = stat.bytes || 0;
+      if (b > ORIGIN_30MB) return 4;
+      if (b > ORIGIN_10MB) return 3;
+      if (b > 100 * 1024) return 2;
+      return 1;
+    }
+
+    function _pad(n) { return String(n).padStart(2, "0"); }
+    function _dateKey(d) { return `${d.getFullYear()}-${_pad(d.getMonth() + 1)}-${_pad(d.getDate())}`; }
+
+    async function loadYear() {
+      monthsEl.innerHTML = "";
+      wdEl.innerHTML = "";
+      cellsEl.innerHTML = '<div class="card-empty">加载年度图谱…</div>';
+      const res = await api.getMessageYear(365);
+      if (res && res.error) { cellsEl.innerHTML = `<div class="card-empty">加载失败：${escape(res.error)}</div>`; return; }
+      const stats = res || {};
+      // 今天（本地 0 点）起往前 364 天 = 共 365 天。
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const start = new Date(today); start.setDate(start.getDate() - 364);
+      // 对齐到 start 所在周的周日（GitHub 图每列=一周，周日在最上行）。
+      const firstSunday = new Date(start); firstSunday.setDate(firstSunday.getDate() - firstSunday.getDay());
+      const totalDays = Math.round((today - firstSunday) / 86400000) + 1;
+      const weeks = Math.ceil(totalDays / 7);
+      const MONTHS = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
+      // 顶部月份标签：每列取该列首日月份，跨月才显示（GitHub 同款）。
+      const monthCells = [];
+      let lastMonth = -1;
+      for (let w = 0; w < weeks; w++) {
+        const d = new Date(firstSunday); d.setDate(firstSunday.getDate() + w * 7);
+        const mo = d.getMonth();
+        monthCells.push(mo !== lastMonth ? MONTHS[mo] : "");
+        lastMonth = mo;
+      }
+      monthsEl.innerHTML = monthCells.map(m => `<span class="gh-month">${m}</span>`).join("");
+      wdEl.innerHTML = `<span class="gh-wd">日</span><span class="gh-wd">一</span><span class="gh-wd">二</span><span class="gh-wd">三</span><span class="gh-wd">四</span><span class="gh-wd">五</span><span class="gh-wd">六</span>`;
+      // 逐天填格（一周一列）。
+      let cells = "";
+      for (let w = 0; w < weeks; w++) {
+        for (let dow = 0; dow < 7; dow++) {
+          const d = new Date(firstSunday); d.setDate(firstSunday.getDate() + w * 7 + dow);
+          const key = _dateKey(d);
+          if (d < start || d > today) {
+            cells += `<span class="gh-cell gh-l0"></span>`;
+            continue;
+          }
+          const st = stats[key] || null;
+          const lvl = _ghLevel(st);
+          const tip = `${key}${st && st.count ? `\n${st.count} 条 · ${_fmtOriginBytes(st.bytes)}` : "\n无消息"}`;
+          cells += `<span class="gh-cell gh-l${lvl}" data-origin-date="${key}" title="${tip}"></span>`;
+        }
+      }
+      cellsEl.innerHTML = cells;
+      cellsEl.style.setProperty("--gh-weeks", weeks);
+    }
+
+    await loadYear();
+  }
+
+  // 二级弹窗：某天或某上游的消息列表。叠放在一级之上（不关一级），
+  // 「返回」只关本层，露出下面的日历 / 上游列表。
+  async function openOriginMsgList(opts) {
+    const isDay = opts.kind === "day";
+    const title = isDay
+      ? `${opts.y}-${String(opts.m).padStart(2, "0")}-${String(opts.d).padStart(2, "0")} 的消息`
+      : `上游「${opts.name}」的消息`;
+
+    const seq = ++_dialogSeq;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.setAttribute("data-dynamic-dialog", String(seq));
+    overlay.hidden = false;
+    overlay.innerHTML = `
+      <div class="modal-card modal-card-dialog origin-msg-dialog" role="dialog" aria-modal="true">
+        <button class="modal-close" aria-label="关闭" type="button">×</button>
+        <div class="modal-header">
+          <div class="modal-title">${escape(title)}</div>
+          <span class="origin-msg-head-btns">
+            <button type="button" class="btn btn-ghost btn-sm" data-origin-back>返回</button>
+            <button type="button" class="btn btn-danger btn-sm" data-origin-clear-all>全部清除</button>
+          </span>
+        </div>
+        <div class="modal-body dialog-body origin-msg-body">
+          <div class="origin-msg-head">
+            <span>时间</span><span>模型</span><span>消息内容</span><span>上游</span><span>状态</span>
+          </div>
+          <div class="origin-msg-list" data-origin-msg-list><div class="card-empty">加载中…</div></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    document.body.classList.add("modal-open");
+
+    const listEl = overlay.querySelector("[data-origin-msg-list]");
+
+    // 右键上下文菜单（点外部 / 滚动 / Esc 关闭；弹窗关闭时移除）。
+    const ctx = document.createElement("div");
+    ctx.className = "origin-ctx";
+    ctx.hidden = true;
+    ctx.innerHTML = '<button type="button" class="origin-ctx-item" data-origin-ctx-del>删除这个条目</button>';
+    document.body.appendChild(ctx);
+    const ctxHide = () => { ctx.hidden = true; };
+    const ctxDocClick = () => ctxHide();
+    const ctxDocScroll = () => ctxHide();
+
+    // 只关本层；若下面还有一级弹窗，保持 modal-open（锁滚动）。
+    const close = () => {
+      ctx.remove();
+      document.removeEventListener("click", ctxDocClick, true);
+      document.removeEventListener("scroll", ctxDocScroll, true);
+      _closeDialog(overlay);
+      const still = Array.from(document.querySelectorAll(".modal-overlay[data-dynamic-dialog]")).some(o => !o.hidden);
+      if (still) document.body.classList.add("modal-open");
+    };
+    // Esc 只在「本层是当前最上层可见弹窗」时生效，避免关掉底下一级。
+    const isTopOverlay = () => {
+      const vis = Array.from(document.querySelectorAll(".modal-overlay[data-dynamic-dialog]")).filter(o => !o.hidden);
+      return vis.length ? vis[vis.length - 1] === overlay : false;
+    };
+    const card = overlay.querySelector(".modal-card");
+    if (card) card.addEventListener("click", (e) => e.stopPropagation());
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    overlay.querySelector("[data-origin-back]").addEventListener("click", close);
+    const escHandler = (ev) => { if (ev.key === "Escape" && !overlay.hidden && isTopOverlay()) close(); };
+    document.addEventListener("keydown", escHandler);
+    overlay._escHandler = escHandler;
+
+    async function fetchItems() {
+      const res = isDay
+        ? await api.getDayMessages(opts.y, opts.m, opts.d)
+        : await api.getUpstreamMessages(opts.name);
+      return res;
+    }
+
+    async function render() {
+      const res = await fetchItems();
+      const items = (res && res.items) || [];
+      if (!items.length) {
+        listEl.innerHTML = '<div class="card-empty">该范围内没有已缓存的消息原文</div>';
+        return;
+      }
+      listEl.innerHTML = items.map((m) => {
+        const status = m.status_code || (m.error ? "ERR" : "—");
+        const errCls = m.error ? "origin-msg-err" : "";
+        return `<div class="origin-msg-row" data-origin-msg-id="${m.id}" data-origin-req="${m.request_id || ""}">
+          <span class="origin-msg-time">${fmtTime(m.ts)}</span>
+          <span class="origin-msg-model" data-i18n-keep>${escape(m.model || "—")}</span>
+          <span class="origin-msg-content" data-i18n-keep>${escape((m.snippet || "").replace(/\n/g, " "))}</span>
+          <span class="origin-msg-up" data-i18n-keep>${escape(m.upstream || "—")}</span>
+          <span class="${errCls}">${escape(String(status))}</span>
+        </div>`;
+      }).join("");
+    }
+
+    // 全部清除 → 删该天 / 该上游全部消息。
+    overlay.querySelector("[data-origin-clear-all]").addEventListener("click", async () => {
+      const what = isDay ? `${opts.y}-${String(opts.m).padStart(2, "0")}-${String(opts.d).padStart(2, "0")} 的全部消息` : `上游「${opts.name}」的全部消息`;
+      const ok = await confirmModal("全部清除", `确定删除${what}吗？\n这会清空该范围内的消息原文（请求统计保留）。此操作不可恢复。`, { okText: "全部清除", cancelText: "取消", danger: true, keepStack: true });
+      if (!ok) return;
+      const res = isDay
+        ? await api.deleteMessagesRange(...(() => { const r = _originLocalMidnight(opts.y, opts.m, opts.d); return [r.start, r.end]; })())
+        : await api.deleteUpstreamMessages(opts.name);
+      if (res && res.ok) {
+        await alertModal("清除完成", `已删除 ${res.deleted || 0} 条消息原文`, { keepStack: true });
+        await render();
+      } else {
+        await alertModal("清除失败", (res && res.error) || "中继未运行", { keepStack: true });
+      }
+    });
+
+    // 右键 → 上下文菜单：删除单条。
+    listEl.addEventListener("contextmenu", (e) => {
+      const row = e.target.closest("[data-origin-msg-id]");
+      if (!row) return;
+      e.preventDefault();
+      e.stopPropagation();
+      ctx._msgId = row.dataset.originMsgId;
+      ctx.hidden = false;
+      ctx.style.left = Math.min(e.clientX, window.innerWidth - 150) + "px";
+      ctx.style.top = Math.min(e.clientY, window.innerHeight - 40) + "px";
+    });
+    document.addEventListener("click", ctxDocClick, true);
+    document.addEventListener("scroll", ctxDocScroll, true);
+
+    ctx.querySelector("[data-origin-ctx-del]").addEventListener("click", async () => {
+      const id = ctx._msgId;
+      ctx.hidden = true;
+      if (!id) return;
+      const ok = await confirmModal("删除这个条目", "确定删除这条消息原文吗？此操作不可恢复。", { okText: "删除", cancelText: "取消", danger: true, keepStack: true });
+      if (!ok) return;
+      const res = await api.deleteMessage(id);
+      if (res && res.ok) {
+        await render();
+      } else {
+        await alertModal("删除失败", (res && res.error) || "中继未运行", { keepStack: true });
+      }
+    });
+
+    // 点行 → 查看完整消息。
+    listEl.addEventListener("click", async (e) => {
+      const row = e.target.closest("[data-origin-msg-id]");
+      if (!row) return;
+      const rid = row.dataset.originReq;
+      // 有 request_id → 拉完整对话（含 thinking）叠层展示；否则回退单条。
+      if (rid) { await openOriginConversation(parseInt(rid, 10)); return; }
+      const res = await api.getMessageFull(row.dataset.originMsgId);
+      if (!res || res.error) { await alertModal("查看失败", (res && res.error) || "消息不存在", { keepStack: true }); return; }
+      await alertModal(
+        `完整消息 · ${res.model || "—"} · ${res.upstream || "—"}`,
+        (res.content || res.content_json || "（无内容）"),
+        { keepStack: true }
+      );
+    });
+
+    await render();
+  }
+
+  // 叠层「完整对话」弹窗：拉取请求的全部消息（user/assistant/thinking），
+  // 复用 renderModalContent（它已按 role 渲染 thinking 行）。叠在当前弹窗
+  // 之上，关闭只关本层。
+  async function openOriginConversation(requestId) {
+    const seq = ++_dialogSeq;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.setAttribute("data-dynamic-dialog", String(seq));
+    overlay.hidden = false;
+    overlay.innerHTML = `
+      <div class="modal-card modal-card-dialog origin-msg-dialog" role="dialog" aria-modal="true">
+        <button class="modal-close" aria-label="关闭" type="button">×</button>
+        <div class="modal-header" data-origin-conv-header></div>
+        <div class="modal-body dialog-body" data-origin-conv-body></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    document.body.classList.add("modal-open");
+
+    const headerEl = overlay.querySelector("[data-origin-conv-header]");
+    const bodyEl = overlay.querySelector("[data-origin-conv-body]");
+    headerEl.innerHTML = `<div class="modal-title">完整对话 <span class="modal-id">#${requestId}</span></div><div class="modal-loading">加载中…</div>`;
+
+    const isTopOverlay = () => {
+      const vis = Array.from(document.querySelectorAll(".modal-overlay[data-dynamic-dialog]")).filter(o => !o.hidden);
+      return vis.length ? vis[vis.length - 1] === overlay : false;
+    };
+    const close = () => {
+      _closeDialog(overlay);
+      const still = Array.from(document.querySelectorAll(".modal-overlay[data-dynamic-dialog]")).some(o => !o.hidden);
+      if (still) document.body.classList.add("modal-open");
+    };
+    const card = overlay.querySelector(".modal-card");
+    if (card) card.addEventListener("click", (e) => e.stopPropagation());
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    const escHandler = (ev) => { if (ev.key === "Escape" && !overlay.hidden && isTopOverlay()) close(); };
+    document.addEventListener("keydown", escHandler);
+    overlay._escHandler = escHandler;
+
+    try {
+      const data = await api.fetchConversation(requestId);
+      if (!data || data.error === "not_found") {
+        headerEl.innerHTML = `<div class="modal-title">完整对话 <span class="modal-id">#${requestId}</span></div><div class="modal-error">未找到该请求（可能已被清理）</div>`;
+        return;
+      }
+      renderModalContent(headerEl, bodyEl, data);
+    } catch (e) {
+      headerEl.innerHTML = `<div class="modal-title">完整对话 <span class="modal-id">#${requestId}</span></div><div class="modal-error">加载失败: ${escape(String(e && e.message || e))}</div>`;
+    }
+  }
+
   async function onStorageOp(e) {
     const body = document.getElementById("card-settings-storage-body");
     const op = e.currentTarget.dataset.storageOp;
@@ -10068,6 +10998,12 @@
       ? "透传数据库 (passthrough.db)"
       : target === "relay" ? "消息数据库 (relay.db)" : "";
     if (op === "refresh") { await refreshStorageInfo(body); return; }
+    if (op === "cleanup-origin") {
+      // v0.NNN：清理原文 —— 二级弹窗（时间/上游筛选 → 当日消息列表）。
+      await openCleanupOriginDialog();
+      await refreshStorageInfo(body);
+      return;
+    }
     if (op === "cleanup") {
       const days = await pickCleanupDays(targetName);
       if (days == null) return;
@@ -10329,6 +11265,111 @@
       await alertModal("已保存", "支持图片的模型名单已保存并生效。");
     } else {
       await alertModal("保存失败", (res && res.error) || "bridge 不可达");
+    }
+  }
+
+  // v0.202：各上游多模态 —— 逐上游列出模型 +「支持图片输入」勾选框，保存
+  // 按上游写回该上游内部 cfg.vision_models（不必回「编辑上游」表单）。
+  // 容器 = 设置页独立 settings-group 里的 #prefs-upstream-vision，异步
+  // getVisionModels 取 by_upstream 渲染；点击用节点标记防重复，保存按钮走
+  // 稳定的 prefs body 事件委托（与 renderSettingsVision 同款防死钮做法）。
+  async function renderSettingsUpstreamVision(prefsBody) {
+    if (!prefsBody) return;
+    const box = prefsBody.querySelector("#prefs-upstream-vision");
+    if (!box) return;
+    const data = await api.getVisionModels();
+    if (!data || !data.by_upstream) {
+      box.innerHTML = '<div class="card-empty">（无法读取上游模型清单）</div>';
+      return;
+    }
+    const byUp = data.by_upstream;
+    const names = Object.keys(byUp).sort();
+    if (!names.length) {
+      box.innerHTML = '<div class="card-empty">（未配置上游）</div>';
+      return;
+    }
+    // 每个上游一个子区：标题 = 上游名，下方每个模型一行「支持图片输入」勾选框。
+    const html = names.map(name => {
+      const up = byUp[name];
+      const rows = Object.keys(up.models).sort().map(m => {
+        const checked = up.models[m] ? " checked" : "";
+        return `
+          <label class="cfg-upstream-vision-row" data-upstream="${attr(name)}" data-model="${attr(m)}">
+            <span class="cfg-upstream-vision-name" title="${escape(m)}">${escape(m)}</span>
+            <input type="checkbox" class="cfg-upstream-vision-cb"${checked} />
+            <span class="cfg-upstream-vision-flag" data-i18n="图片">图片</span>
+          </label>`;
+      }).join("");
+      return `
+        <div class="cfg-upstream-vision-group">
+          <div class="cfg-upstream-vision-header">${escape(name)}<span class="cfg-upstream-vision-platform">（${escape(up.platform || "")}）</span></div>
+          <div class="cfg-upstream-vision-rows">
+            ${rows || '<div class="card-empty">（该上游未声明模型）</div>'}
+          </div>
+        </div>`;
+    }).join("");
+    box.innerHTML = html;
+    // 阻止点击 label 冒泡导致 toggle 双触发 —— 直接让 checkbox 自身响应。
+    if (!box._upVisionBoxed) {
+      box.addEventListener("click", (e) => {
+        const cb = e.target.closest(".cfg-upstream-vision-cb");
+        if (!cb) return;
+        // 不做多余处理：checkbox 原生 toggle 已够；仅确保点击行文字也点中它。
+        e.stopPropagation();
+      });
+      box._upVisionBoxed = true;
+    }
+    // 保存按钮 —— 委托到稳定的 prefs body（同 #prefs-vision-save 防死钮做法）。
+    if (!prefsBody._upVisionDelegated) {
+      prefsBody.addEventListener("click", (e) => {
+        if (e.target.closest("#prefs-upstream-vision-save")) onSaveUpstreamVision();
+      });
+      prefsBody._upVisionDelegated = true;
+    }
+    applyLang();
+  }
+
+  async function onSaveUpstreamVision() {
+    const box = document.getElementById("prefs-upstream-vision");
+    if (!box) return;
+    // 按上游收集勾选的模型名（遍历所有行，勾选才收录；未勾选的上游也收录
+    // 空数组 —— 保存会清掉其 vision_models，让"全部取消勾选"能生效）。
+    const selectedByUpstream = {};
+    const presentUpstreams = {};
+    box.querySelectorAll(".cfg-upstream-vision-row").forEach(row => {
+      const cb = row.querySelector(".cfg-upstream-vision-cb");
+      const up = row.getAttribute("data-upstream");
+      const m = row.getAttribute("data-model");
+      if (!cb || !up || !m) return;
+      presentUpstreams[up] = true;
+      if (!cb.checked) return;
+      (selectedByUpstream[up] = selectedByUpstream[up] || []).push(m);
+    });
+    // 用 getVisionModels 的 by_upstream 取平台，再逐上游调 updateUpstreamQuota。
+    const data = await api.getVisionModels();
+    if (!data || !data.by_upstream) {
+      await alertModal("保存失败", "无法读取上游平台信息");
+      return;
+    }
+    let fail = 0;
+    const allUpstreams = new Set([
+      ...Object.keys(selectedByUpstream),
+      ...Object.keys(presentUpstreams),
+    ]);
+    for (const up of allUpstreams) {
+      const plat = data.by_upstream[up] && data.by_upstream[up].platform;
+      if (!plat) { fail++; continue; }
+      const res = await api.updateUpstreamQuota(plat, up, {
+        vision_models: selectedByUpstream[up] || [],
+      });
+      if (!(res && res.ok)) {
+        fail++;
+        await alertModal("保存失败", `${up}: ${(res && res.error) || "bridge 不可达"}`);
+      }
+    }
+    if (fail === 0) {
+      lastConfigSig = null;  // 设置页卡片/上游卡下次 re-render 用落盘真值。
+      await alertModal("已保存", "各上游多模态已保存并生效。");
     }
   }
 
@@ -11713,6 +12754,13 @@
   // 又触发一次 tick 把按钮的 :active 高亮抹掉）。
   let pollPaused = false;
   let pollResumeTimer = null;
+  // 教程播放期间轮询全程暂停（演示把模拟预设数据写进真实容器，轮询恢复
+  // 会把真实数据盖回）。真实 GUI 里用户点「下一步/上一步」是真实鼠标：
+  // pointerdown → pausePolling，抬手 pointerup → scheduleResumePolling
+  // （250ms 后放开轮询）→ 下一 tick 把真实数据写回卡片，覆盖演示 ——
+  // 就是「步骤2 上游统计还是真实数据」的根因。教程期间 resume 一律不
+  // 生效，直到 _tourFinish 显式置 tourActive=false 才恢复。
+  let tourActive = false;
   function pausePolling() {
     if (pollResumeTimer) { clearTimeout(pollResumeTimer); pollResumeTimer = null; }
     pollPaused = true;
@@ -11720,10 +12768,15 @@
   function scheduleResumePolling() {
     if (pollResumeTimer) clearTimeout(pollResumeTimer);
     pollResumeTimer = setTimeout(() => {
-      pollPaused = false;
       pollResumeTimer = null;
+      // 教程期间保持暂停（见 tourActive 注释）；结束/跳过由 _tourFinish
+      // 先把 tourActive 置 false，再让这里的定时器放行（或直接显式恢复）。
+      if (tourActive) return;
+      pollPaused = false;
     }, 250);
   }
+  // 无头探针只读钩子：断言教程期间轮询确实全程暂停（结束恢复）。
+  window.__tourPollPaused = () => pollPaused;
 
   // v0.12：分发告警（混合态 / 未知 key）—— 后端每次快照带增量告警，
   // 这里渲染成右上角可关闭卡片。配置类错误不自动消失（用户要改配置），
@@ -11921,6 +12974,1070 @@
   // Button wiring
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // v0.122：引导教程 —— 三区块动画演示 + 聚焦（重写 v0.121 spotlight）。
+  //
+  // 三区块：主页面(2步) → 实时流(3步) → 上游添加(6步)。每步一个 anchor
+  // （跨视图步骤带 view 字段调 setView() 切页）+ 可选的 demo 函数跑动作
+  // 动画（数字滚动 / 扫光 / 假 live 行 / 迷你侧栏 / 表单聚焦 / 提交成功）。
+  // 顶部章节条 #tour-chapters 可跳任意章节；localStorage relay-gui-tour-v1
+  // 记录完成态；设置页「开始引导」重放。克制动效：呼吸高亮 + 演示动画。
+  // 实时流侧栏是独立窗口 → 经 api.tourPanelHighlight bridge 注入；无侧栏
+  // 时主窗 #tour-demo 跑纯动画模拟。文案走 t()（I18N 五语言）。
+  // -------------------------------------------------------------------------
+  const TOUR_KEY = "relay-gui-tour-v1";
+
+  // 各步 demo 渲染函数：往 #tour-demo 塞演示动画内容，返回后由
+  // _tourRender 定位气泡（demo 会改变气泡高度）。
+  function _tourDemoRoll() {   // 章节1 步骤1：数字滚动（在实际数字位置跑）
+    // 直接把真实 #tms-total 当演示对象：数字从 0 滚动到 1,284,632，
+    // 三段条同步生长到 58/32/10 —— 模拟「数字在真实位置跳动」的效果，
+    // 不用气泡里再造一个假数字。整条 spotlight 全部用模拟预设数据：
+    // #tms-requests、图例 #tms-input/output/cache-val、中文大写
+    // #tms-total-cn 一并写（口径一致），不依赖、不混入真实快照。
+    // 演示结束由 _tourClearDemo 还原。
+    const numEl = $("tms-total");
+    const reqEl = $("tms-requests");
+    const cnEl = $("tms-total-cn");
+    const legendEls = {
+      input:  $("tms-input-val"),
+      output: $("tms-output-val"),
+      cache:  $("tms-cache-val"),
+    };
+    const barEls = {
+      input:  $("tms-seg-input"),
+      output: $("tms-seg-output"),
+      cache:  $("tms-seg-cache"),
+    };
+    // 记下原值（首个 tick 里真实渲染的值），清理时还原
+    _tourRollState = {
+      numEl, reqEl, cnEl, legendEls, barEls,
+      numText: numEl ? numEl.textContent : null,
+      numMinWidth: numEl ? numEl.style.minWidth : null,
+      reqText: reqEl ? reqEl.textContent : null,
+      reqMinWidth: reqEl ? reqEl.style.minWidth : null,
+      cnText: cnEl ? cnEl.textContent : null,
+      legendText: {
+        input:  legendEls.input  ? legendEls.input.textContent : null,
+        output: legendEls.output ? legendEls.output.textContent : null,
+        cache:  legendEls.cache  ? legendEls.cache.textContent : null,
+      },
+      barW: {
+        input:  barEls.input  ? barEls.input.style.width : null,
+        output: barEls.output ? barEls.output.style.width : null,
+        cache:  barEls.cache  ? barEls.cache.style.width : null,
+      },
+    };
+    const target = 1284632;   // 模拟总消耗
+    const targetReq = 812;    // 模拟请求数
+    // 三段条演示占比 + 图例值（口径一致：58/32/10 × 1,284,632）
+    const segs = [
+      ["input",  58, Math.round(target * 0.58)],
+      ["output", 32, Math.round(target * 0.32)],
+      ["cache",  10, Math.round(target * 0.10)],
+    ];
+    const t0 = performance.now();
+    const dur = 1600;
+    const myGen = ++_tourRollGen;
+    const step = (now) => {
+      // 已被清理（_tourClearDemo 递增 gen）→ 停写 DOM，避免残留演示值
+      if (myGen !== _tourRollGen) return;
+      const p = Math.min(1, (now - t0) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const t = Math.round(target * eased);
+      if (numEl) {
+        numEl.textContent = fmtTokens(t);
+        numEl.style.minWidth = (String(numEl.textContent).length + 1) + "ch";
+      }
+      if (reqEl) reqEl.textContent = fmtNum(Math.round(targetReq * eased));
+      if (cnEl) {
+        const cn = I18N.lang === "zh" ? toFormalCn(t) : fmtTokens(t);
+        if (cnEl.textContent !== cn) cnEl.textContent = cn;
+      }
+      segs.forEach(([k, w, v]) => {
+        const b = barEls[k];
+        if (b) b.style.width = (w * eased).toFixed(2) + "%";
+        const l = legendEls[k];
+        if (l) l.textContent = fmtTokens(Math.round(v * eased));
+      });
+      if (p < 1) setTimeout(() => step(performance.now()), 24);
+    };
+    // 演示期间把 spotlight sig 置空 —— 否则演示值被写成 #tms-total 后，
+    // 若真实快照的 (lang|req|total) 恰好等于演示结束时的 sig，后续真实
+    // tick 会命中短路由不重渲染，真实数据就一直停留在演示后的 0/空态。
+    lastSpotlightSig = null;
+    setTimeout(() => step(performance.now()), 40);
+  }
+  // 章节1 步骤2：上游统计卡片 —— 直接在真实 #card-upstream-body 里写
+  // 3 条模拟预设上游行（复用 renderUpstream 的真实行结构 + bump 波纹类），
+  // 让扫光效果跑在真实容器内。原内容（真实数据行）由 _tourClearDemo 还原。
+  // 首次启动无上游时 body 是空的，还原子集为空 —— 还原后保持空，真实数据
+  // 由 resume 后的 500ms 轮询照常写入。
+  const _TOUR_UPSTREAMS = [
+    // 按次数计费：显示 5h / 周 / 月请求数 + 5h 释放倒计时。
+    // 1/3 无动画（安静展示结构），2 循环红色调用波纹（bump），4 循环绿色
+    // 释放波纹（decreased）。
+    { name: "deepseek官方",  mode: "count", win: [418, 1862, 7361], bump: false, decrease: false, rel: "12m" },
+    { name: "chatgpt plus",  mode: "count", win: [276, 1054, 5123], bump: true,  red: true,       rel: "38m" },
+    { name: "claude",        mode: "count", win: [102, 488, 2046],  bump: false, decrease: false, rel: "48m" },
+    { name: "火山coding Plan", mode: "count", win: [86, 312, 1452], bump: false, decrease: true,  rel: "<1m" },
+  ];
+  function _tourDemoRipple() {
+    const body = $("card-upstream-body");
+    if (!body) return;
+    if (!_tourRippleState) {
+      _tourRippleState = {
+        body,
+        html: body.innerHTML,          // 原真实行（或空），_tourClearDemo 还原
+        lastUpstreamCounts: lastUpstreamCounts,  // 快照 diff 基线
+        hadBumped: bumpedUpstreams.size > 0,     // 真实 bump 保活集合非空标记
+      };
+    }
+    const rows = _TOUR_UPSTREAMS.map(u => {
+      // tour-demo-row：演示专用样式钩子（文字悬浮在波纹之上、去金色扫光，
+      // 见 styles-20260817.css 的 .tour-demo-row 规则 —— 只影响演示行）。
+      const cls = ["upstream-row", "upstream-row-clickable", "tour-demo-row"];
+      if (u.bump) {
+        cls.push("upstream-row-bumped");                     // 调用波纹（请求进来）
+        // 教程文字说「闪过红色动画」：演示专用样式把 bump 波纹染成红色
+        // （真实 bump 用 --button-primary 深色，这里只影响演示行）。
+        if (u.red) cls.push("tour-bump-red");
+      } else if (u.decrease) cls.push("upstream-row-decreased"); // 绿色释放波纹（5h 释放）
+      return `
+      <div class="${cls.join(" ")}" data-upstream="${u.name}"
+           title="查看按模型拆分的详细调用情况">
+        <div class="upstream-name"><span class="upstream-name-text" data-i18n-keep>${u.name}</span></div>
+        <div class="upstream-windows">
+          <div class="upstream-window"><span class="upstream-window-label">5h</span>
+            <span class="upstream-window-value">${u.win[0]}</span></div>
+          <div class="upstream-window"><span class="upstream-window-label">${t("周")}</span>
+            <span class="upstream-window-value">${u.win[1]}</span></div>
+          <div class="upstream-window"><span class="upstream-window-label">${t("月")}</span>
+            <span class="upstream-window-value">${u.win[2]}</span></div>
+        </div>
+        <div class="upstream-release"><span class="upstream-release-label" data-i18n="5h 释放">${t("5h 释放")}</span>
+          <span class="upstream-release-value">${u.rel}</span></div>
+      </div>`;
+    }).join("");
+    body.innerHTML = rows;
+    // 快照基线清空：resume 后首个真实 tick 会把它当"全新数据"重建行，
+    // bump 类带 live-ripple 波纹跑一整个周期，干净无残留。
+    lastUpstreamCounts = {};
+    // 卡片 sig 置空：真实 tick 要重渲染（见 lastSpotlightSig 注释）。
+    lastCardsSig = null;
+  }
+  // 章节2 步骤2：主窗实时视图 —— 直接演示「进行中的请求会显示在这里」，
+  // 写进真实 #card-live-body（上一入口步骤已切到实时页，容器可见）。
+  //
+  // 演示内容（要求）：第一个请求**始终存在**，第二个请求出现时第一个仍然
+  // 在场 —— 两条并存常驻，不复位（见时间轴注释）。预览文字用乱码模拟
+  // token 流，live 徽标跑马灯 + 进度条扫光无限循环，两条都是「请求正在流」。
+  //
+  // 真实 GUI 的时序问题：主窗创建为 show:false，Python 在 TCP 连上后才
+  // show()（_connected.wait(10s)），而教程在 DOM 加载 ~700ms 就自动开始。
+  // 若演示是一次性 4s 序列，会在窗口还不可见时全部播完，用户只看到停留在
+  // 「实时流入口」气泡、实时卡空的 —— 就是「始终显示入口、不切到实际效果」
+  // 的根因。因此演示**常驻**：即使窗口晚 10s 显示，两条请求始终在播。
+  // 若切到本步时实时视图还没显示（窗口不可见/未切页），先不播，等视图
+  // 真正可见的那帧再开（_tourVisibleCheck 轮询）。轮询全程暂停
+  // （tourActive），真实 tick 不会把演示盖掉；_tourClearDemo 还原。
+  let _tourSeqGen = 0;          // 代际：清理时递增，动画定时器立即停
+  let _tourLiveCheckTimer = null;
+  function _tourLiveVisible() {
+    const v = document.querySelector('.view[data-view="live"]');
+    return !!v && !v.hidden;
+  }
+  function _tourDemoLive() {
+    const body = $("card-live-body");
+    if (!body) return;
+    const myGen = ++_tourSeqGen;
+    // 视图还没可见（真实 GUI 窗口刚加载/还在隐藏）：等可见那帧再开，
+    // 否则一次性序列在不可见时播完，用户看不到实际效果（见函数头注释）。
+    // 注意：这里不能再调 _tourClearSeq() —— 它递增 _tourSeqGen 会把自己刚
+    // 捕获的 myGen 弄失效，重试定时器会因代际不符直接停掉（探针 seq-gate
+    // 实测：视图恢复可见后演示不再补播）。入口的 ++_tourSeqGen 已足以作废
+    // 上一代际的链，这里只需清掉待飞的检查定时器再排一轮。
+    if (!_tourLiveVisible()) {
+      clearTimeout(_tourLiveCheckTimer);
+      const myCheck = ++_tourSeqGen;
+      _tourLiveCheckTimer = setTimeout(() => {
+        if (myCheck !== _tourSeqGen) return;
+        _tourLiveCheckTimer = null;
+        _tourDemoLive();               // 重入：此时视图可见，正式开播
+      }, 200);
+      return;
+    }
+    if (!_tourLiveState) {
+      _tourLiveState = {
+        body,
+        html: body.innerHTML,     // 原真实行（或空），_tourClearDemo 还原
+        lastLiveSig: lastLiveSig, // 真实渲染 sig 基线
+      };
+    }
+    // 乱码预览：data-i18n-keep 不翻译，保持原样（模拟 token 流打出的无意义字符）。
+    const preview = "锟斤拷�~!@#$%^&*()_+…";
+    const rows = [
+      { model: "claude-sonnet-4-6", platform: "anthropic", age: "12.3s", pct: 62 },
+      { model: "deepseek-v3",       platform: "deepseek",  age: "8.1s",  pct: 38 },
+    ];
+    const rowHtml = (r, i) => `
+      <div class="live-row" data-tour-seq="${i}">
+        <span class="live-phase live-phase-streaming">streaming</span>
+        <div class="live-meta">
+          <span class="live-meta-model" data-i18n-keep>${r.model} · ${r.platform}</span>
+          <div class="live-progress"><div class="live-progress-fill" style="width:${r.pct}%"></div></div>
+          <div class="live-preview" data-i18n-keep>${preview}</div>
+        </div>
+        <span class="live-age">${r.age}</span>
+      </div>`;
+    body.innerHTML = rows.map(rowHtml).join("");
+    const rowsEl = Array.from(body.querySelectorAll(".live-row"));
+    // 复位：全部隐藏（opacity 0 / 无动画）
+    rowsEl.forEach((el) => {
+      el.classList.add("tour-seq-exit");
+      el.style.opacity = "0";
+      el.style.transform = "translateY(-6px)";
+    });
+    const setPhase = (i, cls) => {
+      const el = rowsEl[i];
+      if (!el) return;
+      if (myGen !== _tourSeqGen) return;   // 已被清理 → 停
+      el.classList.remove("tour-seq-enter", "tour-seq-exit", "tour-seq-held");
+      el.classList.add(cls);
+      el.style.opacity = "";
+      el.style.transform = "";
+    };
+    // 要求：第一个请求**始终存在**；第二个请求出现时第一个仍然在场 —— 两条
+    // 并存常驻，不再退场。时间轴：t=0 请求1 进（常驻）；t=2s 请求2 进（常驻）。
+    // 两条的 streaming 徽标/进度条/乱码跑马灯持续循环，就是真实「多请求并发
+    // 在流」的观感；真实 GUI 主窗晚显示也始终有实际效果。
+    setTimeout(() => { if (myGen === _tourSeqGen) setPhase(0, "tour-seq-enter"); }, 0);
+    setTimeout(() => { if (myGen === _tourSeqGen) setPhase(1, "tour-seq-enter"); }, 2000);
+    lastLiveSig = null;
+  }
+  function _tourClearSeq() {
+    _tourSeqGen++;
+    if (_tourLiveCheckTimer) { clearTimeout(_tourLiveCheckTimer); _tourLiveCheckTimer = null; }
+  }
+  // 章节2 步骤2：实时流侧栏 —— 有真实侧栏时经 bridge 注入侧栏窗口做真实
+  // 跨窗聚焦（_tourFocusPanel，同时带请求到达动画）；无侧栏时主窗 #tour-demo
+  // 里画一个迷你侧栏模拟：先画一个悬浮球（ghost_ball 形态），动画展开成
+  // 侧栏面板（复刻真实 live_panel 的 endpoint 卡：上游名 + phase 徽标 +
+  // api-key + 入/出向 wire + 思考流），随后请求卡依次流入。
+  let _tourPanelGen = 0;   // 迷你侧栏演示代际（清理时递增停链）
+  // 章节2 步骤3 迷你侧栏模拟（无真实侧栏时的演示）。
+  //
+  // 时间轴（第一步，按用户要求 —— 后续逐容器指引先不做）：
+  //   t=0      球 + 侧栏面板就位（面板收起态）
+  //   t=0.6s   展开动画：悬浮球呼吸放大 + 侧栏面板从球位滑出展开
+  //   t=1.4s   展开完成 —— 停顿 0.8s
+  //   t=2.2s   流的完整模拟动画开始：
+  //              端点 anthropic message → openai chat → deepseek 逐个流入
+  //              思考流开始跑（打字机）；请求卡流入
+  //   t=4.2s   流跑 2s 后 —— 指引卡片出现在侧栏左侧，指向端点区说明功能
+  //            （只出一张，不循环、不逐容器）
+  function _tourDemoPanel() {
+    const d = $("tour-demo");
+    if (!d) return;
+    const myGen = ++_tourPanelGen;
+    d.innerHTML = `
+      <div class="tour-demo-panel">
+        <!-- 指引卡：悬浮在侧栏左侧，箭头指向右侧（复刻真实侧栏的引导带）。
+             初始隐藏，t=4.2s 才出现。 -->
+        <div class="tdp-guide" data-i18n-keep>
+          <span class="tdp-guide-tag">${t("端点与并发请求")}</span>
+          <span class="tdp-guide-text">${t("上游与当前请求的并发列表，实时刷新。")}</span>
+        </div>
+        <!-- 球 + 面板横排（复刻真实侧栏：球帽在面板左侧） -->
+        <div class="tdp-ball" data-i18n-keep>●</div>
+        <div class="tdp-slide">
+          <!-- 端点行：三个流式端点逐个流入 -->
+          <div class="tdp-endpoint">
+            <div class="tdp-ep-row">
+              <span class="tdp-ep-upstream" data-i18n-keep>anthropic message</span>
+              <span class="tdp-ep-badge">${t("正在流式输出…")}</span>
+            </div>
+            <div class="tdp-ep-key-row">
+              <span class="tdp-ep-label">api-key</span>
+              <code class="tdp-ep-key" data-i18n-keep>sk-ant-••••••••••••••••••</code>
+            </div>
+            <div class="tdp-ep-wire">
+              <span data-i18n-keep>入 ↑</span><span class="tdp-wire-num" data-i18n-keep>1.2k B/s</span>
+              <span data-i18n-keep>出 ↓</span><span class="tdp-wire-num" data-i18n-keep>8.4k B/s</span>
+            </div>
+          </div>
+          <div class="tdp-endpoint">
+            <div class="tdp-ep-row">
+              <span class="tdp-ep-upstream" data-i18n-keep>openai chat</span>
+              <span class="tdp-ep-badge">${t("正在流式输出…")}</span>
+            </div>
+            <div class="tdp-ep-key-row">
+              <span class="tdp-ep-label">api-key</span>
+              <code class="tdp-ep-key" data-i18n-keep>sk-••••••••••••••••••••••</code>
+            </div>
+            <div class="tdp-ep-wire">
+              <span data-i18n-keep>入 ↑</span><span class="tdp-wire-num" data-i18n-keep>860 B/s</span>
+              <span data-i18n-keep>出 ↓</span><span class="tdp-wire-num" data-i18n-keep>3.1k B/s</span>
+            </div>
+          </div>
+          <div class="tdp-endpoint">
+            <div class="tdp-ep-row">
+              <span class="tdp-ep-upstream" data-i18n-keep>deepseek</span>
+              <span class="tdp-ep-badge">${t("正在流式输出…")}</span>
+            </div>
+            <div class="tdp-ep-key-row">
+              <span class="tdp-ep-label">api-key</span>
+              <code class="tdp-ep-key" data-i18n-keep>sk-••••••••••••••••••••••</code>
+            </div>
+            <div class="tdp-ep-wire">
+              <span data-i18n-keep>入 ↑</span><span class="tdp-wire-num" data-i18n-keep>1.1k B/s</span>
+              <span data-i18n-keep>出 ↓</span><span class="tdp-wire-num" data-i18n-keep>6.2k B/s</span>
+            </div>
+          </div>
+          <!-- 思考流：打字机逐字流出 -->
+          <div class="tdp-think" data-i18n-keep>${t("思考中")} · 分析请求上下文…</div>
+          <!-- 请求卡 -->
+          <div class="tdp-req" data-i18n-keep>POST /v1/messages · 200 OK</div>
+        </div>
+      </div>`;
+    const guide = d.querySelector(".tdp-guide");
+    // ① 展开动画：t=0.6s 球呼吸放大，t=1.4s 面板展开（球先撑、面板后出，
+    //    观感 = 球帽展开成侧栏）。
+    setTimeout(() => {
+      if (myGen !== _tourPanelGen) return;
+      const ball = d.querySelector(".tdp-ball");
+      if (ball) ball.classList.add("tdp-ball-expand");
+    }, 600);
+    // ② 展开完成（t=1.4s）→ 停顿 0.8s → t=2.2s 流模拟开始
+    setTimeout(() => {
+      if (myGen !== _tourPanelGen) return;
+      const slide = d.querySelector(".tdp-slide");
+      if (slide) {
+        slide.classList.add("tdp-slide-open");
+        // 端点逐个流入（anthropic → openai → deepseek）+ 思考流打字机 + 请求卡
+        const eps = slide.querySelectorAll(".tdp-endpoint, .tdp-think, .tdp-req");
+        eps.forEach((el, i) => {
+          if (myGen !== _tourPanelGen) return;
+          el.classList.add("tdp-flow-in");
+          el.style.animationDelay = (i * 0.22) + "s";
+        });
+      }
+    }, 2200);
+    // ③ 流跑 2s 后（t=4.2s）指引卡出现，指向端点区说明功能（只一张）
+    setTimeout(() => {
+      if (myGen !== _tourPanelGen) return;
+      guide.classList.add("tdp-guide-show");
+      // 高亮端点区
+      const tgt = d.querySelector(".tdp-endpoint");
+      if (tgt) tgt.classList.add("tdp-target");
+    }, 4200);
+  }
+  function _tourDemoField(label, hint) { // 章节3：表单字段聚焦
+    const d = $("tour-demo");
+    d.innerHTML = `
+      <div class="tour-demo-field">
+        <span class="tdf-label">${label}</span>
+        <span class="tdf-box">${hint}</span>
+      </div>`;
+  }
+  function _tourDemoOk() {      // 章节3 最后：提交成功
+    const d = $("tour-demo");
+    d.innerHTML = `
+      <div class="tour-demo-ok">
+        <span class="tdok-mark">✓</span>
+        <span>${t("创建成功！")}</span>
+      </div>`;
+  }
+
+  // v0.210：第二章「上游添加」输入框聚焦 —— 模拟真实打字动画，12 字符/秒逐字
+  // 写入真实输入框（#create-name / #create-url / #create-api），**全部字符输入
+  // 完毕并稳定显示后**（最后 400ms 停顿）再启动倒计时进度条。
+  function _tourTypeInto(input, text, onDone) {
+    if (!input) { if (onDone) onDone(); return; }
+    try { input.focus(); } catch (e) {}
+    input.value = "";
+    let i = 0;
+    const iv = setInterval(() => {
+      i++;
+      input.value = text.slice(0, i);
+      try { input.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) {}
+      if (i >= text.length) {
+        clearInterval(iv);
+        // 打完最后一个字符 → 停顿 400ms 让完整输入稳定可见，再启动倒计时
+        setTimeout(() => { if (onDone) onDone(); }, 400);
+      }
+    }, 83);   // 12 字符/秒 → 每字符 ~83ms
+  }
+
+  // v0.210：倒计时进度条 —— 气泡最底部显示进度条（宽度 100%→0 线性收缩，
+  // 时长 = secs 秒），倒计时结束自动切下一张指引卡片。
+  let _tourCountdownTimer = null;
+  function _tourCountdown(secs, onDone) {
+    const bub = $("tour-bubble");
+    let bar = $("tour-countdown");
+    if (!bar && bub) {
+      bar = document.createElement("div");
+      bar.id = "tour-countdown";
+      bar.className = "tour-countdown";
+      bub.appendChild(bar);
+    }
+    const total = Math.max(1, Math.round(secs * 1000));
+    const start = Date.now();
+    const tick = () => {
+      const elapsed = Date.now() - start;
+      const remain = Math.max(0, 1 - elapsed / total);
+      if (bar) bar.style.setProperty("--cd-w", (remain * 100) + "%");
+      if (elapsed >= total) {
+        clearInterval(_tourCountdownTimer);
+        _tourCountdownTimer = null;
+        if (bar) bar.remove();
+        if (onDone) onDone();
+      }
+    };
+    tick();
+    _tourCountdownTimer = setInterval(tick, 50);
+  }
+  function _tourClearCountdown() {
+    if (_tourCountdownTimer) { clearInterval(_tourCountdownTimer); _tourCountdownTimer = null; }
+    const bar = $("tour-countdown");
+    if (bar) bar.remove();
+  }
+
+  // v0.212：模型行添加导致锚点下移后，重定位高亮框（跟随扩展）。
+  function _tourRepositionHl() {
+    const step = tourSteps[tourIndex];
+    if (!step) return;
+    const el = _tourEl(step.anchor);
+    const hl = $("tour-highlight");
+    if (!el || !hl) return;
+    // ⚠ 等一帧：模型行插入 DOM 后布局需稳定，立即读 rect 会拿到旧/中间位置
+    setTimeout(() => {
+      if (tourSteps[tourIndex] !== step) return;   // 已切走
+      let r = el.getBoundingClientRect();
+      if ((r.width === 0 && r.height === 0) || r.height < 20) {
+        let card = null;
+        for (let p = el.parentElement; p && !card; p = p.parentElement) {
+          if (p.classList && p.classList.contains("glass-card")) card = p;
+        }
+        const fb = card || document.querySelector(".hero");
+        if (fb && fb !== el) r = fb.getBoundingClientRect();
+      }
+      const pad = 6;
+      hl.style.setProperty("--tour-l", (r.left - pad) + "px");
+      hl.style.setProperty("--tour-t", (r.top - pad) + "px");
+      hl.style.setProperty("--tour-w", (r.width + pad * 2) + "px");
+      hl.style.setProperty("--tour-h", (r.height + pad * 2) + "px");
+      hl.style.setProperty("--tour-r", Math.min(12, Math.max(6, r.height / 2)) + "px");
+    }, 16);
+  }
+
+  // 模型输入：逐个模型打字 + 回车确认（chip 添加），全部加完调 onDone。
+  // 每个模型添加后重定位高亮框 —— 模型行插入使 #create-chip-input 下移，
+  // 聚焦框必须跟随扩展，否则换行后高亮停在旧位置。
+  function _tourTypeModels(models, onDone) {
+    const chip = document.getElementById("create-chip-input");
+    if (!chip || !models || !models.length) { if (onDone) onDone(); return; }
+    let mi = 0;
+    const typeNext = () => {
+      if (mi >= models.length) { if (onDone) onDone(); return; }
+      try { chip.focus(); } catch (e) {}
+      _tourTypeInto(chip, models[mi], () => {
+        // 回车添加模型（复用表单自带 chip onkeydown）
+        try { chip.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); } catch (e) {}
+        chip.value = "";
+        mi++;
+        _tourRepositionHl();   // 模型行插入 → 锚点下移 → 高亮框跟随
+        setTimeout(typeNext, 200);
+      });
+    };
+    typeNext();
+  }
+
+  const tourChapters = [
+    {
+      id: "home", title: "第 1 章 · 主页面", steps: [
+        // 首步带 view:"overview" —— 从任意页点章节1都先跳回总览，否则
+        // #top-model-spotlight 在隐藏视图里 rect 0，高亮钉在角落。
+        { anchor: "#top-model-spotlight", view: "overview", title: "总 token 栏",
+          body: "这里是全部模型的 token 总消耗：输入、输出、缓存分别统计，一眼看清用量。",
+          demo: _tourDemoRoll },
+        { anchor: "#card-upstream-body", view: "overview", title: "上游统计卡片",
+          body: "可按token或按调用次数统计上游的消耗\n该上游被调用一次时，闪过红色动画\n5小时释放次数时，闪过绿色动画",
+          demo: _tourDemoRipple },
+      ],
+    },
+    {
+      id: "upstream", title: "第 2 章 · 上游添加", steps: [
+        { anchor: "#btn-upstream-new", view: "upstreams", title: "新建上游",
+          body: "进入上游页，点「新建上游」弹出创建表单。",
+          openCreate: true, demo: _tourDemoField.bind(null, "表单", "名称 / URL / API Key") },
+        { anchor: "#create-name", title: "填写名称",
+          body: "给上游起一个唯一名称，之后在切换上游时用这个名字识别。",
+          demo: _tourDemoField.bind(null, t("填写名称"), "claude"),
+          typeValue: "claude", countdown: 3 },
+        { anchor: "#create-url", title: "填写地址",
+          body: "上游 API endpoint，指向你接入的模型服务地址。",
+          demo: _tourDemoField.bind(null, t("填写地址"), "https://api.anthropic.com"),
+          typeValue: "https://api.anthropic.com", countdown: 5 },
+        { anchor: "#create-api", title: "填写 API Key",
+          body: "上游的鉴权密钥，明文保存在本地配置文件。",
+          demo: _tourDemoField.bind(null, t("填写 API Key"), "sk-ant-••••••••••••••"),
+          typeValue: "sk-ant-••••••••••••••••••", countdown: 4 },
+        { anchor: "#create-chips", title: "填写模型",
+          body: "输入允许的模型名，回车逐个添加。",
+          demo: _tourDemoField.bind(null, t("填写模型"), "claude sonnect 4.7 / claude Fable 5"),
+          typeModels: ["claude sonnect 4.7", "claude Fable 5"], countdown: 6 },
+        { anchor: "#create-submit", title: "提交创建",
+          body: "点「创建」保存 —— 上游立即生效，无需重启。",
+          demo: _tourDemoOk, closeCreateAfter: true },
+      ],
+    },
+    {
+      id: "live", title: "第 3 章 · 实时流", steps: [
+        // 步骤1 实时流入口：指引定位到左侧菜单栏「实时」项右侧 —— 气泡整体
+        // 右移到菜单项右侧（left 定位），箭头指向「实时」菜单项；正文说明
+        // 进行中的请求会显示在这里。view:"live" 让章节跳转先落在实时页，
+        // 锚点是菜单项（跨视图常驻）。本步只聚光入口，不做效果演示 ——
+        // 真实请求流效果在下一步（进行中的请求）演示。
+        { anchor: ".nav-item[data-view=\"live\"]", view: "live", title: "实时流入口",
+          body: "正在进行中的请求会显示在这里",
+          bubbleRight: true },                     // 气泡右移到菜单项右侧 + 箭头
+        // 步骤2 主窗实时视图：上一步已切到实时页，#card-live-body 可见。
+        // 用 _tourDemoLive 在真实容器里演示两条请求 2s 间隔切换、不循环，
+        // 播完留一条常驻（live 徽标/进度条/乱码跑马灯继续 —— 主窗晚显示
+        // 也始终看得到「实际效果」，见 _tourDemoLive 函数头注释）。
+        { anchor: "#card-live-body", view: "live", title: "进行中的请求",
+          body: "有正在进行的流会在此显示",
+          demo: _tourDemoLive },
+        // 步骤3 侧栏：有真实侧栏 → bridge 注入侧栏窗口做真实跨窗聚焦；
+        // 无侧栏 → 主窗 #tour-demo 画迷你侧栏模拟（_tourDemoPanel：悬浮球
+        // 展开成侧栏 + 请求卡流入）。
+        { anchor: "#btn-live-panel", title: "实时流侧栏",
+          body: "右侧独立窗口实时展示当前请求：api-key、入/出向 wire、token 用量与思考 / 正文流，方便调试。",
+          demo: _tourDemoPanel,
+          panel: true,     // 真实侧栏存在时经 bridge 注入侧栏窗口聚焦
+          wide: true,      // 气泡放宽容纳「左卡 + 右面板」迷你侧栏
+          noOverlay: true, // 本步完全去掉灰色聚焦层（聚焦侧栏窗口）
+          countdown: 12 }, // 侧栏 walk 6 容器 + 流模拟较长，给足 12s 再自动切
+      ],
+    },
+  ];
+
+
+  // 拍平：chapter 索引 + 全局步进索引
+  let tourSteps = [];
+  let tourChapterOf = [];   // 每步所属章节索引
+  tourChapters.forEach((ch, ci) => {
+    ch.steps.forEach(s => { s._ch = ci; tourSteps.push(s); tourChapterOf.push(ci); });
+  });
+
+  let tourIndex = -1;
+  let _tourResizeHandler = null;
+  let _tourAutoNextTimer = null;   // 自动切换定时器（打字驱动）
+  let _tourTypeFired = false;      // 输入步骤打字防重入（resize 重渲染不重复触发）
+  let _tourRollState = null;   // 数字滚动演示的原值（_tourClearDemo 还原）
+  let _tourRollGen = 0;        // 数字滚动演示代际（清理时递增停写）
+  let _tourRippleState = null; // 上游卡片演示的原内容（_tourClearDemo 还原）
+  let _tourLiveState = null;   // 实时视图演示的原内容（_tourClearDemo 还原）
+
+  function _tourEl(sel) { return document.querySelector(sel); }
+
+  function tourMarkDone() {
+    try { localStorage.setItem(TOUR_KEY, "1"); } catch (_) {}
+  }
+
+  // 还原数字滚动演示改过的真实元素（#tms-total 数字 + 三段条宽度 +
+  // 请求数 + 图例 + 中文大写）。_tourRollGen 递增即令动画 step 停止
+  // 写 DOM（同 spotlightAnimGen 思路），然后按保存的原值还原。若演示
+  // 期间真实数据已到，还原后下一个 tick（500ms）会用真值重写，至多
+  // 闪 0.5s 的旧值，可接受。
+  function _tourRestoreRoll() {
+    _tourRollGen++;
+    if (!_tourRollState) return;
+    const s = _tourRollState;
+    if (s.numEl) {
+      s.numEl.textContent = s.numText != null ? s.numText : "—";
+      s.numEl.style.minWidth = s.numMinWidth != null ? s.numMinWidth : "";
+    }
+    if (s.reqEl) {
+      s.reqEl.textContent = s.reqText != null ? s.reqText : "—";
+      s.reqEl.style.minWidth = s.reqMinWidth != null ? s.reqMinWidth : "";
+    }
+    if (s.cnEl) s.cnEl.textContent = s.cnText != null ? s.cnText : "";
+    for (const k of ["input", "output", "cache"]) {
+      const b = s.barEls[k];
+      if (b) b.style.width = s.barW[k] != null ? s.barW[k] : "0%";
+      const l = s.legendEls[k];
+      if (l) l.textContent = s.legendText[k] != null ? s.legendText[k] : "—";
+    }
+    // 还原后清 sig：下一拍真实 tick 必须重渲染，把真实数据写回来。
+    lastSpotlightSig = null;
+    const root = $("top-model-spotlight");
+    if (root) root.hidden = false;   // 演示期间卡片可能是 visible 的，
+    // 还原后显隐交给真实渲染（有数据显示、无数据隐藏）。
+    _tourRollState = null;
+  }
+  // 还原上游统计卡片演示（章节1 步骤2 写进真实 #card-upstream-body
+  // 的 3 条模拟行）：把保存的原始 innerHTML 写回。原内容若是空（首次
+  // 启动无上游），还原后保持空，真实数据由 resume 后的轮询照常写入。
+  function _tourRestoreRipple() {
+    if (!_tourRippleState) return;
+    const r = _tourRippleState;
+    if (r.body && r.body.isConnected) r.body.innerHTML = r.html;
+    lastUpstreamCounts = r.lastUpstreamCounts;
+    if (!r.hadBumped) {
+      bumpedUpstreams.clear();
+      bumpRemovers.forEach(clearTimeout);
+      bumpRemovers.clear();
+      decreaseRemovers.forEach(clearTimeout);
+      decreaseRemovers.clear();
+    }
+    // 还原后清 sig：下一拍真实 tick 用真值重建卡片（同 lastSpotlightSig）。
+    lastCardsSig = null;
+    lastUpstreamsSig = null;
+    _tourRippleState = null;
+  }
+
+  // 还原实时视图演示（章节2 步骤2 写进真实 #card-live-body 的 3 条模拟
+  // live 行）：把保存的原始 innerHTML 写回。原内容若是空（无进行中请求），
+  // 还原后保持空，真实数据由 resume 后的轮询照常写入。章节2 步骤1 的顺序
+  // 进出场演示也写进同一个真实容器 —— 一并还原（_tourClearSeq 取消定时链）。
+  function _tourRestoreLive() {
+    _tourClearSeq();
+    _tourPanelGen++;                     // 停掉迷你侧栏请求卡流入定时器
+    if (!_tourLiveState) return;
+    const s = _tourLiveState;
+    if (s.body && s.body.isConnected) s.body.innerHTML = s.html;
+    lastLiveSig = s.lastLiveSig;
+    _tourLiveState = null;
+  }
+
+  function _tourClearDemo() {
+    const d = $("tour-demo");
+    if (d) { d.innerHTML = ""; d.hidden = true; }
+    _tourClearCountdown();
+    _tourRestoreRoll();
+    _tourRestoreRipple();
+    _tourRestoreLive();
+    // 真实侧栏演示序列：离开步骤时收回球帽 + 清高亮/请求行。
+    _tourClearPanelSeq();
+    _tourRun_lastStep = null;   // 教程结束/重放：下次 _tourRun 重新清序列
+    _tourOpenCreateFired = false;   // 第6步延迟开modal：重放时允许再次延迟触发
+    // 关掉真实创建 modal（章节3 演示用真实表单，走完要还原）
+    const ov = $("create-overlay");
+    if (ov && !ov.hidden) {
+      ov.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+  }
+
+  // 侧栏演示序列（真实侧栏路径）—— 第一步分镜（后续逐容器指引先不做）：
+  //   t=0      桥注入真实展开侧栏（补间约 0.7s）
+  //   t=2.2s   展开完成 + 停顿 0.8s → 流的完整模拟动画（demo "flow"：
+  //            anthropic message / openai chat / deepseek 三端点流入 +
+  //            思考流打字机 + 请求卡）
+  //   t=4.2s   流跑 2s 后 —— 指引卡**裸悬浮**在主窗之上（fixed 定位到侧栏
+  //            左侧，靠 getPanelGeometry 拿侧栏屏幕坐标），指向端点区说明
+  //            功能（只出一张，不循环、不逐容器）。侧栏窗口本身不左扩、
+  //            不铺底、无引导带 —— 卡片完全由主窗渲染，浮在一切之上。
+  // 离开步骤（_tourClearPanelSeq）清侧栏演示 + 收回球帽。
+  // 侧栏教程与主窗口**完全无关**：侧栏展开、流模拟、指引卡全部在侧栏窗口
+  // 自己内部渲染（经 bridge 注入 __tourPanel 协议）。主窗不画卡、不画迷你
+  // 模拟、不碰侧栏几何 —— 仅保留本步骤的气泡正文。
+  let _tourPanelSeqTimer = null;
+  let _tourPanelSeqGen = 0;
+  // 侧栏序列已启动的步骤标记 —— _tourRun 每次（含 resize 重跑）都会调
+  // _tourFocusPanel，若每次都重启 4.2s 定时链，指引卡永远等不到出现。
+  // 用 _tourPanelSeqStep 记住本步骤已启动，重复进入不再重启（离开步骤时
+  // _tourClearPanelSeq 清掉）。
+  let _tourPanelSeqStep = null;
+  // _tourRun 上一次处理的 step（resize 重入同步骤时不清侧栏序列）
+  let _tourRun_lastStep = null;
+  let _tourOpenCreateFired = false;   // 第6步「新建上游」延迟打开 modal 的防重入标志
+  function _tourFocusPanel(step) {
+    // 侧栏聚焦：先**探测**真实侧栏桥是否可用（expand 调用返回
+    // available:true = 侧栏窗口在线）—— 可用则整段演示（展开 + 流模拟 +
+    // 侧栏窗口内裸悬浮指引卡）全在真实侧栏里播，主窗零参与；不可用
+    // （无桥 / 无侧栏窗）回退主窗迷你 _tourDemoPanel。
+    // ⚠ 唯一可靠判据 = expand 调用的返回值。lastSnap 可能未到、
+    // api 方法引用恒存在 —— 都不能用来预判。
+    if (_tourPanelSeqStep === step) return;   // 本步骤已启动，勿重启
+    const J = (obj) => JSON.stringify(obj);
+    let probe;
+    try {
+      probe = api.tourPanelHighlight(J({ action: "expand" }));
+    } catch (e) {
+      probe = Promise.reject(e);
+    }
+    // 桥超时 3s（_call 默认）；无桥时 _call 直接返回 null。
+    Promise.race([
+      probe,
+      new Promise(r => setTimeout(() => r(null), 3500)),
+    ]).then((res) => {
+      if (_tourPanelSeqStep === step) return;   // 已启动（不太可能）
+      if (res && res.ok && res.available) {
+        // ---- 真实侧栏路径 ----
+        _tourPanelSeqStep = step;
+        const myGen = ++_tourPanelSeqGen;
+        // v0.208：卡片内容（章节/步骤标题 + 正文）已移往侧栏窗口左侧渲染 →
+        // 主窗气泡只留底部导航按钮，隐藏重复文案。
+        const bub = $("tour-bubble");
+        if (bub) bub.classList.add("tour-bubble-panel");
+        const call = (obj) => api.tourPanelHighlight(J(obj)).catch(() => {});
+        const guideW = (w) => (typeof api.setTourGuideWidth === "function"
+          ? api.setTourGuideWidth(w).catch(() => {}) : null);
+        // t=0 已 expand（探测调用即展开，_anim_resize 补间约 0.7s）；
+        // 50ms 后上引导带（窗口左扩 300px 透明带 —— 卡片裸悬浮区，球帽被
+        // 推到带右侧，卡浮在带内=侧栏左侧，不压面板内容）。
+        setTimeout(() => { if (myGen === _tourPanelSeqGen) guideW(300); }, 50);
+        // t=0.6s 悬浮球卡：指向球帽，说明可点击展开/收起；然后走 tour 已实现的
+        // 真实收起/展开动画（bridge collapse/expand → _apply_expanded_state +
+        // _anim_resize，含 v0.184.2 球帽延迟翻转修复 —— 绝不直接塌 body.collapsed，
+        // 那会把球帽拉满窗再缩小，复现旧 bug）。
+        setTimeout(() => {
+          if (myGen !== _tourPanelSeqGen) return;
+          call({ action: "guide", selector: "#cap-ball",
+                 title: "悬浮球", body: "可点击悬浮球展开或收起侧边栏。" });
+        }, 600);
+        setTimeout(() => { if (myGen === _tourPanelSeqGen) call({ action: "collapse" }); }, 1600);
+        setTimeout(() => { if (myGen === _tourPanelSeqGen) call({ action: "expand" }); }, 2800);
+        // t=3.8s（展开完成）流的完整模拟动画 + 指引卡（侧栏窗口内播，从端点区起）
+        setTimeout(() => { if (myGen === _tourPanelSeqGen) call({ action: "demo", type: "flow" }); }, 3800);
+        _tourPanelSeqTimer = null;
+      } else {
+        // ---- 回退：主窗迷你侧栏模拟 ----
+        const demo = $("tour-demo");
+        if (demo) {
+          demo.hidden = false;
+          if (step.demo) step.demo();
+        }
+      }
+    }).catch(() => {});
+  }
+  function _tourClearPanelSeq() {
+    _tourPanelSeqGen++;
+    _tourPanelSeqStep = null;
+    if (_tourPanelSeqTimer) { clearTimeout(_tourPanelSeqTimer); _tourPanelSeqTimer = null; }
+    const bub = $("tour-bubble");
+    if (bub) bub.classList.remove("tour-bubble-panel");   // 恢复主窗气泡文案
+    if (typeof api.setTourGuideWidth === "function") {
+      api.setTourGuideWidth(0).catch(() => {});   // 收回引导带（窗口左扩复原）
+    }
+    if (typeof api.tourPanelHighlight === "function") {
+      api.tourPanelHighlight(JSON.stringify({ action: "clear" })).catch(() => {});
+      api.tourPanelHighlight(JSON.stringify({ action: "collapse" })).catch(() => {});
+    }
+  }
+
+  function _tourRun(step) {
+    // 上一步若有演示在跑/占着真实元素，先还原。正常 next/prev/跳章节
+    // 都经过这里 —— 不清的话 step1 的滚动会一直写到 finish 才被
+    // _tourClearDemo 还原，中途切走会残留演示值；步骤2 的模拟上游行
+    // 也会留着盖住真实数据，直到下个轮询 tick。
+    // ⚠ 同一步骤重入（resize 触发 _tourRun）不能清侧栏序列 —— 会把
+    // 已设的引导带 w=300 清成 0，又不重设（_tourPanelSeqStep guard 让
+    // _tourFocusPanel return）。只在步骤真正变化时清。
+    if (_tourRun_lastStep !== step) {
+      const prevStep = _tourRun_lastStep;
+      _tourRun_lastStep = step;
+      _tourOpenCreateFired = false;   // 步骤变化 → 重置「第6步延迟开modal」防重入
+      _tourTypeFired = false;         // 步骤变化 → 允许下一次输入步骤重新打字
+      // v0.210：离开「提交创建」步骤（closeCreateAfter）时才关闭真实 modal ——
+      // 否则进入第7步 modal 已被关，锚点 #create-submit 消失，指引卡跳左上角。
+      if (prevStep && prevStep.closeCreateAfter) {
+        const ovPrev = $("create-overlay");
+        if (ovPrev && !ovPrev.hidden) {
+          ovPrev.hidden = true;
+          document.body.classList.remove("modal-open");
+        }
+      }
+      _tourRestoreRoll();
+      _tourRestoreRipple();
+      _tourRestoreLive();
+      _tourClearPanelSeq();   // 离开侧栏步骤：收回真实侧栏 + 清高亮/请求行
+    }
+    // 侧栏步骤（step.noOverlay）：**完全去掉灰色聚焦层**。.tour-highlight
+    // 的 box-shadow 全屏压暗是「灰色聚焦底色」，教程聚焦侧栏时它盖到侧栏
+    // 外面，观感很差。本步隐藏 highligh（display:none），其它步骤照常。
+    const hlEl = $("tour-highlight");
+    const bubEl = $("tour-bubble");
+    if (hlEl) hlEl.style.display = step.noOverlay ? "none" : "block";
+    // 跨视图步骤先切页。定位延迟：
+    //  - 切了视图 → 等 .view 的 view-enter 动画（0.28s）播完再量；
+    //  - 同视图 → 等一个宏任务 tick（requestAnimationFrame 在隐藏/无头
+    //    窗口不触发，用 setTimeout 保证定位在探针里也能执行）。
+    // 切视图步骤先切页；记录是否真的切换（同视图的 step.view 不算 ——
+    // 只在真的切视图时才延迟定位等 view-enter 播完，否则内容+位置同步提交）。
+    const viewSwitched = !!(step.view && currentView !== step.view);
+    if (viewSwitched) setView(step.view);
+    // 章节3 第6步「新建上游」：先聚焦按钮 + 指引卡，等 2s 后再真实打开创建 modal，
+    // 表单弹出的**同时**自动跳转到第7步（字段聚焦）。防重入：resize 重跑 _tourRun
+    // 不重复触发（_tourRun_lastStep 变才重置标志）。
+    if (step.openCreate && !_tourOpenCreateFired) {
+      _tourOpenCreateFired = true;
+      const trigger = _tourEl(".js-open-create");
+      if (trigger) setTimeout(() => {
+        try { trigger.click(); } catch (e) {}
+        _tourNext();   // 表单弹出同时自动进入第7步
+      }, 2000);
+    }
+    // 章节3 最后：提交演示走完即关闭真实 modal（演示完自动还原，
+    // 不真实提交 —— _tourClearDemo 兜底再关一次，这里是提前关让
+    // 「完成」按钮落在干净的页面上）。
+    if (step.closeCreate) {
+      const ov = $("create-overlay");
+      if (ov && !ov.hidden) {
+        ov.hidden = true;
+        document.body.classList.remove("modal-open");
+      }
+    }
+    // 演示动画（若该步有 demo）。
+    // 侧栏步骤（panel:true）：先由 _tourFocusPanel 探测真实侧栏桥是否
+    // 可用（expand 调用返回 available:true）—— 可用则整段演示（展开 +
+    // 流模拟 + 指引卡）全在真实侧栏窗口里播，主窗迷你模拟不渲染；
+    // 不可用（无桥/无侧栏窗）才回退主窗迷你 _tourDemoPanel。
+    // ⚠ 不能靠 lastSnap.live_panel 或「api 方法存在与否」预判 —— 前者
+    // 快照未到会误判，后者在探针环境恒真。唯一可靠判据 = 桥调用结果。
+    const demo = $("tour-demo");
+    if (step.panel) {
+      demo.hidden = true;
+      demo.innerHTML = "";
+      _tourFocusPanel(step);
+    } else if (step.demo) {
+      demo.hidden = false;
+      step.demo();
+    } else {
+      demo.hidden = true;
+      demo.innerHTML = "";
+    }
+
+    // v0.208：同视图步骤**同步**定位 —— 内容已在 _tourRender 立即设置、位置
+    // 立即算好提交，两者同一帧（点「下一步」时内容 + 卡片/聚光窗一起动，不再
+    // 先换字再瞬移）。切视图步骤仍需等 view-enter 动画播完再量（380ms），
+    // 此时内容描述的是即将进入的视图，先出字再等视图进入是合理观感。
+    const doPosition = () => {
+      const el = _tourEl(step.anchor);
+      if (!el) { console.warn("[tour] anchor missing:", step.anchor); return; }
+      // 先把锚点滚进视口：教程开始 / 章节跳转时 .main 滚动容器可能停在
+      // 旧视图的滚动位置（用户切走前滚到过下方），或总览页内容比窗口高、
+      // 停在非顶部 —— 锚点会在视口外，getBoundingClientRect 给出的坐标
+      // 为负/超界，高亮和气泡就飘到屏幕外。滚回顶部即可（总览页锚点都
+      // 在上半屏；total 栏在顶部，上游卡在上部）。scrollTop 立即生效，
+      // 不依赖 rAF/动画，随定位 setTimeout 一起跑。
+      const mainScroller = document.querySelector(".main");
+      if (mainScroller && mainScroller.scrollTop > 0) mainScroller.scrollTop = 0;
+      let r = el.getBoundingClientRect();
+      // 首次启动无数据时的兜底：总 token 栏 #top-model-spotlight 在
+      // grandTotal<=0 时 hidden（rect 0×0）、上游卡片空态 body 高度≈0，
+      // 聚光灯若落在 0×0 上会钉在页面左上角。hidden/0 高 → 退到父卡片
+      // （.glass-card 有标题+padding，高度稳定）或 hero。
+      if ((r.width === 0 && r.height === 0) || r.height < 20) {
+        let card = null;
+        for (let p = el.parentElement; p && !card; p = p.parentElement) {
+          if (p.classList && p.classList.contains("glass-card")) card = p;
+        }
+        const fb = card || document.querySelector(".hero");
+        if (fb && fb !== el) r = fb.getBoundingClientRect();
+      }
+      const pad = 6;
+      const hl = $("tour-highlight");
+      hl.style.setProperty("--tour-l", (r.left - pad) + "px");
+      hl.style.setProperty("--tour-t", (r.top - pad) + "px");
+      hl.style.setProperty("--tour-w", (r.width + pad * 2) + "px");
+      hl.style.setProperty("--tour-h", (r.height + pad * 2) + "px");
+      hl.style.setProperty("--tour-r", Math.min(12, Math.max(6, r.height / 2)) + "px");
+      // 气泡：目标下方，放不下翻到上方；左右贴边限幅。
+      const vw = window.innerWidth, vh = window.innerHeight;
+      // 侧栏步骤（step.wide）：气泡放宽到 ~560px —— 迷你侧栏演示要并排容纳
+      // 左侧指引卡（184px）+ 右侧侧栏面板（~330px），默认 360 宽会挤爆。
+      const wideMax = step.wide ? 560 : 360;
+      const bw = Math.min(wideMax, vw - 24);
+      const bh = bubEl.offsetHeight || 200;
+      bubEl.classList.toggle("tour-bubble-anchored-right", !!step.bubbleRight);
+      bubEl.classList.toggle("tour-bubble-wide", !!step.wide);
+      let bx, by;
+      if (step.bubbleRight) {
+        // 指引卡片实际定位在左侧菜单栏右边 —— 气泡左缘对齐菜单项右缘 + 间距，
+        // 垂直居中于菜单项；箭头（CSS ::before）在气泡左缘指向菜单项。
+        bx = r.right + 16;
+        bx = Math.max(12, Math.min(vw - bw - 12, bx));
+        by = r.top + r.height / 2 - bh / 2;
+        by = Math.max(12, Math.min(vh - bh - 12, by));
+      } else {
+        bx = r.left + r.width / 2 - bw / 2;
+        bx = Math.max(12, Math.min(vw - bw - 12, bx));
+        by = r.bottom + pad + 14;
+        if (by + bh > vh - 12) by = Math.max(12, r.top - pad - bh - 14);
+      }
+      bubEl.style.left = bx + "px";
+      bubEl.style.top = by + "px";
+      bubEl.style.width = bw + "px";
+      // v0.209：切视图步骤定位完成后再显现 —— 否则页面先切、气泡/高亮还在旧
+      // 位置飘着，观感是「页面先变、卡片和聚焦后跳过去」。
+      bubEl.style.opacity = "";
+      if (!step.noOverlay && hlEl) hlEl.style.opacity = "";
+    };
+    if (viewSwitched) {
+      // 切视图：先隐藏气泡 + 高亮（不留在旧位置造成"跳"感），页面切完 + 定位
+      // 完成后（380ms）随页面一起显现。
+      bubEl.style.opacity = "0";
+      if (!step.noOverlay && hlEl) hlEl.style.opacity = "0";
+      setTimeout(doPosition, 380);
+    }
+    else doPosition();
+  }
+
+  function _tourRender() {
+    const step = tourSteps[tourIndex];
+    if (!step) return;
+    const n = tourSteps.length;
+    const ch = tourChapters[step._ch];
+    $("tour-step").textContent = `${tourIndex + 1} / ${n}`;
+    $("tour-chapter-title").textContent = t(ch.title);
+    $("tour-title").textContent = t(step.title);
+    $("tour-body").innerHTML = t(step.body).replace(/\n/g, "<br>");
+    // 章节条：渲染 + active
+    const chapters = $("tour-chapters");
+    chapters.innerHTML = "";
+    tourChapters.forEach((c, ci) => {
+      const b = document.createElement("button");
+      b.className = "tour-chapter" + (ci === step._ch ? " active" : "");
+      b.textContent = t(c.title);
+      b.type = "button";
+      b.addEventListener("click", () => _tourJump(ci));
+      chapters.appendChild(b);
+    });
+    const dots = $("tour-dots");
+    dots.innerHTML = "";
+    for (let i = 0; i < n; i++) {
+      const d = document.createElement("span");
+      d.className = "tour-dot" + (i === tourIndex ? " active" : "");
+      dots.appendChild(d);
+    }
+    const isLast = tourIndex === n - 1;
+    $("tour-next").textContent = t(isLast ? "完成" : "下一步");
+    $("tour-prev").hidden = tourIndex === 0;
+    _tourRun(step);
+    // v0.212：**全局**倒计时自动切换 —— 每张指引卡片**一出现**气泡底部进度条
+    // 就开始跑（100%→0），倒计时结束自动切下一张。时长 = step.countdown 秒
+    // （缺省 5s）。输入步骤（typeValue/typeModels）：进度条同样进入即跑（时长为
+    // countdown，已按打字时长+余量设好），打字动画**并行**演示，不阻塞倒计时。
+    // openCreate 步骤（新建上游）：进度条 2s，由自身 2s 延迟开 modal + 自动跳转。
+    // _tourTypeFired 防重入；window.__tourDisableAuto（探针用）只禁自动切，
+    // 打字演示仍进行（供探针断言输入值）。
+    if (_tourAutoNextTimer) { clearTimeout(_tourAutoNextTimer); _tourAutoNextTimer = null; }
+    _tourClearCountdown();
+    const noAuto = !!window.__tourDisableAuto;
+    const done = () => { if (!noAuto) _tourNext(); };
+    // 输入步骤：进入即启动倒计时（并行打字演示）
+    if (step.typeValue && !_tourTypeFired) {
+      _tourTypeFired = true;
+      const input = _tourEl(step.anchor);
+      if (input) _tourTypeInto(input, step.typeValue, null);
+      if (!noAuto) _tourCountdown(step.countdown || 5, done);
+    } else if (step.typeModels && !_tourTypeFired) {
+      _tourTypeFired = true;
+      _tourTypeModels(step.typeModels, null);
+      if (!noAuto) _tourCountdown(step.countdown || 7, done);
+    } else if (!step.openCreate) {
+      // 普通指引卡片：进入即启动倒计时进度条，倒计时结束自动切下一张
+      if (!noAuto) _tourCountdown(step.countdown || 5, done);
+    }
+    // openCreate：进度条 2s 显示（跳转由 _tourRun 的 2s 延迟负责）
+    if (step.openCreate && !noAuto) _tourCountdown(step.countdown || 2, () => {});
+  }
+
+  function _tourJump(chIdx) {
+    if (tourIndex < 0) return;
+    const ci = tourChapterOf.findIndex((c, i) => c === chIdx && i >= 0);
+    const target = tourChapterOf.indexOf(chIdx);
+    if (target < 0) return;
+    if (_tourAutoNextTimer) { clearTimeout(_tourAutoNextTimer); _tourAutoNextTimer = null; }
+    _tourClearDemo();
+    tourIndex = target;
+    _tourRender();
+  }
+
+  function startTour(fromChapter) {
+    if (tourIndex >= 0) return;          // 已在播放
+    const overlay = $("tour-overlay");
+    if (!overlay) return;
+    _tourClearDemo();
+    overlay.hidden = false;
+    document.body.classList.add("tour-open");
+    // 教程期间暂停 500ms 真实数据轮询 —— 演示用模拟预设数据，轮询会把
+    // 真实快照写回卡片/spotlight 覆盖演示（尤其上游统计卡片直接 innerHTML）。
+    // 结束/跳过时 resume（见 _tourFinish）。tourActive 让暂停在教程全程
+    // 生效：用户点「下一步」的 pointerup → scheduleResumePolling 不会恢复
+    // 轮询，否则下一 tick 就把真实数据盖回演示（见 tourActive 注释）。
+    tourActive = true;
+    pausePolling();
+    tourIndex = (typeof fromChapter === "number") ? tourChapterOf.indexOf(fromChapter) : 0;
+    if (tourIndex < 0) tourIndex = 0;
+    _tourRender();
+    if (_tourResizeHandler) window.removeEventListener("resize", _tourResizeHandler);
+    _tourResizeHandler = () => {
+      const step = tourSteps[tourIndex];
+      if (step) _tourRun(step);
+    };
+    window.addEventListener("resize", _tourResizeHandler);
+  }
+
+  function _tourFinish() {
+    _tourClearDemo();
+    tourIndex = -1;
+    const overlay = $("tour-overlay");
+    if (overlay) overlay.hidden = true;
+    document.body.classList.remove("tour-open");
+    if (_tourResizeHandler) {
+      window.removeEventListener("resize", _tourResizeHandler);
+      _tourResizeHandler = null;
+    }
+    // 恢复真实数据轮询（startTour 暂停的），并用最新快照立即全量重渲
+    // —— 不等 500ms tick，演示时被覆盖的卡片/spotlight 当场还原成真值
+    // （sig 已在还原时清空，这里 renderAll 不会被短路由跳过）。
+    // 先放行 tourActive（教程全程暂停逻辑），再显式恢复轮询：
+    // scheduleResumePolling 的 250ms 定时器若在飞，放行后它自己会把
+    // pollPaused 置 false；没有在飞则这里直接置 false。
+    tourActive = false;
+    if (pollResumeTimer) { clearTimeout(pollResumeTimer); pollResumeTimer = null; }
+    pollPaused = false;
+    if (lastSnap) {
+      renderAll(lastSnap, lastStatus);
+      renderActiveView(lastSnap, lastStatus);
+    }
+    tourMarkDone();
+  }
+
+  function _tourNext() {
+    if (tourIndex < 0) return;           // 未在播放（按钮在 overlay 内不可点，纯防御）
+    if (_tourAutoNextTimer) { clearTimeout(_tourAutoNextTimer); _tourAutoNextTimer = null; }
+    if (tourIndex < tourSteps.length - 1) { tourIndex++; _tourRender(); }
+    else _tourFinish();
+  }
+
+  function _tourPrev() {
+    if (tourIndex < 0) return;
+    if (_tourAutoNextTimer) { clearTimeout(_tourAutoNextTimer); _tourAutoNextTimer = null; }
+    if (tourIndex > 0) { tourIndex--; _tourRender(); }
+  }
+
+  function wireTour() {
+    const next = $("tour-next"), prev = $("tour-prev"), skip = $("tour-skip");
+    if (next) next.addEventListener("click", _tourNext);
+    if (prev) prev.addEventListener("click", _tourPrev);
+    if (skip) skip.addEventListener("click", _tourFinish);
+    const replay = $("btn-tour-replay");
+    if (replay) replay.addEventListener("click", () => startTour(0));
+    // 首次启动自动触发：无完成标记就自动开始。等首帧渲染完（轮询开始前
+    // snapshot 可能还没到，卡片/状态栏位是骨架），短延迟让聚光不落在空位上。
+    let done = false;
+    try { done = localStorage.getItem(TOUR_KEY) === "1"; } catch (_) {}
+    if (!done) {
+      setTimeout(() => startTour(0), 700);
+    }
+  }
+
 // -------------------------------------------------------------------------
     function wireButtons() {
     const btnToggle = $("btn-toggle");
@@ -12049,9 +14166,61 @@
         openUpstreamModels(row.dataset.upstream);
       });
     }
+    // v0.NNN：总览「历史上游」卡 · 彻底删除按钮（document 级委托 ——
+    // 概览卡由 createCardEl 动态建，删除了可能重建）。
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest(".uhist-del");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const row = btn.closest(".uhist-row");
+      const name = row && row.dataset.delUpstream;
+      const plat = (row && row.dataset.delPlatform) || "";
+      if (!name) return;
+      // 二次确认 —— 自定义 confirmModal（与全站一致），danger 红按钮。
+      confirmModal(
+        "彻底删除上游",
+        `彻底删除「${name}」的全部记录？\n这会移除其配置（若仍存在）并清空它在数据库里的全部历史行。此操作不可恢复。`,
+        { ok: "彻底删除", cancel: "取消", danger: true }
+      ).then(ok => {
+        if (!ok) return;
+        api.deleteUpstreamHistory(name, plat).then(res => {
+          if (res && res.ok) {
+            api.refresh();
+          } else {
+            alertModal("彻底删除失败", (res && res.error) || "请确认中继正在运行");
+          }
+        });
+      });
+    });
     const upstreamDetailBox = $("card-upstreams-detail-body");
     if (upstreamDetailBox) {
       upstreamDetailBox.addEventListener("click", (e) => {
+        // v0.NNN：上游页历史上游「彻底删除」按钮。
+        const delBtn = e.target.closest(".upstream-history-delete");
+        if (delBtn) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+          const name = delBtn.dataset.delUpstream;
+          const plat = delBtn.dataset.delPlatform || "";
+          // 二次确认 —— 彻底删除是不可逆操作，用自定义 confirmModal
+          //（替代浏览器原生 confirm，风格与全站一致）。danger 按钮变红。
+          confirmModal(
+            "彻底删除上游",
+            `彻底删除「${name}」的全部记录？\n这会移除其配置（若仍存在）并清空它在数据库里的全部历史行。此操作不可恢复。`,
+            { ok: "彻底删除", cancel: "取消", danger: true }
+          ).then(ok => {
+            if (!ok) return;
+            api.deleteUpstreamHistory(name, plat).then(res => {
+              if (res && res.ok) {
+                api.refresh();
+              } else {
+                alertModal("彻底删除失败", (res && res.error) || "请确认中继正在运行");
+              }
+            });
+          });
+          return;
+        }
         // v0.64：上游卡片右上角的删除 × 按钮。捕获在 row-click 委
         // 托之前，stopImmediatePropagation 阻止向上冒泡到
         // [data-upstream] 委托（否则点 × 会同时触发 focusUpstreamConfig
@@ -12063,26 +14232,50 @@
           e.preventDefault();
           const plat = xBtn.dataset.platform;
           const name = xBtn.dataset.upstream;
-          // 二次确认 —— 删整条 upstream 是不可逆操作（API key
-          // 也跟着没了），浏览器原生 confirm() 足够，比自己写
-          // modal 轻得多。
-          if (!confirm(`确定删除上游 ${plat} / ${name} 吗？\n这条配置（包含 API key）会被永久删除。`)) {
-            return;
-          }
-          // 乐观更新：先把 row 从 DOM 里摘掉，bridge 异步删除
-          // 后下一次 snapshot 自然吻合。
-          const row = xBtn.closest("[data-upstream]");
-          if (row) row.remove();
-          api.removeUpstream(plat, name).then(res => {
-            if (res && res.ok) {
-              // 强制 rebuild，让 sidebar / by_upstream 都立刻反映
-              // 新状态（active 切换 / 行消失）。
-              api.refresh();
-            } else {
-              console.warn("remove_upstream failed:", res && res.error);
-              // 失败时让下一次 poll 重建回来 —— sig 不变说明配置
-              // 没真改，原样渲染回 row。
-            }
+          const doRemoveConfigOnly = () => {
+            // 仅删配置：乐观更新先把 row 摘掉，bridge 异步删除后下次 snapshot 吻合。
+            const row = xBtn.closest("[data-upstream]");
+            if (row) row.remove();
+            api.removeUpstream(plat, name).then(res => {
+              if (res && res.ok) {
+                api.refresh();
+              } else {
+                console.warn("remove_upstream failed:", res && res.error);
+              }
+            });
+          };
+          // 第一弹：告知仅删配置、历史保留；「彻底删除」进第二弹确认。
+          dialogModal({
+            title: "删除上游配置",
+            html: `这条配置会被<b class="dlg-danger">删除</b>，但是<b class="dlg-safe">历史消息和token消耗历史</b>会被保留。\n若你想删除包括消息文件在内的数据，请点击彻底删除。`,
+            buttons: [
+              { label: "彻底删除", value: "purge", danger: true },
+              { label: "取消", value: "__cancel" },
+              { label: "删除", value: "delete", primary: true },
+            ],
+          }).then(choice => {
+            if (choice === "delete") { doRemoveConfigOnly(); return; }
+            if (choice !== "purge") return; // 取消
+            // 第二弹：确认连配置 + 历史一起清。
+            dialogModal({
+              title: "彻底删除上游",
+              html: `确定<b class="dlg-danger">彻底删除配置、清空历史消息和token消耗记录</b>吗？\n这样做虽然可以释放数据库空间，但是<b class="dlg-danger">历史消息内容将无法再被查看，且token消耗总量数字会回退到没有此上游的状态</b>。`,
+              buttons: [
+                { label: "仅删除上游配置", value: "config_only" },
+                { label: "取消", value: "__cancel" },
+                { label: "彻底删除", value: "purge", danger: true },
+              ],
+            }).then(choice2 => {
+              if (choice2 === "config_only") { doRemoveConfigOnly(); return; }
+              if (choice2 !== "purge") return;
+              api.deleteUpstreamHistory(name, plat).then(res => {
+                if (res && res.ok) {
+                  api.refresh();
+                } else {
+                  alertModal("彻底删除失败", (res && res.error) || "请确认中继正在运行");
+                }
+              });
+            });
           });
           return;
         }
@@ -13158,6 +15351,9 @@
     // v0.113n: 界面语言（localStorage）首帧应用 —— 静态区块/子菜单标题
     // 立即生效；动态渲染的区块各自在 render 后调 applyLang()。
     applyLang();
+    // v0.121：引导教程 —— 放 applyLang 之后：气泡文案依赖 t() 已按当前
+    // 语言解析；首次启动自动触发 + 设置页「开始引导」重放都在这里接线。
+    wireTour();
     wireEdgeResize();
     wireTitlebarDrag();
     if (typeof window !== "undefined" && window.addEventListener) {

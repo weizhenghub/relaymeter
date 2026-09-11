@@ -4,7 +4,7 @@
 // Electron 主窗口 preload：给 index.html 的 app.js 一个 `window.pywebview.api.*`
 // 兼容桥。app.js 期望 `await window.pywebview.api.<name>(...)` 返回 Promise。
 // 方法集 = web/app.js 里 `_call("…")` 首参 + 直接 `window.pywebview.api.X` 调用
-// （gen_preload.py 提取，共 101 个）。每次 app.js 增删桥方法后重跑本脚本。
+// （gen_preload.py 提取，共 113 个）。每次 app.js 增删桥方法后重跑本脚本。
 //
 // 注意：**不能用 Proxy** —— contextBridge.exposeInMainWorld 无法克隆
 // new Proxy({}, ...)（"An object could not be cloned."），必须显式枚举。
@@ -21,12 +21,17 @@ const api = {
   clear_logs: makeCall("clear_logs"),
   connectivity_test: makeCall("connectivity_test"),
   create_upstream: makeCall("create_upstream"),
+  delete_message: makeCall("delete_message"),
+  delete_messages_range: makeCall("delete_messages_range"),
+  delete_upstream: makeCall("delete_upstream"),
+  delete_upstream_messages: makeCall("delete_upstream_messages"),
   fetch_conversation: makeCall("fetch_conversation"),
   fetch_requests: makeCall("fetch_requests"),
   get_advanced_switch: makeCall("get_advanced_switch"),
   get_agent_aliases: makeCall("get_agent_aliases"),
   get_autostart: makeCall("get_autostart"),
   get_changelog: makeCall("get_changelog"),
+  get_day_messages: makeCall("get_day_messages"),
   get_error_analysis: makeCall("get_error_analysis"),
   get_float_ball: makeCall("get_float_ball"),
   get_float_ball_topmost: makeCall("get_float_ball_topmost"),
@@ -46,6 +51,10 @@ const api = {
   get_live_panel_tools_always: makeCall("get_live_panel_tools_always"),
   get_live_panel_tools_cap: makeCall("get_live_panel_tools_cap"),
   get_live_panel_tools_clear_timeout: makeCall("get_live_panel_tools_clear_timeout"),
+  get_message_calendar: makeCall("get_message_calendar"),
+  get_message_full: makeCall("get_message_full"),
+  get_message_upstreams: makeCall("get_message_upstreams"),
+  get_message_year: makeCall("get_message_year"),
   get_passthrough_mode: makeCall("get_passthrough_mode"),
   get_passthrough_upstreams: makeCall("get_passthrough_upstreams"),
   get_recent_uas: makeCall("get_recent_uas"),
@@ -55,6 +64,7 @@ const api = {
   get_status: makeCall("get_status"),
   get_storage_info: makeCall("get_storage_info"),
   get_ua_rules: makeCall("get_ua_rules"),
+  get_upstream_messages: makeCall("get_upstream_messages"),
   get_vision_models: makeCall("get_vision_models"),
   move_storage: makeCall("move_storage"),
   opencode_get_config: makeCall("opencode_get_config"),
@@ -95,6 +105,7 @@ const api = {
   set_passthrough_mode: makeCall("set_passthrough_mode"),
   set_show_io_map: makeCall("set_show_io_map"),
   set_theme: makeCall("set_theme"),
+  set_tour_guide_width: makeCall("set_tour_guide_width"),
   set_upstream_default_model: makeCall("set_upstream_default_model"),
   set_upstream_model: makeCall("set_upstream_model"),
   set_vision_models: makeCall("set_vision_models"),
@@ -109,6 +120,7 @@ const api = {
   test_upstream: makeCall("test_upstream"),
   toggle_all_panels: makeCall("toggle_all_panels"),
   toggle_theme: makeCall("toggle_theme"),
+  tour_panel_highlight: makeCall("tour_panel_highlight"),
   update_advanced_switch: makeCall("update_advanced_switch"),
   update_relay_settings: makeCall("update_relay_settings"),
   update_upstream_quota: makeCall("update_upstream_quota"),

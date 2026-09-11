@@ -7,7 +7,7 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">  
 </p>  
 &nbsp;&nbsp; 
-<b>面向所有AI 编程智能体的本地中继，在 Anthropic / OpenAI 之间互转协议，统计所有请求、平台和上游的 token 用量。</b>
+<b>面向所有AI 编程智能体的本地中继，统计所有请求、平台和上游的 token 用量。在 Anthropic / OpenAI 之间互转协议，</b>
 
 
 **1、token统计：**  
