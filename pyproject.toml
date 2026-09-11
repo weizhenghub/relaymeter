@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "relaymeter"
-version = "0.99.2"
+version = "0.100.1"
 description = "RelayMeter — local relay that meters token usage and converts protocols across Claude Code, Codex, and OpenClaw"
 requires-python = ">=3.11"
 dependencies = [

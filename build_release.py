@@ -30,11 +30,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SPEC = ROOT / "relay-gui.spec"
 PYI = ROOT / ".venv-pack" / "Scripts" / "pyinstaller.exe"
-# The Electron runtime lives under the verify clone (npm ci + proxy download).
-VERIFY_ELECTRON = Path(
-    r"C:\relaymeter-verify\relaymeter\src\relay\electron_app"
-)
+# Electron 资产的来源 = 本仓库自己的 src/relay/electron_app（含 node_modules/
+# electron/dist，npm ci 装好后常驻）。原实现指向 C:\relaymeter-verify 的
+# 独立克隆，那份会随仓库推进而变旧 —— 曾导致打包出的 relay_assets 里
+# ball_main.js 等 JS 停留在旧版本（新版刚修的拖拽冻结逻辑没进包）。
+ELECTRON_APP = ROOT / "src" / "relay" / "electron_app"
 DIST = ROOT / "dist" / "RelayMeter"
+
+# 开发期诊断脚本 —— 只在本机手动跑，不被任何入口 require，不进发布包。
+# 命名无统一约定（探针 / 像素分析 / 查色各一套），故用显式集合。
+DEV_PROBE_JS = {
+    "band_check.js", "calib_probe.js", "cap_probe.js", "diag_ball.js",
+    "dump_px.js", "find_blue.js", "hl_probe.js", "hl_px2.js",
+    "panel_tour_probe.js", "pixel_analyze.js", "tour_probe.js",
+    "visual_tour_probe.js",
+}
 
 
 def run_pyinstaller() -> None:
@@ -71,10 +81,18 @@ def assemble_portable(electron_src: Path) -> None:
         print("   !! electron dist missing:", elec_src)
 
     # 3) relay_assets/electron_app/*.js + package.json (ball/panel renderers).
+    #    跳过开发期诊断脚本（DEV_PROBE_JS）—— 它们不被任何入口 require，
+    #    留在发布包里只会让用户看到一堆源码里没有的杂项（源码侧也未提交）。
     app_dst = assets / "electron_app"
     app_dst.mkdir(parents=True, exist_ok=True)
+    skipped = []
     for f in electron_src.glob("*.js"):
+        if f.name in DEV_PROBE_JS:
+            skipped.append(f.name)
+            continue
         shutil.copy2(f, app_dst / f.name)
+    if skipped:
+        print("   skipped dev probes:", ", ".join(sorted(skipped)))
     (electron_src / "package.json").exists() and shutil.copy2(
         electron_src / "package.json", app_dst / "package.json"
     )
@@ -102,7 +120,7 @@ def assemble_portable(electron_src: Path) -> None:
 
 
 def main() -> None:
-    electron_src = VERIFY_ELECTRON
+    electron_src = ELECTRON_APP
     if not (electron_src / "node_modules" / "electron" / "dist" / "electron.exe").exists():
         print("!! Electron runtime not found under", electron_src)
         print("   run:  cd src/relay/electron_app && npm ci")
